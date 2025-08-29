@@ -24,6 +24,27 @@ A role-playing chat application built with Next.js, TypeScript, Redux for the fr
 - Celery for background tasks
 - Redis as message broker
 
+## Environment Security
+
+This project uses environment templates to protect sensitive information:
+
+- `backend/.env.template` - Template for backend environment variables
+- `frontend/.env.local.template` - Template for frontend environment variables
+
+**Important Security Note:**
+- Never commit actual environment files (`.env`, `.env.local`) to version control
+- Only commit the template files (`.env.template`, `.env.local.template`)
+- Copy templates to actual environment files and fill in your values:
+  ```bash
+  # Backend
+  cp backend/.env.template backend/.env
+  
+  # Frontend
+  cp frontend/.env.local.template frontend/.env.local
+  ```
+
+The project includes `.gitignore` files to prevent accidental commits of sensitive environment files.
+
 ## Setup Instructions
 
 ### Prerequisites
@@ -56,28 +77,49 @@ A role-playing chat application built with Next.js, TypeScript, Redux for the fr
    - Update the database settings in `backend/ai_character_chat/settings.py`
 
 5. **Set up environment variables**
-   Create a `.env` file in the backend directory:
-   ```
-   SECRET_KEY=your-secret-key
-   GEMINI_API_KEY=your-gemini-api-key
-   DATABASE_URL=postgresql://user:password@localhost:5432/ai_character_chat
-   REDIS_URL=redis://localhost:6379/0
-   ```
+    Copy the template file and create your `.env` file:
+    ```bash
+    cp backend/.env.template backend/.env
+    ```
+    
+    Edit the `backend/.env` file with your actual values:
+    ```
+    SECRET_KEY=your-django-secret-key-here
+    DEBUG=True
+    GEMINI_API_KEY=your-gemini-api-key-here
+    DATABASE_URL=postgresql://user:password@localhost:5432/ai_character_chat
+    REDIS_URL=redis://localhost:6379/0
+    ```
+    
+    **Important:** Never commit your actual `.env` file to version control. Only the template file `.env.template` should be committed.
 
 6. **Run database migrations**
-   ```bash
-   python manage.py migrate
-   ```
+    ```bash
+    python manage.py migrate
+    ```
 
-7. **Create a superuser (optional)**
-   ```bash
-   python manage.py createsuperuser
-   ```
+7. **Create and apply chat app migrations**
+    ```bash
+    python manage.py makemigrations chat
+    python manage.py migrate chat
+    ```
 
-8. **Start the Django development server**
-   ```bash
-   python manage.py runserver
-   ```
+8. **Verify all migrations are complete**
+    ```bash
+    python manage.py showmigrations
+    ```
+
+9. **Create a superuser (optional)**
+    ```bash
+    python manage.py createsuperuser
+    ```
+
+10. **Start the Django development server**
+    ```bash
+    python manage.py runserver
+    ```
+
+**Note:** The backend server will be available at http://127.0.0.1:8000/ once started. All migrations should be applied without errors for the application to function properly.
 
 9. **Start Celery worker (in a separate terminal)**
    ```bash
@@ -97,10 +139,17 @@ A role-playing chat application built with Next.js, TypeScript, Redux for the fr
    ```
 
 3. **Set up environment variables**
-   Create a `.env.local` file (already provided):
-   ```
-   NEXT_PUBLIC_API_URL=http://localhost:8000/api
-   ```
+    Copy the template file and create your `.env.local` file:
+    ```bash
+    cp frontend/.env.local.template frontend/.env.local
+    ```
+    
+    Edit the `frontend/.env.local` file with your actual values:
+    ```
+    NEXT_PUBLIC_API_URL=http://localhost:8000/api
+    ```
+    
+    **Important:** Never commit your actual `.env.local` file to version control. Only the template file `.env.local.template` should be committed.
 
 4. **Start the development server**
    ```bash
