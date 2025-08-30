@@ -94,13 +94,12 @@ export default function Home() {
       
       // Always include name if available
       if (character.name && character.name.trim()) {
-        promptSections.push(`Character Name: ${character.name}`);
-        promptSections.push(`Role: You are ${character.name}, an AI companion designed for engaging conversation.`);
+        promptSections.push(`Name: ${character.name}`);
       }
       
       // Always include description if available
       if (character.description && character.description.trim()) {
-        promptSections.push(`Background: ${character.description}`);
+        promptSections.push(`Description: ${character.description}`);
       }
       
       // Always include personality if available
