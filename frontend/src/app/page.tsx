@@ -10,6 +10,7 @@ import { apiService } from '@/utils/api';
 
 export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
+  const [hasStartedConversation, setHasStartedConversation] = useState(false);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
 
@@ -30,10 +31,19 @@ export default function Home() {
   const handleSendMessage = async (message: string) => {
     if (!message.trim() || !character) return;
 
+    // Check if this is the first message and create character settings message
+    let finalMessage = message;
+    if (!hasStartedConversation) {
+      // Create intelligent character settings prompt based on available data
+      const characterSettings = generateCharacterPrompt(character, message);
+      finalMessage = characterSettings;
+      setHasStartedConversation(true);
+    }
+
     // Add user message
     const userMessage = {
       id: Date.now().toString(),
-      content: message,
+      content: finalMessage,
       role: 'user' as const,
       timestamp: new Date(),
     };
@@ -45,7 +55,7 @@ export default function Home() {
     try {
       // Send message to backend
       const response = await apiService.sendMessage({
-        message,
+        message: finalMessage,
         character_id: character.id,
       });
 
@@ -72,6 +82,60 @@ export default function Home() {
     } finally {
       dispatch(setLoading(false));
     }
+  };
+
+  // Helper function to generate character prompt based on available data
+  const generateCharacterPrompt = (character: Character, userMessage: string): string => {
+    const promptSections: string[] = [];
+
+    // Character Identity section (always include if name exists)
+    if (character.name && character.name.trim()) {
+      promptSections.push(`=== CHARACTER IDENTITY ===`);
+      promptSections.push(`Character Name: ${character.name}`);
+      promptSections.push(`Role: You are ${character.name}, an AI companion designed for engaging conversation.`);
+      promptSections.push('');
+    }
+
+    // Character Description section (only if has meaningful content)
+    if (character.description && character.description.trim() && character.description !== 'A friendly AI companion ready to chat with you.') {
+      promptSections.push(`=== CHARACTER DESCRIPTION ===`);
+      promptSections.push(`Background: ${character.description}`);
+      promptSections.push('');
+    }
+
+    // Personality Traits section (only if has meaningful content)
+    if (character.personality && character.personality.trim() && character.personality !== 'Helpful, cheerful, and curious.') {
+      promptSections.push(`=== PERSONALITY TRAITS ===`);
+      promptSections.push(`Personality: ${character.personality}`);
+      promptSections.push('');
+    }
+
+    // Physical Appearance section (only if has meaningful content)
+    if (character.appearance && character.appearance.trim() && character.appearance !== 'A friendly digital companion with a warm smile.') {
+      promptSections.push(`=== PHYSICAL APPEARANCE ===`);
+      promptSections.push(`Appearance: ${character.appearance}`);
+      promptSections.push('');
+    }
+
+    // Response Guidelines section (always include if we have any character data)
+    if (promptSections.length > 0) {
+      promptSections.push(`=== RESPONSE GUIDELINES ===`);
+      promptSections.push(`Instructions:`);
+      promptSections.push(`- Respond consistently with your character's traits and background`);
+      promptSections.push(`- Maintain character voice throughout the conversation`);
+      promptSections.push(`- Be engaging and responsive to user input`);
+      if (character.name) {
+        promptSections.push(`- Stay true to ${character.name}'s established character`);
+      }
+      promptSections.push('');
+    }
+
+    // User Message section (always include)
+    promptSections.push(`=== USER MESSAGE ===`);
+    promptSections.push(`User Input: ${userMessage}`);
+    promptSections.push(`Please respond to the following user message while staying in character.`);
+
+    return promptSections.join('\n');
   };
 
   const handleSaveCharacter = async (characterData: Character) => {
@@ -117,7 +181,11 @@ export default function Home() {
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 overflow-hidden">
           {/* Chat Window - Takes 2/3 width on large screens */}
           <div className="lg:col-span-2">
-            <ChatWindow onSendMessage={handleSendMessage} isLoading={false} />
+            <ChatWindow
+              onSendMessage={handleSendMessage}
+              isLoading={false}
+              isFirstMessage={!hasStartedConversation}
+            />
           </div>
 
           {/* Character Info - Takes 1/3 width on large screens */}
@@ -125,16 +193,16 @@ export default function Home() {
             <h2 className="text-lg font-semibold mb-4">Character</h2>
             <div className="text-gray-600">
               <p className="mb-2">
-                <strong>Name:</strong> <span className="text-gray-800">Default Character</span>
+                <strong>Name:</strong> <span className="text-gray-800">{character?.name || 'No character set'}</span>
               </p>
               <p className="mb-2">
-                <strong>Description:</strong> <span className="text-gray-800">A friendly AI companion ready to chat with you.</span>
+                <strong>Description:</strong> <span className="text-gray-800">{character?.description || 'No description'}</span>
               </p>
               <p className="mb-2">
-                <strong>Personality:</strong> <span className="text-gray-800">Helpful, cheerful, and curious.</span>
+                <strong>Personality:</strong> <span className="text-gray-800">{character?.personality || 'No personality set'}</span>
               </p>
               <p>
-                <strong>Appearance:</strong> <span className="text-gray-800">A friendly digital companion with a warm smile.</span>
+                <strong>Appearance:</strong> <span className="text-gray-800">{character?.appearance || 'No appearance set'}</span>
               </p>
             </div>
           </div>
@@ -145,6 +213,7 @@ export default function Home() {
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
             <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
               <CharacterSettings
+                character={character || undefined}
                 onSave={handleSaveCharacter}
                 onCancel={handleCancelSettings}
               />

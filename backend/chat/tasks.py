@@ -47,7 +47,7 @@ def generate_ai_response(message_id, character_id):
                 }]
             }],
             "generationConfig": {
-                "temperature": 0.7,
+                "temperature": 1,
                 "topK": 40,
                 "topP": 0.95,
                 "maxOutputTokens": 1024,

@@ -8,9 +8,10 @@ import { addMessage, setLoading } from '@/store/chatSlice';
 interface ChatWindowProps {
   onSendMessage: (message: string) => void;
   isLoading: boolean;
+  isFirstMessage: boolean;
 }
 
-export default function ChatWindow({ onSendMessage, isLoading }: ChatWindowProps) {
+export default function ChatWindow({ onSendMessage, isLoading, isFirstMessage }: ChatWindowProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
@@ -100,7 +101,7 @@ export default function ChatWindow({ onSendMessage, isLoading }: ChatWindowProps
         <div className="flex space-x-2">
           <textarea
             className="flex-1 border border-gray-300 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="Type your message..."
+            placeholder={isFirstMessage ? "Click Start to begin conversation..." : "Type your message..."}
             rows={2}
             onKeyDown={handleKeyPress}
             disabled={isLoading}
@@ -117,7 +118,7 @@ export default function ChatWindow({ onSendMessage, isLoading }: ChatWindowProps
             }}
             disabled={isLoading}
           >
-            Send
+            {isFirstMessage ? 'Start' : 'Send'}
           </button>
         </div>
         <p className="text-xs text-gray-500 mt-2">
