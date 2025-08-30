@@ -101,7 +101,7 @@ export default function ChatWindow({ onSendMessage, isLoading, isFirstMessage }:
         <div className="flex space-x-2">
           <textarea
             className="flex-1 border border-gray-300 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder={isFirstMessage ? "Click Start to begin conversation..." : "Type your message..."}
+            placeholder={isFirstMessage ? "Click Start to begin conversation (can be empty)" : "Type your message..."}
             rows={2}
             onKeyDown={handleKeyPress}
             disabled={isLoading}
@@ -111,7 +111,8 @@ export default function ChatWindow({ onSendMessage, isLoading, isFirstMessage }:
             onClick={() => {
               const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
               const message = textarea.value.trim();
-              if (message) {
+              // Allow sending empty message if it's the first message
+              if (message || isFirstMessage) {
                 onSendMessage(message);
                 textarea.value = '';
               }

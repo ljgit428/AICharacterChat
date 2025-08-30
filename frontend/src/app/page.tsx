@@ -29,7 +29,7 @@ export default function Home() {
   }, [character, dispatch]);
 
   const handleSendMessage = async (message: string) => {
-    if (!message.trim() || !character) return;
+    if (!character) return;
 
     // Check if this is the first message and create character settings message
     let finalMessage = message;
