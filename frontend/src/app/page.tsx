@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Character, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setLoading, setError } from '@/store/chatSlice';
+import { setCharacter, addMessage, setLoading, setError, clearChat } from '@/store/chatSlice';
 import ChatWindow from '@/components/ChatWindow';
 import CharacterSettings from '@/components/CharacterSettings';
 import { apiService } from '@/utils/api';
@@ -88,32 +88,31 @@ export default function Home() {
   const generateCharacterPrompt = (character: Character, userMessage: string): string => {
     const promptSections: string[] = [];
 
-    // Character Identity section (always include if name exists)
-    if (character.name && character.name.trim()) {
+    // Character Identity section (always include if we have any character data)
+    if (character.name || character.description || character.personality || character.appearance) {
       promptSections.push(`=== CHARACTER IDENTITY ===`);
-      promptSections.push(`Character Name: ${character.name}`);
-      promptSections.push(`Role: You are ${character.name}, an AI companion designed for engaging conversation.`);
-      promptSections.push('');
-    }
-
-    // Character Description section (only if has meaningful content)
-    if (character.description && character.description.trim() && character.description !== 'A friendly AI companion ready to chat with you.') {
-      promptSections.push(`=== CHARACTER DESCRIPTION ===`);
-      promptSections.push(`Background: ${character.description}`);
-      promptSections.push('');
-    }
-
-    // Personality Traits section (only if has meaningful content)
-    if (character.personality && character.personality.trim() && character.personality !== 'Helpful, cheerful, and curious.') {
-      promptSections.push(`=== PERSONALITY TRAITS ===`);
-      promptSections.push(`Personality: ${character.personality}`);
-      promptSections.push('');
-    }
-
-    // Physical Appearance section (only if has meaningful content)
-    if (character.appearance && character.appearance.trim() && character.appearance !== 'A friendly digital companion with a warm smile.') {
-      promptSections.push(`=== PHYSICAL APPEARANCE ===`);
-      promptSections.push(`Appearance: ${character.appearance}`);
+      
+      // Always include name if available
+      if (character.name && character.name.trim()) {
+        promptSections.push(`Character Name: ${character.name}`);
+        promptSections.push(`Role: You are ${character.name}, an AI companion designed for engaging conversation.`);
+      }
+      
+      // Always include description if available
+      if (character.description && character.description.trim()) {
+        promptSections.push(`Background: ${character.description}`);
+      }
+      
+      // Always include personality if available
+      if (character.personality && character.personality.trim()) {
+        promptSections.push(`Personality: ${character.personality}`);
+      }
+      
+      // Always include appearance if available
+      if (character.appearance && character.appearance.trim()) {
+        promptSections.push(`Appearance: ${character.appearance}`);
+      }
+      
       promptSections.push('');
     }
 
@@ -148,6 +147,8 @@ export default function Home() {
       }
 
       dispatch(setCharacter(characterData));
+      dispatch(clearChat()); // Clear previous messages when character changes
+      setHasStartedConversation(false); // Reset conversation state
       setShowSettings(false);
     } catch (error) {
       console.error('Error saving character:', error);
@@ -183,7 +184,7 @@ export default function Home() {
           <div className="lg:col-span-2">
             <ChatWindow
               onSendMessage={handleSendMessage}
-              isLoading={false}
+              isLoading={useSelector((state: RootState) => state.chat.isLoading)}
               isFirstMessage={!hasStartedConversation}
             />
           </div>
