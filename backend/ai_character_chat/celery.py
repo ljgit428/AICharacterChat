@@ -15,10 +15,10 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 # Load task modules from all registered Django app configs.
 app.autodiscover_tasks()
 
-# For development, use memory broker instead of Redis
+# Use Redis as broker (consistent with Django settings)
 app.conf.update(
-    broker_url='memory://',
-    result_backend='cache+memory://',
+    broker_url='redis://localhost:6379/0',
+    result_backend='redis://localhost:6379/0',
     task_serializer='json',
     result_serializer='json',
     accept_content=['json'],

@@ -1,4 +1,5 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+console.log('API_BASE_URL:', API_BASE_URL);
 
 interface ApiResponse<T> {
   data?: T;
@@ -21,6 +22,17 @@ interface CreateCharacterRequest {
 class ApiService {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     try {
+      console.log('API Request:', {
+        url: `${API_BASE_URL}${endpoint}`,
+        options: {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            ...options.headers,
+          },
+        }
+      });
+      
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         headers: {
           'Content-Type': 'application/json',
@@ -29,11 +41,21 @@ class ApiService {
         ...options,
       });
 
+      console.log('API Response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        url: response.url
+      });
+
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error('API Response Error:', errorText);
+        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
       }
 
       const data = await response.json();
+      console.log('API Response Data:', data);
       return { data };
     } catch (error) {
       console.error('API request failed:', error);
@@ -87,9 +109,14 @@ class ApiService {
   }
 
   async sendMessage(data: SendMessageRequest): Promise<ApiResponse<any>> {
+    // Convert character_id to number for the backend
+    const requestData = {
+      ...data,
+      character_id: parseInt(data.character_id)
+    };
     return this.request('/chat/send_message/', {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify(requestData),
     });
   }
 

@@ -110,15 +110,26 @@ class ChatViewSet(viewsets.ViewSet):
             # Create or get chat session
             if chat_session_id:
                 chat_session = ChatSession.objects.get(
-                    id=chat_session_id, 
-                    user=request.user, 
+                    id=chat_session_id,
+                    user=request.user,
                     character=character
                 )
             else:
-                chat_session = ChatSession.objects.create(
-                    user=request.user,
+                # For development, create or get a test user if anonymous
+                if request.user.is_anonymous:
+                    from django.contrib.auth.models import User
+                    test_user, created = User.objects.get_or_create(
+                        username='testuser',
+                        defaults={'email': 'test@example.com'}
+                    )
+                    user = test_user
+                else:
+                    user = request.user
+                
+                chat_session, created = ChatSession.objects.get_or_create(
+                    user=user,
                     character=character,
-                    title=f"Chat with {character.name}"
+                    defaults={'title': f"Chat with {character.name}"}
                 )
             
             # Save user message
@@ -129,22 +140,28 @@ class ChatViewSet(viewsets.ViewSet):
                 character=character
             )
             
-            # Queue AI response generation task
-            task = generate_ai_response.delay(user_message.id, character.id)
-            
-            # Return immediate response with task ID
-            return Response({
-                'user_message': MessageSerializer(user_message).data,
-                'task_id': task.id,
-                'status': 'processing',
-                'message': 'AI response is being generated...'
-            })
-            
-            return Response({
-                'user_message': MessageSerializer(user_message).data,
-                'ai_message': MessageSerializer(ai_message).data,
-                'chat_session_id': chat_session.id
-            })
+            try:
+                # Queue AI response generation task
+                task = generate_ai_response.delay(user_message.id, character.id)
+                
+                # Return immediate response with task ID
+                return Response({
+                    'user_message': MessageSerializer(user_message).data,
+                    'task_id': task.id,
+                    'status': 'processing',
+                    'message': 'AI response is being generated...'
+                })
+            except Exception as e:
+                # If Celery is not available, return a simple response
+                # In production, you'd want to handle this more gracefully
+                print(f"Celery error: {str(e)}")
+                return Response({
+                    'user_message': MessageSerializer(user_message).data,
+                    'task_id': None,
+                    'status': 'error',
+                    'message': f'AI response queued but processing failed: {str(e)}',
+                    'error': 'Celery worker connection failed. Please check Redis connection and Celery worker status.'
+                })
             
         except Character.DoesNotExist:
             return Response(

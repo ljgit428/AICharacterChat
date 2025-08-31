@@ -18,7 +18,7 @@ export default function Home() {
     // Load default character if none exists
     if (!character) {
       const defaultCharacter: Character = {
-        id: 'default',
+        id: '1',
         name: 'Default Character',
         description: 'A friendly AI companion ready to chat with you.',
         personality: 'Helpful, cheerful, and curious.',
@@ -64,8 +64,12 @@ export default function Home() {
       }
 
       // Add AI response
-      if (response.data?.ai_message) {
-        dispatch(addMessage(response.data.ai_message));
+      if (response.data?.status === 'processing') {
+        // Task is processing, no AI response yet
+        console.log('AI response is being generated...');
+      } else if (response.data?.user_message) {
+        // Add user message (already added, but just in case)
+        console.log('User message sent:', response.data.user_message);
       }
     } catch (error) {
       console.error('Error sending message:', error);
