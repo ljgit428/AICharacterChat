@@ -73,3 +73,21 @@ REDIS_URL=redis://localhost:6379/0
 ```
 
 **Important:** The `GEMINI_API_KEY` is required for AI chat functionality and must be set to a valid Gemini API key.
+
+## Celery Worker
+
+To start the Celery worker for background AI response generation:
+
+```bash
+cd backend
+python -m celery -A ai_character_chat worker --loglevel=info
+```
+
+This command will:
+- Navigate to the backend directory
+- Start the Celery worker process
+- Connect to the configured message broker (Redis for production, memory for development)
+- Listen for background tasks to generate AI responses
+- Display logs at info level for monitoring task execution
+
+**Note:** The Celery worker should be started in a separate terminal window alongside the Django development server. The worker will automatically process AI response generation tasks when users send messages in the chat interface.
