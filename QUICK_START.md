@@ -39,6 +39,26 @@ This command will:
 
 The server will automatically reload when you make changes to the Python source code.
 
+## Redis Server
+
+To start the Redis server using Docker:
+
+```bash
+docker-compose up -d redis
+```
+
+This command will:
+- Pull the latest Redis Docker image (if not already available)
+- Start the Redis container named 'redis-server'
+- Map port 6379 from the container to your local machine
+- Configure the container to automatically restart unless stopped
+- Make Redis available at redis://localhost:6379/0
+
+You can verify Redis is running by checking the container status:
+```bash
+docker ps
+```
+
 ## Environment Variables
 
 ### Backend (.env)
