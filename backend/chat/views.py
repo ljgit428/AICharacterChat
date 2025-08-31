@@ -17,7 +17,7 @@ from .tasks import generate_ai_response
 class CharacterViewSet(viewsets.ModelViewSet):
     queryset = Character.objects.all()
     serializer_class = CharacterSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = []  # Allow access without authentication for development
     
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -31,7 +31,7 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
     queryset = ChatSession.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = []  # Allow access without authentication for development
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -51,7 +51,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
 
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = []  # Allow access without authentication for development
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -87,7 +87,7 @@ class MessageViewSet(viewsets.ModelViewSet):
 
 
 class ChatViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = []  # Allow access without authentication for development
     
     @action(detail=False, methods=['post'])
     def send_message(self, request):

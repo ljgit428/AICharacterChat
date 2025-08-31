@@ -45,7 +45,7 @@ export default function Home() {
       id: Date.now().toString(),
       content: finalMessage,
       role: 'user' as const,
-      timestamp: new Date(),
+      timestamp: new Date().toISOString(),
     };
     
     dispatch(addMessage(userMessage));
@@ -76,7 +76,7 @@ export default function Home() {
         id: (Date.now() + 1).toString(),
         content: 'Sorry, I encountered an error. Please try again.',
         role: 'assistant' as const,
-        timestamp: new Date(),
+        timestamp: new Date().toISOString(),
       };
       dispatch(addMessage(errorMessage));
     } finally {

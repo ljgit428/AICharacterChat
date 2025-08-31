@@ -87,7 +87,7 @@ class ApiService {
   }
 
   async sendMessage(data: SendMessageRequest): Promise<ApiResponse<any>> {
-    return this.request('/chat/send_message', {
+    return this.request('/chat/send_message/', {
       method: 'POST',
       body: JSON.stringify(data),
     });

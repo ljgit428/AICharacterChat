@@ -9,10 +9,13 @@ def generate_ai_response(message_id, character_id):
     """
     Generate AI response using Gemini 2.5 Pro API
     """
+    print(f"Task started: generate_ai_response for message_id={message_id}, character_id={character_id}")
     try:
         # Get the message and character
         message = Message.objects.get(id=message_id)
         character = Character.objects.get(id=character_id)
+        print(f"Found message: {message.content[:50]}...")
+        print(f"Found character: {character.name}")
         
         # Prepare the prompt
         prompt = f"You are {character.name}. {character.personality}\n\n"
