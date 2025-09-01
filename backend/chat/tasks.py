@@ -9,10 +9,13 @@ def generate_ai_response(message_id, character_id):
     """
     Generate AI response using Gemini 2.5 Pro API
     """
+    print(f"Task started: generate_ai_response for message_id={message_id}, character_id={character_id}")
     try:
         # Get the message and character
         message = Message.objects.get(id=message_id)
         character = Character.objects.get(id=character_id)
+        print(f"Found message: {message.content[:50]}...")
+        print(f"Found character: {character.name}")
         
         # Prepare the prompt
         prompt = f"You are {character.name}. {character.personality}\n\n"
@@ -29,29 +32,28 @@ def generate_ai_response(message_id, character_id):
         
         prompt += f"assistant: "
         
-        # Call Gemini API
+        # Call Gemini API using the correct template
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found in settings")
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={api_key}"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
         
         headers = {
             'Content-Type': 'application/json',
+            'X-goog-api-key': api_key
         }
         
         data = {
-            "contents": [{
-                "parts": [{
-                    "text": prompt
-                }]
-            }],
-            "generationConfig": {
-                "temperature": 1,
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 1024,
-            }
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
         }
         
         response = requests.post(url, headers=headers, json=data)

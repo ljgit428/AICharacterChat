@@ -2,7 +2,7 @@ export interface Message {
   id: string;
   content: string;
   role: 'user' | 'assistant';
-  timestamp: Date;
+  timestamp: string; // Using ISO string instead of Date object for Redux serialization
 }
 
 export interface Character {

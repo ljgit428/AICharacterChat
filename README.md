@@ -48,11 +48,46 @@ The project includes `.gitignore` files to prevent accidental commits of sensiti
 ## Setup Instructions
 
 ### Prerequisites
-- Node.js 18+ 
+- Node.js 18+
 - Python 3.10+
 - PostgreSQL
 - Redis
 - Google AI API key for Gemini 2.5 Pro
+
+### Docker Setup (Optional)
+
+This project includes Docker support for easy deployment of Redis and other services. To use Docker:
+
+1. **Start Redis using Docker**
+   ```bash
+   docker-compose up -d redis
+   ```
+   
+   This command will:
+   - Pull the latest Redis Docker image
+   - Start the Redis container named 'redis-server'
+   - Map port 6379 from the container to your local machine
+   - Configure the container to automatically restart unless stopped
+   - Make Redis available at redis://localhost:6379/0
+
+2. **Verify Redis is running**
+   ```bash
+   docker ps
+   ```
+
+3. **Restart Redis if needed**
+   ```bash
+   docker-compose restart redis
+   ```
+
+4. **Stop Redis**
+   ```bash
+   docker-compose stop redis
+   ```
+
+**Note:** The `docker-compose.yml` file is already configured with Redis settings. You can customize the Redis configuration by modifying the `docker-compose.yml` file.
+
+### Redis Configuration
 
 ### Backend Setup
 
