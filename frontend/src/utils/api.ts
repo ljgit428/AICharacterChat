@@ -6,6 +6,19 @@ interface ApiResponse<T> {
   error?: string;
 }
 
+// Token management
+export const setAuthToken = (token: string) => {
+  localStorage.setItem('authToken', token);
+};
+
+export const getAuthToken = () => {
+  return localStorage.getItem('authToken');
+};
+
+export const removeAuthToken = () => {
+  localStorage.removeItem('authToken');
+};
+
 interface SendMessageRequest {
   message: string;
   character_id: string;
@@ -22,22 +35,34 @@ interface CreateCharacterRequest {
 class ApiService {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     try {
+      const token = getAuthToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      
+      // Add any existing headers from options
+      if (options.headers) {
+        Object.entries(options.headers).forEach(([key, value]) => {
+          if (typeof value === 'string') {
+            headers[key] = value;
+          }
+        });
+      }
+      
+      if (token) {
+        headers['Authorization'] = `Token ${token}`;
+      }
+      
       console.log('API Request:', {
         url: `${API_BASE_URL}${endpoint}`,
         options: {
           ...options,
-          headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-          },
+          headers,
         }
       });
       
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
+        headers,
         ...options,
       });
 
@@ -117,6 +142,27 @@ class ApiService {
     return this.request('/chat/send_message/', {
       method: 'POST',
       body: JSON.stringify(requestData),
+    });
+  }
+
+  // Authentication methods
+  async login(username: string, password: string): Promise<ApiResponse<{ token: string; user_id: number; username: string }>> {
+    return this.request('/auth/login/', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+  }
+
+  async register(username: string, password: string, email?: string): Promise<ApiResponse<{ token: string; user_id: number; username: string }>> {
+    return this.request('/auth/register/', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, email }),
+    });
+  }
+
+  async logout(): Promise<ApiResponse<{ message: string }>> {
+    return this.request('/auth/logout/', {
+      method: 'POST',
     });
   }
 
