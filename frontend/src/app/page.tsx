@@ -1,18 +1,31 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Character, RootState } from '@/types';
+import { Character, RootState, Message } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, addMessage, setLoading, setError, clearChat } from '@/store/chatSlice';
 import ChatWindow from '@/components/ChatWindow';
 import CharacterSettings from '@/components/CharacterSettings';
-import { apiService } from '@/utils/api';
+import LoginModal from '@/components/LoginModal';
+import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
 export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [hasStartedConversation, setHasStartedConversation] = useState(false);
+  const [showLogin, setShowLogin] = useState(false);
+  const [currentUser, setCurrentUser] = useState<string | null>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
+
+  // Check for existing token on mount
+  useEffect(() => {
+    const token = getAuthToken();
+    if (token) {
+      // For demo purposes, we'll assume the user is logged in
+      // In a real app, you might want to validate the token with the backend
+      setCurrentUser('demo_user');
+    }
+  }, []);
 
   useEffect(() => {
     // Load default character if none exists
@@ -63,8 +76,25 @@ export default function Home() {
         throw new Error(response.error);
       }
 
-      // Add AI response
-      if (response.data?.status === 'processing') {
+      // Add AI response after normalizing it
+      if (response.data?.ai_message) {
+        // 1. From the backend get the raw ai_message data
+        const rawAiMessage = response.data.ai_message;
+
+        // 2. Convert it to the frontend expected Message type
+        const formattedAiMessage: Message = {
+          id: String(rawAiMessage.id), // Convert id to string
+          content: rawAiMessage.content,
+          role: rawAiMessage.role,
+          timestamp: rawAiMessage.timestamp, // Backend already sends ISO string
+        };
+
+        // 3. Print it out to confirm (optional, but recommended)
+        console.log('Formatted AI message to dispatch:', formattedAiMessage);
+
+        // 4. Dispatch the formatted message to Redux store
+        dispatch(addMessage(formattedAiMessage));
+      } else if (response.data?.status === 'processing') {
         // Task is processing, no AI response yet
         console.log('AI response is being generated...');
       } else if (response.data?.user_message) {
@@ -163,6 +193,21 @@ export default function Home() {
     setShowSettings(false);
   };
 
+  const handleLogin = (username: string) => {
+    setCurrentUser(username);
+    setShowLogin(false);
+  };
+
+  const handleLogout = () => {
+    removeAuthToken();
+    setCurrentUser(null);
+    setShowLogin(false);
+  };
+
+  const handleLoginClick = () => {
+    setShowLogin(true);
+  };
+
   return (
     <div className="min-h-screen bg-gray-100">
       <div className="container mx-auto p-4 h-screen flex flex-col">
@@ -172,12 +217,32 @@ export default function Home() {
             <h1 className="text-2xl font-bold text-gray-800">
               AI Character Chat
             </h1>
-            <button
-              onClick={() => setShowSettings(true)}
-              className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors"
-            >
-              Character Settings
-            </button>
+            <div className="flex items-center space-x-2">
+              {currentUser ? (
+                <div className="flex items-center space-x-2">
+                  <span className="text-gray-600">Welcome, {currentUser}</span>
+                  <button
+                    onClick={handleLogout}
+                    className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors"
+                  >
+                    Logout
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleLoginClick}
+                  className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition-colors"
+                >
+                  Login
+                </button>
+              )}
+              <button
+                onClick={() => setShowSettings(true)}
+                className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors"
+              >
+                Character Settings
+              </button>
+            </div>
           </div>
         </header>
 
@@ -225,6 +290,15 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* Login Modal */}
+      {showLogin && (
+        <LoginModal
+          isOpen={showLogin}
+          onClose={() => setShowLogin(false)}
+          onLogin={handleLogin}
+        />
+      )}
     </div>
   );
 }
