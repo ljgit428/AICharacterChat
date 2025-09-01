@@ -22,6 +22,7 @@ class ChatSession(models.Model):
     title = models.CharField(max_length=200, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_generating_response = models.BooleanField(default=False)
     
     def __str__(self):
         return f"{self.title or f'Chat with {self.character.name}'} - {self.user.username}"
