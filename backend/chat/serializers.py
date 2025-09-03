@@ -18,7 +18,7 @@ class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Character
         fields = [
-            'id', 'name', 'description', 'personality', 'appearance',
+            'id', 'name', 'description', 'personality', 'appearance', 'requirement',
             'created_at', 'updated_at', 'profile_image', 'background_files'
         ]
         read_only_fields = ['created_at', 'updated_at']
