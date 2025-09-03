@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Character, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, updateCharacter } from '@/store/chatSlice';
+import { apiService } from '@/utils/api';
 
 interface CharacterSettingsProps {
   character?: Character;
@@ -25,6 +26,8 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     },
   });
 
+  const [backgroundFile, setBackgroundFile] = useState<File | null>(null);
+
   const dispatch = useDispatch();
   const currentCharacter = useSelector((state: RootState) => state.chat.character);
 
@@ -34,6 +37,13 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       ...prev,
       [name]: value
     }));
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setBackgroundFile(file);
+    }
   };
 
   const handleDisableToggle = (attribute: keyof typeof formData.disabled) => {
@@ -48,18 +58,40 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const updatedCharacter = {
+    
+    // Create FormData for API call
+    const characterFormData = new FormData();
+    characterFormData.append('name', formData.name);
+    characterFormData.append('description', formData.description);
+    characterFormData.append('personality', formData.personality);
+    characterFormData.append('appearance', formData.appearance);
+    
+    // Add background document if provided
+    if (backgroundFile) {
+      characterFormData.append('background_document', backgroundFile);
+    }
+    
+    // Create character object for Redux store
+    const characterObject = {
       ...formData,
       id: character?.id || Date.now().toString(),
+      disabled: formData.disabled
     };
     
     if (character) {
-      dispatch(updateCharacter(updatedCharacter));
+      dispatch(updateCharacter(characterObject));
     } else {
-      dispatch(setCharacter(updatedCharacter));
+      dispatch(setCharacter(characterObject));
     }
     
-    onSave(updatedCharacter);
+    // Save to API using FormData
+    if (character) {
+      apiService.updateCharacter(character.id, characterFormData);
+    } else {
+      apiService.createCharacter(characterFormData);
+    }
+    
+    onSave(characterObject);
   };
 
   return (
@@ -154,6 +186,25 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             required={!formData.disabled.personality}
             disabled={formData.disabled.personality}
           />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Background Document
+            </label>
+          </div>
+          <input
+            type="file"
+            accept=".txt,.pdf,.doc,.docx"
+            onChange={handleFileChange}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          {backgroundFile && (
+            <p className="text-sm text-gray-600 mt-1">
+              Selected: {backgroundFile.name}
+            </p>
+          )}
         </div>
 
         <div>

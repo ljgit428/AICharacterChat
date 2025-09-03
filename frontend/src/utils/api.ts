@@ -6,6 +6,30 @@ interface ApiResponse<T> {
   error?: string;
 }
 
+// Import types from the types file
+import { Character, Message } from '@/types';
+
+interface ChatSession {
+  id: string;
+  character: Character;
+  title: string;
+  user: { id: string; username: string; email?: string }; // Basic user type
+}
+
+interface ChatResponse {
+  user_message: Message;
+  ai_message?: Message;
+  chat_session_id: string;
+  status?: string;
+}
+
+interface AIResponse {
+  success: boolean;
+  message_id?: number;
+  content?: string;
+  error?: string;
+}
+
 // Token management
 export const setAuthToken = (token: string) => {
   localStorage.setItem('authToken', token);
@@ -25,20 +49,24 @@ interface SendMessageRequest {
   chat_session_id?: string;
 }
 
-interface CreateCharacterRequest {
-  name: string;
-  description: string;
-  personality: string;
-  appearance: string;
-}
+// This interface is no longer needed since we use FormData now
+// interface CreateCharacterRequest {
+//   name: string;
+//   description: string;
+//   personality: string;
+//   appearance: string;
+// }
 
 class ApiService {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     try {
       const token = getAuthToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
+      const headers: Record<string, string> = {}; // 初始化为空
+      
+      // 如果 body 不是 FormData，才设置 Content-Type
+      if (!(options.body instanceof FormData)) {
+        headers['Content-Type'] = 'application/json';
+      }
       
       // Add any existing headers from options
       if (options.headers) {
@@ -89,51 +117,51 @@ class ApiService {
   }
 
   // Character API
-  async getCharacters(): Promise<ApiResponse<any[]>> {
+  async getCharacters(): Promise<ApiResponse<Character[]>> {
     return this.request('/characters/');
   }
 
-  async createCharacter(character: CreateCharacterRequest): Promise<ApiResponse<any>> {
+  async createCharacter(character: FormData): Promise<ApiResponse<Character>> {
     return this.request('/characters/', {
       method: 'POST',
-      body: JSON.stringify(character),
+      body: character,
     });
   }
 
-  async getCharacter(id: string): Promise<ApiResponse<any>> {
+  async getCharacter(id: string): Promise<ApiResponse<Character>> {
     return this.request(`/characters/${id}/`);
   }
 
-  async updateCharacter(id: string, character: CreateCharacterRequest): Promise<ApiResponse<any>> {
+  async updateCharacter(id: string, character: FormData): Promise<ApiResponse<Character>> {
     return this.request(`/characters/${id}/`, {
       method: 'PUT',
-      body: JSON.stringify(character),
+      body: character,
     });
   }
 
   // Chat Session API
-  async getChatSessions(characterId?: string): Promise<ApiResponse<any[]>> {
+  async getChatSessions(characterId?: string): Promise<ApiResponse<ChatSession[]>> {
     const params = characterId ? `?character_id=${characterId}` : '';
     return this.request(`/sessions/${params}`);
   }
 
-  async createChatSession(characterId: string, title?: string): Promise<ApiResponse<any>> {
+  async createChatSession(characterId: string, title?: string): Promise<ApiResponse<ChatSession>> {
     return this.request('/sessions/', {
       method: 'POST',
       body: JSON.stringify({ character: characterId, title }),
     });
   }
 
-  async getChatSession(id: string): Promise<ApiResponse<any>> {
+  async getChatSession(id: string): Promise<ApiResponse<ChatSession>> {
     return this.request(`/sessions/${id}/`);
   }
 
   // Message API
-  async getMessages(chatSessionId: string): Promise<ApiResponse<any[]>> {
+  async getMessages(chatSessionId: string): Promise<ApiResponse<Message[]>> {
     return this.request(`/messages/?chat_session_id=${chatSessionId}`);
   }
 
-  async sendMessage(data: SendMessageRequest): Promise<ApiResponse<any>> {
+  async sendMessage(data: SendMessageRequest): Promise<ApiResponse<ChatResponse>> {
     // Convert character_id to number for the backend
     const requestData = {
       ...data,
@@ -167,7 +195,7 @@ class ApiService {
   }
 
   // Utility methods
-  async generateAIResponse(messageId: string, characterId: string): Promise<ApiResponse<any>> {
+  async generateAIResponse(messageId: string, characterId: string): Promise<ApiResponse<AIResponse>> {
     return this.request('/chat/generate_ai_response', {
       method: 'POST',
       body: JSON.stringify({ message_id: messageId, character_id: characterId }),

@@ -25,44 +25,33 @@ class CharacterViewSet(viewsets.ModelViewSet):
     parser_classes = [MultiPartParser, FormParser]
 
     def _upload_file_to_gemini(self, file_obj):
-        """Helper to upload a file to Gemini and return its reference name."""
+        """A more robust helper to upload a file to Gemini."""
         try:
             print(f"Uploading file '{file_obj.name}' to Gemini...")
-            # Configure API key
             genai.configure(api_key=settings.GEMINI_API_KEY)
-            
-            # Handle InMemoryUploadedFile by saving it temporarily
+
+            # 使用 with 语句确保临时文件总是被清理
             import tempfile
             import os
-            
-            temp_file_path = None
-            try:
-                # If it's an InMemoryUploadedFile, save it temporarily
-                if hasattr(file_obj, 'read'):
-                    # Create a temporary file
-                    suffix = os.path.splitext(file_obj.name)[1]
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-                        file_content = file_obj.read()
-                        temp_file.write(file_content)
-                        temp_file_path = temp_file.name
-                else:
-                    # If it's already a file path, use it directly
-                    temp_file_path = file_obj.path
+
+            # 创建一个临时文件来写入内存中的数据
+            suffix = os.path.splitext(file_obj.name)[1]
+            with tempfile.NamedTemporaryFile(mode='wb', delete=True, suffix=suffix, spool_max_size=1024*1024) as temp_f:
+                # 将上传的文件内容写入临时文件
+                for chunk in file_obj.chunks():
+                    temp_f.write(chunk)
                 
-                # Upload the file
+                # 确保所有内容都已写入磁盘
+                temp_f.flush()
+                
+                # 现在使用这个临时文件的路径进行上传
                 response = genai.upload_file(
-                    path=temp_file_path,
+                    path=temp_f.name,
                     display_name=file_obj.name
                 )
-                
-                print(f"File uploaded successfully. Gemini file name: {response.name}")
-                return response.name
-                
-            finally:
-                # Clean up the temporary file if we created one
-                if temp_file_path and hasattr(file_obj, 'read') and os.path.exists(temp_file_path):
-                    os.unlink(temp_file_path)
-                    print(f"Cleaned up temporary file: {temp_file_path}")
+
+            print(f"File uploaded successfully. Gemini file name: {response.name}")
+            return response.name
                 
         except Exception as e:
             print(f"Error uploading file to Gemini: {e}")
@@ -238,26 +227,16 @@ class ChatViewSet(viewsets.ViewSet):
             )
             
             # --- START OF MODIFICATION ---
-            # 直接调用函数，而不是使用 .delay()
-            # 这将使请求同步等待AI响应
-            result = generate_ai_response(user_message.id, character.id)
-            
-            if not result.get('success'):
-                # 如果AI响应生成失败，返回错误
-                return Response(
-                    {'error': result.get('error', 'Failed to generate AI response')},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
+            # 恢复异步调用Celery任务
+            # 使用 .delay() 将任务发送到 Celery worker
+            generate_ai_response.delay(user_message.id, character.id)
 
-            # 从数据库获取新创建的AI消息
-            ai_message = Message.objects.get(id=result['message_id'])
-            
-            # 返回包含用户消息和AI消息的响应
+            # 立即返回响应，告诉前端正在处理中
             return Response({
                 'user_message': MessageSerializer(user_message).data,
-                'ai_message': MessageSerializer(ai_message).data,
-                'chat_session_id': chat_session.id
-            })
+                'chat_session_id': chat_session.id,
+                'status': 'processing' # 告知前端AI正在思考
+            }, status=status.HTTP_202_ACCEPTED) # 使用 202 Accepted 状态码
             # --- END OF MODIFICATION ---
             
         except Character.DoesNotExist:

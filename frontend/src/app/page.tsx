@@ -195,23 +195,20 @@ export default function Home() {
     try {
       let response;
       
+      // Create FormData for character data
+      const formData = new FormData();
+      formData.append('name', characterData.name);
+      formData.append('description', characterData.description);
+      formData.append('personality', characterData.personality);
+      formData.append('appearance', characterData.appearance);
+      
       // Check if character has an ID to determine if we're creating or updating
       if (characterData.id) {
         // Update existing character
-        response = await apiService.updateCharacter(characterData.id, {
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-        });
+        response = await apiService.updateCharacter(characterData.id, formData);
       } else {
         // Create new character
-        response = await apiService.createCharacter({
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-        });
+        response = await apiService.createCharacter(formData);
       }
       
       if (response.error) {

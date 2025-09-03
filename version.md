@@ -1,6 +1,18 @@
 ## Version History
 
 
+### v0.0.5
+- **Asynchronous Processing**: Fixed critical synchronous vs asynchronous processing issue in ChatViewSet - now properly uses Celery's `.delay()` method for AI response generation
+- **Improved Performance**: Eliminated UI blocking during AI response generation by returning immediate `status: 'processing'` responses
+- **Enhanced File Handling**: Replaced risky temporary file handling with robust `with tempfile.NamedTemporaryFile()` approach to prevent Windows file locking issues
+- **FormData Support**: Updated frontend API service to properly handle FormData for file uploads with conditional Content-Type headers
+- **Character File Uploads**: Enhanced CharacterSettings component with file input support for background documents
+- **TypeScript Improvements**: Added proper interfaces for ChatResponse, AIResponse, and ChatSession types with strong typing
+- **Backend Robustness**: Improved system stability with better error handling and resource management
+- **Frontend Backend Sync**: Ensured frontend and backend interfaces are properly synchronized for character creation/update with FormData
+- **Build Optimization**: Resolved TypeScript and ESLint errors for successful production builds
+- **User Experience**: Users can now upload character background documents without UI freezing during AI processing
+
 ### v0.0.4
 - **Gemini File API Integration**: Implemented advanced file handling using Google's Gemini File API instead of local file storage
 - **Character background documents**: Characters can now upload files (PDF, TXT, images) as background knowledge that AI can reference during conversations
