@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, DragEvent } from 'react';
 import { Character, CharacterFile, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, updateCharacter, saveCharacter } from '@/store/chatSlice';
@@ -31,6 +31,9 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   // Manage existing files (for display and deletion)
   const [existingFiles, setExistingFiles] = useState<CharacterFile[]>(character?.background_files || []);
 
+  // New state for tracking drag status to provide visual feedback
+  const [isDragging, setIsDragging] = useState(false);
+  
   // Create a ref to reference the file input element
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -49,6 +52,36 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     if (e.target.files) {
       // Append new files to the list
       setNewFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+    }
+  };
+
+  // New drag event handlers
+  const handleDragEnter = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+  
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault(); // This is key to allowing a drop
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      // Add dropped files to our file list
+      setNewFiles(prev => [...prev, ...Array.from(files)]);
     }
   };
 
@@ -123,6 +156,11 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     }
     
     onSave(characterObject);
+  };
+
+  // Create a function to trigger the hidden file input
+  const handleDropZoneClick = () => {
+    fileInputRef.current?.click();
   };
 
   return (
@@ -255,14 +293,29 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             ))}
           </div>
           
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple // Allow multiple file selection
-            accept=".txt,.pdf,.doc,.docx"
-            onChange={handleFileChange}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+          {/* New modern drag-and-drop upload area */}
+          <div
+            className={`mt-2 p-6 border-2 border-dashed rounded-lg text-center cursor-pointer transition-colors
+              ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}`}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            onClick={handleDropZoneClick} // Clicking the area also opens file selector
+          >
+            <p className="text-gray-500">
+              {isDragging ? 'Drop files here' : 'Drag & Drop files here, or click to select'}
+            </p>
+            {/* Hidden native file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".txt,.pdf,.doc,.docx"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </div>
         </div>
 
         <div>
