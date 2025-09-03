@@ -38,7 +38,7 @@ export default function Home() {
         description: 'A friendly AI companion ready to chat with you.',
         personality: 'Helpful, cheerful, and curious.',
         appearance: 'A friendly digital companion with a warm smile.',
-        requirement: '=== RESPONSE GUIDELINES ===\nInstructions:\n- Respond consistently with your character\'s traits and background\n- Maintain character voice throughout the conversation\n- Be engaging and responsive to user input\n- Stay true to your established character',
+        requirement: '',
         disabled: {
           name: false,
           description: false,
@@ -205,17 +205,6 @@ export default function Home() {
     // Response Guidelines section (use requirement field if available and not disabled)
     if (character.requirement && character.requirement.trim() && !character.disabled.requirement) {
       promptSections.push(character.requirement);
-      promptSections.push('');
-    } else if (promptSections.length > 0) {
-      // Fallback to default guidelines if requirement field is empty or disabled
-      promptSections.push(`=== RESPONSE GUIDELINES ===`);
-      promptSections.push(`Instructions:`);
-      promptSections.push(`- Respond consistently with your character's traits and background`);
-      promptSections.push(`- Maintain character voice throughout the conversation`);
-      promptSections.push(`- Be engaging and responsive to user input`);
-      if (character.name && !character.disabled.name) {
-        promptSections.push(`- Stay true to ${character.name}'s established character`);
-      }
       promptSections.push('');
     }
 
