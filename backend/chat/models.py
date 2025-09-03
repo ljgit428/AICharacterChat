@@ -12,6 +12,11 @@ class Character(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_characters')
     
+    # Fields for file uploads
+    profile_image = models.ImageField(upload_to='character_images/', null=True, blank=True)
+    # Reference ID for the file uploaded to Gemini File API
+    gemini_file_ref = models.CharField(max_length=255, blank=True, null=True, help_text="Reference ID for the file uploaded to Gemini API")
+    
     def __str__(self):
         return self.name
 

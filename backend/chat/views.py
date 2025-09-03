@@ -13,21 +13,94 @@ from .serializers import (
     MessageCreateSerializer
 )
 from .tasks import generate_ai_response
+from rest_framework.parsers import MultiPartParser, FormParser
+import google.generativeai as genai
+from django.conf import settings
 
 
 class CharacterViewSet(viewsets.ModelViewSet):
     queryset = Character.objects.all()
     serializer_class = CharacterSerializer
     permission_classes = []  # Allow access without authentication for development
-    
+    parser_classes = [MultiPartParser, FormParser]
+
+    def _upload_file_to_gemini(self, file_obj):
+        """Helper to upload a file to Gemini and return its reference name."""
+        try:
+            print(f"Uploading file '{file_obj.name}' to Gemini...")
+            # Configure API key
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            
+            # Handle InMemoryUploadedFile by saving it temporarily
+            import tempfile
+            import os
+            
+            temp_file_path = None
+            try:
+                # If it's an InMemoryUploadedFile, save it temporarily
+                if hasattr(file_obj, 'read'):
+                    # Create a temporary file
+                    suffix = os.path.splitext(file_obj.name)[1]
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                        file_content = file_obj.read()
+                        temp_file.write(file_content)
+                        temp_file_path = temp_file.name
+                else:
+                    # If it's already a file path, use it directly
+                    temp_file_path = file_obj.path
+                
+                # Upload the file
+                response = genai.upload_file(
+                    path=temp_file_path,
+                    display_name=file_obj.name
+                )
+                
+                print(f"File uploaded successfully. Gemini file name: {response.name}")
+                return response.name
+                
+            finally:
+                # Clean up the temporary file if we created one
+                if temp_file_path and hasattr(file_obj, 'read') and os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+                    print(f"Cleaned up temporary file: {temp_file_path}")
+                
+        except Exception as e:
+            print(f"Error uploading file to Gemini: {e}")
+            return None
+
     def perform_create(self, serializer):
-        # Get or create default user for development
         User = get_user_model()
-        user, created = User.objects.get_or_create(
-            username='default_user',
-            defaults={'email': 'default@example.com'}
-        )
-        serializer.save(created_by=user)
+        user, _ = User.objects.get_or_create(username='default_user')
+        
+        gemini_ref = None
+        background_file = self.request.data.get('background_document')
+        print(f"DEBUG: Found background_file in request: {background_file}")
+        print(f"DEBUG: File type: {type(background_file)}")
+        
+        if background_file:
+            print(f"DEBUG: Attempting to upload file: {background_file.name}")
+            gemini_ref = self._upload_file_to_gemini(background_file)
+            print(f"DEBUG: Upload result: {gemini_ref}")
+            
+        serializer.save(created_by=user, gemini_file_ref=gemini_ref)
+        print(f"DEBUG: Character saved with gemini_file_ref: {gemini_ref}")
+
+    def perform_update(self, serializer):
+        gemini_ref = serializer.instance.gemini_file_ref  # Keep old reference
+        background_file = self.request.data.get('background_document')
+        
+        if background_file:
+            # If new file is uploaded, delete old file (optional but recommended)
+            if serializer.instance.gemini_file_ref:
+                try:
+                    genai.delete_file(name=serializer.instance.gemini_file_ref)
+                    print(f"Deleted old Gemini file: {serializer.instance.gemini_file_ref}")
+                except Exception as e:
+                    print(f"Could not delete old Gemini file: {e}")
+
+            gemini_ref = self._upload_file_to_gemini(background_file)
+            
+        serializer.save(gemini_file_ref=gemini_ref)
     
     @action(detail=False, methods=['get'])
     def my_characters(self, request):
@@ -115,6 +188,7 @@ class MessageViewSet(viewsets.ModelViewSet):
 
 class ChatViewSet(viewsets.ViewSet):
     permission_classes = []  # Allow access without authentication for development
+    parser_classes = [FormParser, MultiPartParser]
     
     @action(detail=False, methods=['post'])
     def send_message(self, request):

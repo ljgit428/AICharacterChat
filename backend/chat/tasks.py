@@ -4,12 +4,13 @@ from django.conf import settings
 import google.generativeai as genai
 from .models import Message, Character, ChatSession
 
+
 @shared_task
 def generate_ai_response(message_id, character_id):
     """
-    Generate AI response using Gemini 2.5 Flash API with persistent chat sessions
+    Generate AI response using Gemini API, referencing an uploaded file for context.
     """
-    print(f"Task started: generate_ai_response for message_id={message_id}, character_id={character_id}")
+    print(f"Task started for message_id={message_id}, character_id={character_id}")
     try:
         # 1. 获取核心对象
         user_message = Message.objects.get(id=message_id)
@@ -25,29 +26,39 @@ def generate_ai_response(message_id, character_id):
             raise ValueError("GEMINI_API_KEY not found in settings")
         
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash') # 使用 1.5-flash 或 2.5-pro
+        model = genai.GenerativeModel('gemini-1.5-pro-latest')
 
-        # 3. 构建完整的对话历史
-        # 首先，构建角色设定的初始提示
-        initial_prompt = (
-            f"You are now roleplaying as the character '{character.name}'. "
-            f"Your personality is: {character.personality}. "
-            f"Your appearance is: {character.appearance}. "
-            f"Here is your background story: {character.description}. "
-            "From this moment on, you must respond and act entirely as this character. Do not break character. "
-            "Engage with the user naturally based on your defined traits."
+        # --- 新逻辑：构建包含文件引用的 Prompt ---
+        # 1. 准备文件对象（如果存在）
+        file_for_prompt = None
+        if character.gemini_file_ref:
+            print(f"Found Gemini file reference: {character.gemini_file_ref}")
+            # 从引用ID获取文件对象
+            file_for_prompt = genai.get_file(name=character.gemini_file_ref)
+
+        # 2. 构建基础的角色设定文本
+        prompt_text = (
+            f"You are roleplaying as '{character.name}'.\n"
+            f"Personality: {character.personality}\n"
+            f"Appearance: {character.appearance}\n"
+            f"Background: {character.description}\n"
+            "You must respond and act entirely as this character. "
+            "Use the information in the provided document to enrich your responses, "
+            "treating it as your own knowledge or memory. Do not mention the document itself."
         )
 
-        # Gemini API 期望的格式是 [{"role": "user/model", "parts": [text]}]
-        # 我们用一个 "system" instruction 来设定角色
-        formatted_history = [
-            # Gemini 没有 system role, 我们用 user/model 对来模拟
-            {"role": "user", "parts": [initial_prompt]},
-            {"role": "model", "parts": ["Understood. I am ready to embody the character and begin our conversation."]}
-        ]
+        # 3. 组合文本和文件到最终的 Prompt Parts
+        prompt_parts = [prompt_text]
+        if file_for_prompt:
+            prompt_parts.append(file_for_prompt)  # 直接把文件对象放进去
 
+        # 4. 构建完整的对话历史
+        formatted_history = [
+            {"role": "user", "parts": prompt_parts},
+            {"role": "model", "parts": ["Understood. I am ready."]}
+        ]
+        
         # 从数据库获取此会话的所有历史消息 (除了刚刚收到的最新一条)
-        # 注意：这里我们获取的是所有消息，包括最新的用户消息，因为下面会直接用 generate_content
         history_messages = Message.objects.filter(chat_session=chat_session).order_by('timestamp')
 
         for msg in history_messages:
@@ -58,12 +69,11 @@ def generate_ai_response(message_id, character_id):
                 "parts": [msg.content]
             })
 
-        # 4. 调用 Gemini API 生成回复
-        # 使用 generate_content 并传入完整的历史记录
+        # 5. 调用 Gemini API 生成回复
         response = model.generate_content(formatted_history)
         ai_response_text = response.text
         
-        # 5. 保存 AI 的回复到数据库
+        # 6. 保存 AI 的回复到数据库
         ai_message = Message.objects.create(
             chat_session=chat_session,
             role='assistant',
