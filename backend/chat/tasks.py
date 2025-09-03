@@ -49,7 +49,6 @@ def generate_ai_response(message_id, character_id):
             f"Personality: {character.personality}\n"
             f"Appearance: {character.appearance}\n"
             f"Background: {character.description}\n"
-            f"Response Guidelines: {character.requirement}\n"
             "You must respond and act entirely as this character. "
             "Use the information in the provided documents to enrich your responses, "
             "treating them as your own knowledge or memory. Do not mention the documents themselves."
