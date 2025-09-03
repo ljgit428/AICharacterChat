@@ -54,31 +54,64 @@ export default function Home() {
   const handleSendMessage = async (message: string) => {
     if (!character) return;
 
-    // Check if this is the first message and create character settings message
-    let finalMessage = message;
+    // 1. Prepare the full prompt for backend API regardless of conversation state
+    const fullPromptForBackend = !hasStartedConversation
+      ? generateCharacterPrompt(character, message)
+      : message;
+
+    // 2. Determine how to display messages in UI based on whether it's first conversation
     if (!hasStartedConversation) {
-      // Create intelligent character settings prompt based on available data
-      const characterSettings = generateCharacterPrompt(character, message);
-      finalMessage = characterSettings;
+      // ===== First conversation: split display for debugging purposes =====
+
+      // A. Extract only the "character identity" part from the complete prompt
+      const separator = '=== USER MESSAGE ===';
+      const promptParts = fullPromptForBackend.split(separator);
+      const identityPart = promptParts[0].trim();
+
+      // B. Show first bubble (character identity part) if it's not empty
+      if (identityPart) {
+        const identityMessage: Message = {
+          id: Date.now().toString(),
+          content: identityPart,
+          role: 'user', // Display as user message for debugging
+          timestamp: new Date().toISOString(),
+        };
+        dispatch(addMessage(identityMessage));
+      }
+
+      // C. (Key modification) Only show second bubble if user actually entered content
+      if (message.trim()) {
+        const userMessagePart: Message = {
+          id: (Date.now() + 1).toString(), // Ensure unique ID
+          content: message, // <-- Core: content is just the original user input
+          role: 'user',
+          timestamp: new Date().toISOString(),
+        };
+        dispatch(addMessage(userMessagePart));
+      }
+
+      // D. Update conversation state to ensure this logic only runs once
       setHasStartedConversation(true);
+
+    } else {
+      // ===== This is not the first conversation, show single user message bubble normally =====
+      const userMessage: Message = {
+        id: Date.now().toString(),
+        content: message, // message is original user input
+        role: 'user',
+        timestamp: new Date().toISOString(),
+      };
+      dispatch(addMessage(userMessage));
     }
 
-    // Add user message
-    const userMessage = {
-      id: Date.now().toString(),
-      content: finalMessage,
-      role: 'user' as const,
-      timestamp: new Date().toISOString(),
-    };
-    
-    dispatch(addMessage(userMessage));
+    // 3. Start calling API, sending the complete prompt to backend
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
-      // Send message to backend
+      // 4. Send the complete prompt to backend
       const response = await apiService.sendMessage({
-        message: finalMessage,
+        message: fullPromptForBackend,
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
       });
@@ -208,10 +241,17 @@ export default function Home() {
       promptSections.push('');
     }
 
-    // User Message section (always include)
-    promptSections.push(`=== USER MESSAGE ===`);
-    promptSections.push(`User Input: ${userMessage}`);
-    promptSections.push(`Please respond to the following user message while staying in character.`);
+    // User Message section
+    if (userMessage && userMessage.trim()) {
+      promptSections.push(`=== USER MESSAGE ===`);
+      promptSections.push(`User Input: ${userMessage}`);
+      promptSections.push(`Please respond to the following user message while staying in character.`);
+    } else {
+      // If user didn't input anything, instruct AI to start conversation
+      promptSections.push(`=== USER MESSAGE ===`);
+      promptSections.push(`User Input: (No input provided)`);
+      promptSections.push(`Please start the conversation with a greeting in your character's voice.`);
+    }
 
     return promptSections.join('\n');
   };
