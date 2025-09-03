@@ -167,15 +167,16 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   };
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-6 h-full w-[200%]">
+    <div className="bg-white rounded-lg border border-gray-200 p-6 h-full">
       <h2 className="text-xl font-bold mb-4">
         {character ? 'Edit Character' : 'Create New Character'}
       </h2>
       
       <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Left Column - Basic Character Information */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="space-y-4">
+        {/* Two Column Layout */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-6">
+          {/* Left Column - Basic Character Information */}
+          <div className="space-y-4 flex flex-col">
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-sm font-medium text-gray-700">
@@ -227,7 +228,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
                 value={formData.description}
                 onChange={handleInputChange}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={3}
+                rows={5}
                 placeholder="Describe your character"
                 required={!formData.disabled.description}
                 disabled={formData.disabled.description}
@@ -256,7 +257,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
                 value={formData.personality}
                 onChange={handleInputChange}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={4}
+                rows={6}
                 placeholder="Describe your character's personality"
                 required={!formData.disabled.personality}
                 disabled={formData.disabled.personality}
@@ -285,7 +286,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
                 value={formData.appearance}
                 onChange={handleInputChange}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={3}
+                rows={5}
                 placeholder="Describe your character's appearance"
                 required={!formData.disabled.appearance}
                 disabled={formData.disabled.appearance}
@@ -294,7 +295,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
           </div>
 
           {/* Right Column - Response Guidelines and Background Documents */}
-          <div className="space-y-6">
+          <div className="space-y-4 flex flex-col">
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-sm font-medium text-gray-700">
@@ -317,21 +318,22 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
                 value={formData.requirement}
                 onChange={handleInputChange}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={6}
+                rows={10}
                 placeholder="Enter response guidelines for your character"
                 required={!formData.disabled.requirement}
                 disabled={formData.disabled.requirement}
               />
             </div>
 
-            <div>
+            <div className="flex flex-col flex-grow">
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-sm font-medium text-gray-700">
                   Background Documents
                 </label>
               </div>
+              
               {/* File list display */}
-              <div className="space-y-2 mt-2">
+              <div className="space-y-2 mt-2 max-h-32 overflow-y-auto">
                 {/* Existing files */}
                 {existingFiles.map(file => (
                   <div key={file.id} className="flex items-center justify-between bg-gray-100 p-2 rounded">
@@ -362,7 +364,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
               
               {/* New modern drag-and-drop upload area */}
               <div
-                className={`mt-2 p-6 border-2 border-dashed rounded-lg text-center cursor-pointer transition-colors
+                className={`mt-2 p-4 border-2 border-dashed rounded-lg text-center cursor-pointer transition-colors flex-grow
                   ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}`}
                 onDragEnter={handleDragEnter}
                 onDragLeave={handleDragLeave}
