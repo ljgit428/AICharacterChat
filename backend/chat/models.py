@@ -19,7 +19,16 @@ class Character(models.Model):
     description = models.TextField()
     personality = models.TextField()
     appearance = models.TextField()
-    requirement = models.TextField()
+    requirement = models.TextField(
+        default=(
+            "=== RESPONSE GUIDELINES ===\n"
+            "Instructions:\n"
+            "- Respond consistently with your character's traits and background\n"
+            "- Maintain character voice throughout the conversation\n"
+            "- Be engaging and responsive to user input\n"
+            "- Stay true to your established character"
+        )
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_characters')
