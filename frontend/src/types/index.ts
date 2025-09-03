@@ -39,3 +39,38 @@ export interface ChatState {
 export interface RootState {
   chat: ChatState;
 }
+
+export interface Requirements {
+  languagePreference: {
+    youShouldAlwaysSpeakAndThinkIn: string;
+  };
+  markDownRules: {
+    allResponsesMustShow: string;
+    toolUse: string;
+  };
+  toolUse: {
+    youHaveAccessTo: string;
+    toolUseFormatting: string;
+    examples: string;
+  };
+  modes: {
+    architect: string;
+    code: string;
+    ask: string;
+    debug: string;
+    orchestrator: string;
+  };
+  rules: {
+    projectBaseDirectory: string;
+    filePaths: string;
+    youCannot: string;
+    beforeUsingThe: string;
+    whenDecidingIf: string;
+    onceYouveCompleted: string;
+    theUserMayProvide: string;
+    languagePreference: string;
+  };
+  customInstructions: {
+    languagePreference: string;
+  };
+}
