@@ -18,11 +18,13 @@ export interface Character {
   description: string;
   personality: string;
   appearance: string;
+  requirement: string;
   disabled: {
     name: boolean;
     description: boolean;
     personality: boolean;
     appearance: boolean;
+    requirement?: boolean; // Make it optional for backward compatibility
   };
   background_files?: CharacterFile[]; // Make it optional for backward compatibility
 }

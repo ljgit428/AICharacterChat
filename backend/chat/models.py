@@ -19,6 +19,7 @@ class Character(models.Model):
     description = models.TextField()
     personality = models.TextField()
     appearance = models.TextField()
+    requirement = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_characters')

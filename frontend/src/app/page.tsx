@@ -38,11 +38,13 @@ export default function Home() {
         description: 'A friendly AI companion ready to chat with you.',
         personality: 'Helpful, cheerful, and curious.',
         appearance: 'A friendly digital companion with a warm smile.',
+        requirement: '=== RESPONSE GUIDELINES ===\nInstructions:\n- Respond consistently with your character\'s traits and background\n- Maintain character voice throughout the conversation\n- Be engaging and responsive to user input\n- Stay true to your established character',
         disabled: {
           name: false,
           description: false,
           personality: false,
           appearance: false,
+          requirement: false,
         },
       };
       dispatch(setCharacter(defaultCharacter));
@@ -200,8 +202,12 @@ export default function Home() {
       promptSections.push('');
     }
 
-    // Response Guidelines section (always include if we have any character data)
-    if (promptSections.length > 0) {
+    // Response Guidelines section (use requirement field if available and not disabled)
+    if (character.requirement && character.requirement.trim() && !character.disabled.requirement) {
+      promptSections.push(character.requirement);
+      promptSections.push('');
+    } else if (promptSections.length > 0) {
+      // Fallback to default guidelines if requirement field is empty or disabled
       promptSections.push(`=== RESPONSE GUIDELINES ===`);
       promptSections.push(`Instructions:`);
       promptSections.push(`- Respond consistently with your character's traits and background`);
@@ -318,7 +324,7 @@ export default function Home() {
         {/* Settings Modal */}
         {showSettings && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
               <CharacterSettings
                 character={character || undefined}
                 onSave={handleSaveCharacter}

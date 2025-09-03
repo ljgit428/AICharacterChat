@@ -18,11 +18,13 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     description: character?.description || '',
     personality: character?.personality || '',
     appearance: character?.appearance || '',
+    requirement: character?.requirement || '',
     disabled: character?.disabled || {
       name: false,
       description: false,
       personality: false,
       appearance: false,
+      requirement: false,
     },
   });
 
@@ -127,6 +129,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     characterFormData.append('description', formData.description);
     characterFormData.append('personality', formData.personality);
     characterFormData.append('appearance', formData.appearance);
+    characterFormData.append('requirement', formData.requirement);
     
     // Add all new selected files
     // Note: backend key is 'background_documents' (plural)
@@ -164,187 +167,224 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   };
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-6 h-full">
+    <div className="bg-white rounded-lg border border-gray-200 p-6 h-full w-[200%]">
       <h2 className="text-xl font-bold mb-4">
         {character ? 'Edit Character' : 'Create New Character'}
       </h2>
       
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="block text-sm font-medium text-gray-700">
-              Character Name
-            </label>
-            <button
-              type="button"
-              onClick={() => handleDisableToggle('name')}
-              className={`px-2 py-1 text-xs rounded ${
-                formData.disabled.name
-                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
-                  : 'bg-green-100 text-green-800 hover:bg-green-200'
-              } transition-colors`}
-            >
-              {formData.disabled.name ? 'Enable' : 'Disable'}
-            </button>
-          </div>
-          <input
-            type="text"
-            name="name"
-            value={formData.name}
-            onChange={handleInputChange}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="Enter character name"
-            required={!formData.disabled.name}
-            disabled={formData.disabled.name}
-          />
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="block text-sm font-medium text-gray-700">
-              Description
-            </label>
-            <button
-              type="button"
-              onClick={() => handleDisableToggle('description')}
-              className={`px-2 py-1 text-xs rounded ${
-                formData.disabled.description
-                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
-                  : 'bg-green-100 text-green-800 hover:bg-green-200'
-              } transition-colors`}
-            >
-              {formData.disabled.description ? 'Enable' : 'Disable'}
-            </button>
-          </div>
-          <textarea
-            name="description"
-            value={formData.description}
-            onChange={handleInputChange}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            rows={3}
-            placeholder="Describe your character"
-            required={!formData.disabled.description}
-            disabled={formData.disabled.description}
-          />
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="block text-sm font-medium text-gray-700">
-              Personality
-            </label>
-            <button
-              type="button"
-              onClick={() => handleDisableToggle('personality')}
-              className={`px-2 py-1 text-xs rounded ${
-                formData.disabled.personality
-                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
-                  : 'bg-green-100 text-green-800 hover:bg-green-200'
-              } transition-colors`}
-            >
-              {formData.disabled.personality ? 'Enable' : 'Disable'}
-            </button>
-          </div>
-          <textarea
-            name="personality"
-            value={formData.personality}
-            onChange={handleInputChange}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            rows={4}
-            placeholder="Describe your character's personality"
-            required={!formData.disabled.personality}
-            disabled={formData.disabled.personality}
-          />
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="block text-sm font-medium text-gray-700">
-              Background Documents
-            </label>
-          </div>
-          {/* File list display */}
-          <div className="space-y-2 mt-2">
-            {/* Existing files */}
-            {existingFiles.map(file => (
-              <div key={file.id} className="flex items-center justify-between bg-gray-100 p-2 rounded">
-                <span className="text-sm text-gray-700">{file.original_filename}</span>
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Left Column - Basic Character Information */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Character Name
+                </label>
                 <button
                   type="button"
-                  onClick={() => handleRemoveExistingFile(file)}
-                  className="text-red-500 hover:text-red-700 font-bold"
+                  onClick={() => handleDisableToggle('name')}
+                  className={`px-2 py-1 text-xs rounded ${
+                    formData.disabled.name
+                      ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                      : 'bg-green-100 text-green-800 hover:bg-green-200'
+                  } transition-colors`}
                 >
-                  &times;
+                  {formData.disabled.name ? 'Enable' : 'Disable'}
                 </button>
               </div>
-            ))}
-            {/* New selected files */}
-            {newFiles.map((file, index) => (
-              <div key={index} className="flex items-center justify-between bg-blue-50 p-2 rounded">
-                <span className="text-sm text-blue-700">{file.name}</span>
+              <input
+                type="text"
+                name="name"
+                value={formData.name}
+                onChange={handleInputChange}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Enter character name"
+                required={!formData.disabled.name}
+                disabled={formData.disabled.name}
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Description
+                </label>
                 <button
                   type="button"
-                  onClick={() => handleRemoveNewFile(file)}
-                  className="text-red-500 hover:text-red-700 font-bold"
+                  onClick={() => handleDisableToggle('description')}
+                  className={`px-2 py-1 text-xs rounded ${
+                    formData.disabled.description
+                      ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                      : 'bg-green-100 text-green-800 hover:bg-green-200'
+                  } transition-colors`}
                 >
-                  &times;
+                  {formData.disabled.description ? 'Enable' : 'Disable'}
                 </button>
               </div>
-            ))}
-          </div>
-          
-          {/* New modern drag-and-drop upload area */}
-          <div
-            className={`mt-2 p-6 border-2 border-dashed rounded-lg text-center cursor-pointer transition-colors
-              ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}`}
-            onDragEnter={handleDragEnter}
-            onDragLeave={handleDragLeave}
-            onDragOver={handleDragOver}
-            onDrop={handleDrop}
-            onClick={handleDropZoneClick} // Clicking the area also opens file selector
-          >
-            <p className="text-gray-500">
-              {isDragging ? 'Drop files here' : 'Drag & Drop files here, or click to select'}
-            </p>
-            {/* Hidden native file input */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept=".txt,.pdf,.doc,.docx"
-              onChange={handleFileChange}
-              className="hidden"
-            />
-          </div>
-        </div>
+              <textarea
+                name="description"
+                value={formData.description}
+                onChange={handleInputChange}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                rows={3}
+                placeholder="Describe your character"
+                required={!formData.disabled.description}
+                disabled={formData.disabled.description}
+              />
+            </div>
 
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="block text-sm font-medium text-gray-700">
-              Appearance
-            </label>
-            <button
-              type="button"
-              onClick={() => handleDisableToggle('appearance')}
-              className={`px-2 py-1 text-xs rounded ${
-                formData.disabled.appearance
-                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
-                  : 'bg-green-100 text-green-800 hover:bg-green-200'
-              } transition-colors`}
-            >
-              {formData.disabled.appearance ? 'Enable' : 'Disable'}
-            </button>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Personality
+                </label>
+                <button
+                  type="button"
+                  onClick={() => handleDisableToggle('personality')}
+                  className={`px-2 py-1 text-xs rounded ${
+                    formData.disabled.personality
+                      ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                      : 'bg-green-100 text-green-800 hover:bg-green-200'
+                  } transition-colors`}
+                >
+                  {formData.disabled.personality ? 'Enable' : 'Disable'}
+                </button>
+              </div>
+              <textarea
+                name="personality"
+                value={formData.personality}
+                onChange={handleInputChange}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                rows={4}
+                placeholder="Describe your character's personality"
+                required={!formData.disabled.personality}
+                disabled={formData.disabled.personality}
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Appearance
+                </label>
+                <button
+                  type="button"
+                  onClick={() => handleDisableToggle('appearance')}
+                  className={`px-2 py-1 text-xs rounded ${
+                    formData.disabled.appearance
+                      ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                      : 'bg-green-100 text-green-800 hover:bg-green-200'
+                  } transition-colors`}
+                >
+                  {formData.disabled.appearance ? 'Enable' : 'Disable'}
+                </button>
+              </div>
+              <textarea
+                name="appearance"
+                value={formData.appearance}
+                onChange={handleInputChange}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                rows={3}
+                placeholder="Describe your character's appearance"
+                required={!formData.disabled.appearance}
+                disabled={formData.disabled.appearance}
+              />
+            </div>
           </div>
-          <textarea
-            name="appearance"
-            value={formData.appearance}
-            onChange={handleInputChange}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            rows={3}
-            placeholder="Describe your character's appearance"
-            required={!formData.disabled.appearance}
-            disabled={formData.disabled.appearance}
-          />
+
+          {/* Right Column - Response Guidelines and Background Documents */}
+          <div className="space-y-6">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Response Guidelines
+                </label>
+                <button
+                  type="button"
+                  onClick={() => handleDisableToggle('requirement')}
+                  className={`px-2 py-1 text-xs rounded ${
+                    formData.disabled.requirement
+                      ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                      : 'bg-green-100 text-green-800 hover:bg-green-200'
+                  } transition-colors`}
+                >
+                  {formData.disabled.requirement ? 'Enable' : 'Disable'}
+                </button>
+              </div>
+              <textarea
+                name="requirement"
+                value={formData.requirement}
+                onChange={handleInputChange}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                rows={6}
+                placeholder="Enter response guidelines for your character"
+                required={!formData.disabled.requirement}
+                disabled={formData.disabled.requirement}
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Background Documents
+                </label>
+              </div>
+              {/* File list display */}
+              <div className="space-y-2 mt-2">
+                {/* Existing files */}
+                {existingFiles.map(file => (
+                  <div key={file.id} className="flex items-center justify-between bg-gray-100 p-2 rounded">
+                    <span className="text-sm text-gray-700">{file.original_filename}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveExistingFile(file)}
+                      className="text-red-500 hover:text-red-700 font-bold"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))}
+                {/* New selected files */}
+                {newFiles.map((file, index) => (
+                  <div key={index} className="flex items-center justify-between bg-blue-50 p-2 rounded">
+                    <span className="text-sm text-blue-700">{file.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveNewFile(file)}
+                      className="text-red-500 hover:text-red-700 font-bold"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))}
+              </div>
+              
+              {/* New modern drag-and-drop upload area */}
+              <div
+                className={`mt-2 p-6 border-2 border-dashed rounded-lg text-center cursor-pointer transition-colors
+                  ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}`}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+                onClick={handleDropZoneClick} // Clicking the area also opens file selector
+              >
+                <p className="text-gray-500">
+                  {isDragging ? 'Drop files here' : 'Drag & Drop files here, or click to select'}
+                </p>
+                {/* Hidden native file input */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept=".txt,.pdf,.doc,.docx"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="flex space-x-3 pt-4">
