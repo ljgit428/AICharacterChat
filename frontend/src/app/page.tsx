@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Character, RootState, Message } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setLoading, setError, clearChat } from '@/store/chatSlice';
+import { setCharacter, addMessage, setLoading, setError, clearChat, saveCharacter } from '@/store/chatSlice';
 import ChatWindow from '@/components/ChatWindow';
 import CharacterSettings from '@/components/CharacterSettings';
 import LoginModal from '@/components/LoginModal';
@@ -17,6 +17,7 @@ export default function Home() {
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
+  const messages = useSelector((state: RootState) => state.chat.messages);
 
   // Check for existing token on mount
   useEffect(() => {
@@ -110,6 +111,10 @@ export default function Home() {
       } else if (response.data?.status === 'processing') {
         // Task is processing, no AI response yet
         console.log('AI response is being generated...');
+        // Start polling for the AI response
+        if (response.data.chat_session_id) {
+          pollForMessage(response.data.chat_session_id);
+        }
       } else if (response.data?.user_message) {
         // Add user message (already added, but just in case)
         console.log('User message sent:', response.data.user_message);
@@ -134,6 +139,34 @@ export default function Home() {
     } finally {
       dispatch(setLoading(false));
     }
+  };
+
+  // Polling function to check for AI responses
+  const pollForMessage = (sessionId: string) => {
+    const intervalId = setInterval(async () => {
+      try {
+        // Get the latest messages for this session
+        const messagesResponse = await apiService.getMessages(sessionId);
+        
+        if (messagesResponse.data && messagesResponse.data.length > 0) {
+          const lastMessage = messagesResponse.data[messagesResponse.data.length - 1];
+          
+          // Check if the latest message is from AI and we haven't added it yet
+          if (lastMessage && lastMessage.role === 'assistant' &&
+              !messages.some((m: Message) => m.id === lastMessage.id)) {
+            
+            // Found the AI response! Stop polling and add to UI
+            clearInterval(intervalId);
+            dispatch(addMessage(lastMessage));
+            dispatch(setLoading(false));
+          }
+        }
+      } catch (error) {
+        console.error('Polling error:', error);
+        clearInterval(intervalId);
+        dispatch(setLoading(false));
+      }
+    }, 3000); // Poll every 3 seconds
   };
 
   // Helper function to generate character prompt based on available data
@@ -189,42 +222,30 @@ export default function Home() {
   };
 
   const handleSaveCharacter = async (characterData: Character) => {
-    dispatch(setLoading(true)); // Start loading
-    dispatch(setError(null));   // Clear old errors
+    // Create FormData for character data
+    const formData = new FormData();
+    formData.append('name', characterData.name);
+    formData.append('description', characterData.description);
+    formData.append('personality', characterData.personality);
+    formData.append('appearance', characterData.appearance);
+    
+    // Dispatch the thunk instead of directly calling API
+    const resultAction = await dispatch(saveCharacter({
+      id: characterData.id,
+      formData
+    }) as any);
 
-    try {
-      let response;
-      
-      // Create FormData for character data
-      const formData = new FormData();
-      formData.append('name', characterData.name);
-      formData.append('description', characterData.description);
-      formData.append('personality', characterData.personality);
-      formData.append('appearance', characterData.appearance);
-      
-      // Check if character has an ID to determine if we're creating or updating
-      if (characterData.id) {
-        // Update existing character
-        response = await apiService.updateCharacter(characterData.id, formData);
-      } else {
-        // Create new character
-        response = await apiService.createCharacter(formData);
-      }
-      
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
-      dispatch(setCharacter(characterData));
+    if (resultAction.meta.requestStatus === 'fulfilled') {
+      // API call successful, Redux store already updated
       dispatch(clearChat()); // Clear previous messages when character changes
       setHasStartedConversation(false); // Reset conversation state
       setChatSessionId(null); // Reset chat session ID when character changes
       setShowSettings(false);
-    } catch (error) {
-      console.error('Error saving character:', error);
-      dispatch(setError(error instanceof Error ? error.message : 'Failed to save character'));
-    } finally {
-      dispatch(setLoading(false)); // End loading
+    } else if (resultAction.meta.requestStatus === 'rejected') {
+      // API call failed, Redux store already has error
+      console.error('Failed to save character:', resultAction.payload);
+      // Show error to user
+      dispatch(setError(resultAction.payload as string));
     }
   };
 

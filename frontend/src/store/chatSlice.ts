@@ -1,5 +1,6 @@
-import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { ChatState, Message, Character } from '@/types';
+import { apiService } from '@/utils/api';
 
 const initialState: ChatState = {
   messages: [],
@@ -7,6 +8,29 @@ const initialState: ChatState = {
   isLoading: false,
   error: null,
 };
+
+// Async thunk for saving character
+export const saveCharacter = createAsyncThunk(
+  'chat/saveCharacter',
+  async ({ id, formData }: { id?: string; formData: FormData }, { rejectWithValue }) => {
+    try {
+      let response;
+      if (id) {
+        response = await apiService.updateCharacter(id, formData);
+      } else {
+        response = await apiService.createCharacter(formData);
+      }
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      return response.data;
+    } catch (error: any) {
+      return rejectWithValue(error.message || 'Failed to save character');
+    }
+  }
+);
 
 const chatSlice = createSlice({
   name: 'chat',
@@ -41,6 +65,21 @@ const chatSlice = createSlice({
         state.character.disabled[action.payload.attribute] = action.payload.disabled;
       }
     },
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(saveCharacter.pending, (state) => {
+        state.isLoading = true;
+        state.error = null;
+      })
+      .addCase(saveCharacter.fulfilled, (state, action) => {
+        state.isLoading = false;
+        state.character = action.payload || null;
+      })
+      .addCase(saveCharacter.rejected, (state, action) => {
+        state.isLoading = false;
+        state.error = action.payload as string;
+      });
   },
 });
 

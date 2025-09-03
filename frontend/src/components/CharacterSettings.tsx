@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { Character, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, updateCharacter } from '@/store/chatSlice';
+import { setCharacter, updateCharacter, saveCharacter } from '@/store/chatSlice';
 import { apiService } from '@/utils/api';
 
 interface CharacterSettingsProps {
@@ -78,17 +78,17 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       disabled: formData.disabled
     };
     
+    // Dispatch the thunk instead of directly calling API
+    dispatch(saveCharacter({
+      id: character?.id,
+      formData: characterFormData
+    }) as any);
+    
+    // Optimistically update the UI
     if (character) {
       dispatch(updateCharacter(characterObject));
     } else {
       dispatch(setCharacter(characterObject));
-    }
-    
-    // Save to API using FormData
-    if (character) {
-      apiService.updateCharacter(character.id, characterFormData);
-    } else {
-      apiService.createCharacter(characterFormData);
     }
     
     onSave(characterObject);
@@ -201,9 +201,11 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           {backgroundFile && (
-            <p className="text-sm text-gray-600 mt-1">
-              Selected: {backgroundFile.name}
-            </p>
+            <div className="mt-1 p-2 bg-blue-50 rounded-md">
+              <p className="text-sm text-blue-700">
+                Selected: {backgroundFile.name}
+              </p>
+            </div>
           )}
         </div>
 
