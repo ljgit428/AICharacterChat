@@ -6,3 +6,4 @@ celery==5.5.3
 redis==6.4.0
 requests==2.32.3
 django-corsheaders==4.4.0
+google-generativeai==0.8.3

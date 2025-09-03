@@ -1,13 +1,13 @@
 from celery import shared_task
-import requests
-import json
+import sys
 from django.conf import settings
+import google.generativeai as genai
 from .models import Message, Character, ChatSession
 
 @shared_task
 def generate_ai_response(message_id, character_id):
     """
-    Generate AI response using Gemini 2.5 Pro API
+    Generate AI response using Gemini 2.5 Flash API with persistent chat sessions
     """
     print(f"Task started: generate_ai_response for message_id={message_id}, character_id={character_id}")
     try:
@@ -17,51 +17,45 @@ def generate_ai_response(message_id, character_id):
         print(f"Found message: {message.content[:50]}...")
         print(f"Found character: {character.name}")
         
-        # Prepare the prompt
-        prompt = f"You are {character.name}. {character.personality}\n\n"
-        prompt += f"Appearance: {character.appearance}\n\n"
-        prompt += f"Character description: {character.description}\n\n"
-        
-        # Add conversation history
-        conversation_history = Message.objects.filter(
-            chat_session=message.chat_session
-        ).order_by('timestamp')[:10]  # Get last 10 messages
-        
-        for msg in conversation_history:
-            prompt += f"{msg.role}: {msg.content}\n"
-        
-        prompt += f"assistant: "
-        
-        # Call Gemini API using the correct template
+        # Get API key
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found in settings")
         
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        # Initialize Gemini client
+        genai.configure(api_key=api_key)
+        client = genai.GenerativeModel('gemini-2.5-flash')
         
-        headers = {
-            'Content-Type': 'application/json',
-            'X-goog-api-key': api_key
-        }
+        # Create or get persistent chat session
+        chat_session, created = ChatSession.objects.get_or_create(
+            id=message.chat_session.id,
+            defaults={
+                'gemini_chat_id': None,  # Will be set after first message
+                'user': message.chat_session.user,
+                'character': character
+            }
+        )
         
-        data = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
-        }
+        # If this is the first message in the chat, create a new Gemini chat
+        if created or not chat_session.gemini_chat_id:
+            # Send initial character setup message
+            initial_prompt = f"You are {character.name}. {character.personality}\n\n"
+            initial_prompt += f"Appearance: {character.appearance}\n\n"
+            initial_prompt += f"Character description: {character.description}\n\n"
+            initial_prompt += "You are roleplaying as this character. Respond naturally and stay in character."
+            
+            chat = client.start_chat(history=[{"role": "user", "parts": [initial_prompt]}])
+            chat_session.gemini_chat_id = "gemini_chat"  # Store a simple identifier
+            chat_session.save()
+        else:
+            # Create a new chat session for each request to maintain context
+            chat = client.start_chat(
+                history=[{"role": "user", "parts": [message.content]}]
+            )
         
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        
-        # Parse the response
-        response_data = response.json()
-        ai_response = response_data['candidates'][0]['content']['parts'][0]['text']
+        # Send user message and get AI response
+        response = chat.send_message(message.content)
+        ai_response = response.text
         
         # Save the AI response
         ai_message = Message.objects.create(
