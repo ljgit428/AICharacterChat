@@ -14,6 +14,7 @@ export default function Home() {
   const [hasStartedConversation, setHasStartedConversation] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [currentUser, setCurrentUser] = useState<string | null>(null);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
 
@@ -70,6 +71,7 @@ export default function Home() {
       const response = await apiService.sendMessage({
         message: finalMessage,
         character_id: character.id,
+        chat_session_id: chatSessionId || undefined,
       });
 
       if (response.error) {
@@ -94,12 +96,22 @@ export default function Home() {
 
         // 4. Dispatch the formatted message to Redux store
         dispatch(addMessage(formattedAiMessage));
+        
+        // Save the chat session ID from the response
+        if (response.data?.chat_session_id) {
+          setChatSessionId(response.data.chat_session_id);
+        }
       } else if (response.data?.status === 'processing') {
         // Task is processing, no AI response yet
         console.log('AI response is being generated...');
       } else if (response.data?.user_message) {
         // Add user message (already added, but just in case)
         console.log('User message sent:', response.data.user_message);
+        
+        // Save the chat session ID from the response
+        if (response.data?.chat_session_id) {
+          setChatSessionId(response.data.chat_session_id);
+        }
       }
     } catch (error) {
       console.error('Error sending message:', error);
@@ -182,6 +194,7 @@ export default function Home() {
       dispatch(setCharacter(characterData));
       dispatch(clearChat()); // Clear previous messages when character changes
       setHasStartedConversation(false); // Reset conversation state
+      setChatSessionId(null); // Reset chat session ID when character changes
       setShowSettings(false);
     } catch (error) {
       console.error('Error saving character:', error);
