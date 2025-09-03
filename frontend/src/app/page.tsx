@@ -38,7 +38,7 @@ export default function Home() {
         description: 'A friendly AI companion ready to chat with you.',
         personality: 'Helpful, cheerful, and curious.',
         appearance: 'A friendly digital companion with a warm smile.',
-        requirement: '',
+        requirement: 'Please be helpful, accurate, and engaging in your responses. Stay in character and provide thoughtful answers to user questions.',
         disabled: {
           name: false,
           description: false,
