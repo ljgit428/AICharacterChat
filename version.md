@@ -1,8 +1,8 @@
 ## Version History
-# Version 0.0.3 - AI Character Chat Application
+# Version 0.0.4 - AI Character Chat Application
 
 ## Release Date
-September 2024
+September 2025
 
 ## Overview
 Version 0.0.3 represents a major milestone in the development of our AI Character Chat Application, featuring a complete implementation with full frontend-backend integration, AI-powered conversations, and comprehensive character customization capabilities.
@@ -175,9 +175,15 @@ This release represents the culmination of extensive development work, combining
 
 ---
 
-*This document covers all major features and improvements included in version 0.0.3 of the AI Character Chat Application.*
+*This document covers all major features and improvements included in version 0.0.4 of the AI Character Chat Application.*
 
-### v0.0.2
+### v0.0.4
+- **Branch management**: Created v0.0.4 branch for version tracking
+- **Version documentation**: Updated version.md to reflect v0.0.4 release
+- **Release date**: Updated to September 2025
+- **Version history**: Updated to reference v0.0.4 as current version
+
+### v0.0.3
 - **Enhanced API message handling**: Added robust support for receiving and processing completed API messages
 - **Authentication system**: Implemented user authentication views and login modal component
 - **Docker support**: Added docker-compose.yml for easy Redis deployment
