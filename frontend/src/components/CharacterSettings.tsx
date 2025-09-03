@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Character, CharacterFile, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, updateCharacter, saveCharacter } from '@/store/chatSlice';
@@ -31,6 +31,9 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   // Manage existing files (for display and deletion)
   const [existingFiles, setExistingFiles] = useState<CharacterFile[]>(character?.background_files || []);
 
+  // Create a ref to reference the file input element
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const dispatch = useDispatch();
   const currentCharacter = useSelector((state: RootState) => state.chat.character);
 
@@ -51,6 +54,12 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
 
   const handleRemoveNewFile = (fileToRemove: File) => {
     setNewFiles(prev => prev.filter(file => file !== fileToRemove));
+    
+    // Reset the file input value to clear the native file selection
+    // This clears the browser's internal file selection state (e.g., "2 files selected" text)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
   
   const handleRemoveExistingFile = async (fileToRemove: CharacterFile) => {
@@ -247,6 +256,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
           </div>
           
           <input
+            ref={fileInputRef}
             type="file"
             multiple // Allow multiple file selection
             accept=".txt,.pdf,.doc,.docx"
