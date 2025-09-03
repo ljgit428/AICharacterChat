@@ -180,22 +180,22 @@ export default function Home() {
       promptSections.push(`=== CHARACTER IDENTITY ===`);
       
       // Include name if available and not disabled
-      if (character.name && character.name.trim() && !character.disabled.name) {
+      if (character.name && character.name.trim() && !character.disabled?.name) {
         promptSections.push(`Name: ${character.name}`);
       }
       
       // Include description if available and not disabled
-      if (character.description && character.description.trim() && !character.disabled.description) {
+      if (character.description && character.description.trim() && !character.disabled?.description) {
         promptSections.push(`Description: ${character.description}`);
       }
       
       // Include personality if available and not disabled
-      if (character.personality && character.personality.trim() && !character.disabled.personality) {
+      if (character.personality && character.personality.trim() && !character.disabled?.personality) {
         promptSections.push(`Personality: ${character.personality}`);
       }
       
       // Include appearance if available and not disabled
-      if (character.appearance && character.appearance.trim() && !character.disabled.appearance) {
+      if (character.appearance && character.appearance.trim() && !character.disabled?.appearance) {
         promptSections.push(`Appearance: ${character.appearance}`);
       }
       
@@ -203,8 +203,8 @@ export default function Home() {
     }
 
     // Response Guidelines section (use requirement field if available and not disabled)
-    if (character.requirement && character.requirement.trim() && !character.disabled.requirement) {
-      promptSections.push(character.requirement);
+    if (character.requirement && character.requirement.trim() && !character.disabled?.requirement) {
+      promptSections.push(`Requirement: ${character.requirement}`);
       promptSections.push('');
     }
 
