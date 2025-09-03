@@ -36,6 +36,11 @@ const chatSlice = createSlice({
       state.messages = [];
       state.error = null;
     },
+    updateCharacterDisabled: (state, action: PayloadAction<{attribute: keyof Character['disabled'], disabled: boolean}>) => {
+      if (state.character) {
+        state.character.disabled[action.payload.attribute] = action.payload.disabled;
+      }
+    },
   },
 });
 
@@ -47,6 +52,7 @@ export const {
   setCharacter,
   updateCharacter,
   clearChat,
+  updateCharacterDisabled,
 } = chatSlice.actions;
 
 export default chatSlice.reducer;

@@ -37,6 +37,12 @@ export default function Home() {
         description: 'A friendly AI companion ready to chat with you.',
         personality: 'Helpful, cheerful, and curious.',
         appearance: 'A friendly digital companion with a warm smile.',
+        disabled: {
+          name: false,
+          description: false,
+          personality: false,
+          appearance: false,
+        },
       };
       dispatch(setCharacter(defaultCharacter));
     }
@@ -138,23 +144,23 @@ export default function Home() {
     if (character.name || character.description || character.personality || character.appearance) {
       promptSections.push(`=== CHARACTER IDENTITY ===`);
       
-      // Always include name if available
-      if (character.name && character.name.trim()) {
+      // Include name if available and not disabled
+      if (character.name && character.name.trim() && !character.disabled.name) {
         promptSections.push(`Name: ${character.name}`);
       }
       
-      // Always include description if available
-      if (character.description && character.description.trim()) {
+      // Include description if available and not disabled
+      if (character.description && character.description.trim() && !character.disabled.description) {
         promptSections.push(`Description: ${character.description}`);
       }
       
-      // Always include personality if available
-      if (character.personality && character.personality.trim()) {
+      // Include personality if available and not disabled
+      if (character.personality && character.personality.trim() && !character.disabled.personality) {
         promptSections.push(`Personality: ${character.personality}`);
       }
       
-      // Always include appearance if available
-      if (character.appearance && character.appearance.trim()) {
+      // Include appearance if available and not disabled
+      if (character.appearance && character.appearance.trim() && !character.disabled.appearance) {
         promptSections.push(`Appearance: ${character.appearance}`);
       }
       
@@ -168,7 +174,7 @@ export default function Home() {
       promptSections.push(`- Respond consistently with your character's traits and background`);
       promptSections.push(`- Maintain character voice throughout the conversation`);
       promptSections.push(`- Be engaging and responsive to user input`);
-      if (character.name) {
+      if (character.name && !character.disabled.name) {
         promptSections.push(`- Stay true to ${character.name}'s established character`);
       }
       promptSections.push('');

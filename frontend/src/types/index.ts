@@ -11,6 +11,12 @@ export interface Character {
   description: string;
   personality: string;
   appearance: string;
+  disabled: {
+    name: boolean;
+    description: boolean;
+    personality: boolean;
+    appearance: boolean;
+  };
 }
 
 export interface ChatState {

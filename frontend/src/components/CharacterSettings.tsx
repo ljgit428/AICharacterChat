@@ -17,6 +17,12 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     description: character?.description || '',
     personality: character?.personality || '',
     appearance: character?.appearance || '',
+    disabled: character?.disabled || {
+      name: false,
+      description: false,
+      personality: false,
+      appearance: false,
+    },
   });
 
   const dispatch = useDispatch();
@@ -27,6 +33,16 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     setFormData(prev => ({
       ...prev,
       [name]: value
+    }));
+  };
+
+  const handleDisableToggle = (attribute: keyof typeof formData.disabled) => {
+    setFormData(prev => ({
+      ...prev,
+      disabled: {
+        ...prev.disabled,
+        [attribute]: !prev.disabled[attribute]
+      }
     }));
   };
 
@@ -54,9 +70,22 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Character Name
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Character Name
+            </label>
+            <button
+              type="button"
+              onClick={() => handleDisableToggle('name')}
+              className={`px-2 py-1 text-xs rounded ${
+                formData.disabled.name
+                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                  : 'bg-green-100 text-green-800 hover:bg-green-200'
+              } transition-colors`}
+            >
+              {formData.disabled.name ? 'Enable' : 'Disable'}
+            </button>
+          </div>
           <input
             type="text"
             name="name"
@@ -64,14 +93,28 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             onChange={handleInputChange}
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="Enter character name"
-            required
+            required={!formData.disabled.name}
+            disabled={formData.disabled.name}
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Description
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Description
+            </label>
+            <button
+              type="button"
+              onClick={() => handleDisableToggle('description')}
+              className={`px-2 py-1 text-xs rounded ${
+                formData.disabled.description
+                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                  : 'bg-green-100 text-green-800 hover:bg-green-200'
+              } transition-colors`}
+            >
+              {formData.disabled.description ? 'Enable' : 'Disable'}
+            </button>
+          </div>
           <textarea
             name="description"
             value={formData.description}
@@ -79,14 +122,28 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             rows={3}
             placeholder="Describe your character"
-            required
+            required={!formData.disabled.description}
+            disabled={formData.disabled.description}
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Personality
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Personality
+            </label>
+            <button
+              type="button"
+              onClick={() => handleDisableToggle('personality')}
+              className={`px-2 py-1 text-xs rounded ${
+                formData.disabled.personality
+                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                  : 'bg-green-100 text-green-800 hover:bg-green-200'
+              } transition-colors`}
+            >
+              {formData.disabled.personality ? 'Enable' : 'Disable'}
+            </button>
+          </div>
           <textarea
             name="personality"
             value={formData.personality}
@@ -94,14 +151,28 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             rows={4}
             placeholder="Describe your character's personality"
-            required
+            required={!formData.disabled.personality}
+            disabled={formData.disabled.personality}
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Appearance
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Appearance
+            </label>
+            <button
+              type="button"
+              onClick={() => handleDisableToggle('appearance')}
+              className={`px-2 py-1 text-xs rounded ${
+                formData.disabled.appearance
+                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                  : 'bg-green-100 text-green-800 hover:bg-green-200'
+              } transition-colors`}
+            >
+              {formData.disabled.appearance ? 'Enable' : 'Disable'}
+            </button>
+          </div>
           <textarea
             name="appearance"
             value={formData.appearance}
@@ -109,7 +180,8 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             rows={3}
             placeholder="Describe your character's appearance"
-            required
+            required={!formData.disabled.appearance}
+            disabled={formData.disabled.appearance}
           />
         </div>
 
