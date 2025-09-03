@@ -11,69 +11,79 @@ def generate_ai_response(message_id, character_id):
     """
     print(f"Task started: generate_ai_response for message_id={message_id}, character_id={character_id}")
     try:
-        # Get the message and character
-        message = Message.objects.get(id=message_id)
+        # 1. 获取核心对象
+        user_message = Message.objects.get(id=message_id)
         character = Character.objects.get(id=character_id)
-        print(f"Found message: {message.content[:50]}...")
-        print(f"Found character: {character.name}")
+        chat_session = user_message.chat_session
         
-        # Get API key
+        print(f"Found user_message: {user_message.content[:50]}...")
+        print(f"Found character: {character.name}")
+
+        # 2. 配置 Gemini API
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found in settings")
         
-        # Initialize Gemini client
         genai.configure(api_key=api_key)
-        client = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # Create or get persistent chat session
-        chat_session, created = ChatSession.objects.get_or_create(
-            id=message.chat_session.id,
-            defaults={
-                'gemini_chat_id': None,  # Will be set after first message
-                'user': message.chat_session.user,
-                'character': character
-            }
+        model = genai.GenerativeModel('gemini-1.5-flash') # 使用 1.5-flash 或 2.5-pro
+
+        # 3. 构建完整的对话历史
+        # 首先，构建角色设定的初始提示
+        initial_prompt = (
+            f"You are now roleplaying as the character '{character.name}'. "
+            f"Your personality is: {character.personality}. "
+            f"Your appearance is: {character.appearance}. "
+            f"Here is your background story: {character.description}. "
+            "From this moment on, you must respond and act entirely as this character. Do not break character. "
+            "Engage with the user naturally based on your defined traits."
         )
+
+        # Gemini API 期望的格式是 [{"role": "user/model", "parts": [text]}]
+        # 我们用一个 "system" instruction 来设定角色
+        formatted_history = [
+            # Gemini 没有 system role, 我们用 user/model 对来模拟
+            {"role": "user", "parts": [initial_prompt]},
+            {"role": "model", "parts": ["Understood. I am ready to embody the character and begin our conversation."]}
+        ]
+
+        # 从数据库获取此会话的所有历史消息 (除了刚刚收到的最新一条)
+        # 注意：这里我们获取的是所有消息，包括最新的用户消息，因为下面会直接用 generate_content
+        history_messages = Message.objects.filter(chat_session=chat_session).order_by('timestamp')
+
+        for msg in history_messages:
+            # 数据库中的 role ('assistant') 需要映射为 'model'
+            role = 'model' if msg.role == 'assistant' else 'user'
+            formatted_history.append({
+                "role": role,
+                "parts": [msg.content]
+            })
+
+        # 4. 调用 Gemini API 生成回复
+        # 使用 generate_content 并传入完整的历史记录
+        response = model.generate_content(formatted_history)
+        ai_response_text = response.text
         
-        # If this is the first message in the chat, create a new Gemini chat
-        if created or not chat_session.gemini_chat_id:
-            # Send initial character setup message
-            initial_prompt = f"You are {character.name}. {character.personality}\n\n"
-            initial_prompt += f"Appearance: {character.appearance}\n\n"
-            initial_prompt += f"Character description: {character.description}\n\n"
-            initial_prompt += "You are roleplaying as this character. Respond naturally and stay in character."
-            
-            chat = client.start_chat(history=[{"role": "user", "parts": [initial_prompt]}])
-            chat_session.gemini_chat_id = "gemini_chat"  # Store a simple identifier
-            chat_session.save()
-        else:
-            # Create a new chat session for each request to maintain context
-            chat = client.start_chat(
-                history=[{"role": "user", "parts": [message.content]}]
-            )
-        
-        # Send user message and get AI response
-        response = chat.send_message(message.content)
-        ai_response = response.text
-        
-        # Save the AI response
+        # 5. 保存 AI 的回复到数据库
         ai_message = Message.objects.create(
-            chat_session=message.chat_session,
+            chat_session=chat_session,
             role='assistant',
-            content=ai_response,
+            content=ai_response_text,
             character=character
         )
         
+        print(f"Successfully generated and saved AI response for message_id={ai_message.id}")
+
         return {
             'success': True,
             'message_id': ai_message.id,
-            'content': ai_response
+            'content': ai_response_text
         }
         
     except Exception as e:
-        # Log the error and return failure
+        # 记录详细错误，方便调试
+        import traceback
         print(f"Error generating AI response: {str(e)}")
+        print(traceback.format_exc())
         return {
             'success': False,
             'error': str(e)
