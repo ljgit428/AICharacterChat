@@ -7,7 +7,7 @@ interface ApiResponse<T> {
 }
 
 // Import types from the types file
-import { Character, Message } from '@/types';
+import { Character, Message, CharacterFile } from '@/types';
 
 interface ChatSession {
   id: string;
@@ -191,6 +191,13 @@ class ApiService {
   async logout(): Promise<ApiResponse<{ message: string }>> {
     return this.request('/auth/logout/', {
       method: 'POST',
+    });
+  }
+
+  // New method for deleting character files
+  async deleteCharacterFile(characterId: string, fileId: string): Promise<ApiResponse<void>> {
+    return this.request(`/characters/${characterId}/files/${fileId}/`, {
+      method: 'DELETE',
     });
   }
 

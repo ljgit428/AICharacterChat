@@ -3,6 +3,17 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 
 
+# New model to handle one-to-many file relationship
+class CharacterFile(models.Model):
+    character = models.ForeignKey('Character', on_delete=models.CASCADE, related_name='background_files')
+    original_filename = models.CharField(max_length=255)
+    gemini_file_ref = models.CharField(max_length=255, help_text="Reference ID for the file uploaded to Gemini API")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.original_filename} for {self.character.name}"
+
+
 class Character(models.Model):
     name = models.CharField(max_length=100)
     description = models.TextField()
@@ -14,8 +25,8 @@ class Character(models.Model):
     
     # Fields for file uploads
     profile_image = models.ImageField(upload_to='character_images/', null=True, blank=True)
-    # Reference ID for the file uploaded to Gemini File API
-    gemini_file_ref = models.CharField(max_length=255, blank=True, null=True, help_text="Reference ID for the file uploaded to Gemini API")
+    # OLD: Reference ID for the file uploaded to Gemini File API - REMOVED
+    # gemini_file_ref = models.CharField(max_length=255, blank=True, null=True, help_text="Reference ID for the file uploaded to Gemini API")
     
     def __str__(self):
         return self.name

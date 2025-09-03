@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from 'react';
-import { Character, RootState } from '@/types';
+import { useState, useEffect } from 'react';
+import { Character, CharacterFile, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, updateCharacter, saveCharacter } from '@/store/chatSlice';
 import { apiService } from '@/utils/api';
@@ -26,7 +26,10 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     },
   });
 
-  const [backgroundFile, setBackgroundFile] = useState<File | null>(null);
+  // Manage new selected files (for upload)
+  const [newFiles, setNewFiles] = useState<File[]>([]);
+  // Manage existing files (for display and deletion)
+  const [existingFiles, setExistingFiles] = useState<CharacterFile[]>(character?.background_files || []);
 
   const dispatch = useDispatch();
   const currentCharacter = useSelector((state: RootState) => state.chat.character);
@@ -40,9 +43,26 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setBackgroundFile(file);
+    if (e.target.files) {
+      // Append new files to the list
+      setNewFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+    }
+  };
+
+  const handleRemoveNewFile = (fileToRemove: File) => {
+    setNewFiles(prev => prev.filter(file => file !== fileToRemove));
+  };
+  
+  const handleRemoveExistingFile = async (fileToRemove: CharacterFile) => {
+    if (!character?.id) return;
+    try {
+      // Call the new delete API
+      await apiService.deleteCharacterFile(character.id, fileToRemove.id);
+      // Remove from UI state
+      setExistingFiles(prev => prev.filter(file => file.id !== fileToRemove.id));
+    } catch (error) {
+      console.error("Failed to delete file:", error);
+      // You could add a user notification here
     }
   };
 
@@ -66,16 +86,18 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     characterFormData.append('personality', formData.personality);
     characterFormData.append('appearance', formData.appearance);
     
-    // Add background document if provided
-    if (backgroundFile) {
-      characterFormData.append('background_document', backgroundFile);
-    }
+    // Add all new selected files
+    // Note: backend key is 'background_documents' (plural)
+    newFiles.forEach(file => {
+      characterFormData.append('background_documents', file);
+    });
     
     // Create character object for Redux store
     const characterObject = {
       ...formData,
       id: character?.id || Date.now().toString(),
-      disabled: formData.disabled
+      disabled: formData.disabled,
+      background_files: existingFiles
     };
     
     // Dispatch the thunk instead of directly calling API
@@ -191,22 +213,46 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="block text-sm font-medium text-gray-700">
-              Background Document
+              Background Documents
             </label>
           </div>
+          {/* File list display */}
+          <div className="space-y-2 mt-2">
+            {/* Existing files */}
+            {existingFiles.map(file => (
+              <div key={file.id} className="flex items-center justify-between bg-gray-100 p-2 rounded">
+                <span className="text-sm text-gray-700">{file.original_filename}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveExistingFile(file)}
+                  className="text-red-500 hover:text-red-700 font-bold"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+            {/* New selected files */}
+            {newFiles.map((file, index) => (
+              <div key={index} className="flex items-center justify-between bg-blue-50 p-2 rounded">
+                <span className="text-sm text-blue-700">{file.name}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveNewFile(file)}
+                  className="text-red-500 hover:text-red-700 font-bold"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+          </div>
+          
           <input
             type="file"
+            multiple // Allow multiple file selection
             accept=".txt,.pdf,.doc,.docx"
             onChange={handleFileChange}
             className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
-          {backgroundFile && (
-            <div className="mt-1 p-2 bg-blue-50 rounded-md">
-              <p className="text-sm text-blue-700">
-                Selected: {backgroundFile.name}
-              </p>
-            </div>
-          )}
         </div>
 
         <div>

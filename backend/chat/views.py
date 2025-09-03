@@ -4,13 +4,14 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from django.db.models import Q
-from .models import Character, ChatSession, Message
+from .models import Character, ChatSession, Message, CharacterFile
 from .serializers import (
     CharacterSerializer,
     ChatSessionSerializer,
     ChatSessionCreateSerializer,
     MessageSerializer,
-    MessageCreateSerializer
+    MessageCreateSerializer,
+    CharacterFileSerializer
 )
 from .tasks import generate_ai_response
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -61,41 +62,61 @@ class CharacterViewSet(viewsets.ModelViewSet):
         User = get_user_model()
         user, _ = User.objects.get_or_create(username='default_user')
         
-        gemini_ref = None
-        background_file = self.request.data.get('background_document')
-        print(f"DEBUG: Found background_file in request: {background_file}")
-        print(f"DEBUG: File type: {type(background_file)}")
+        # Save character instance first
+        character_instance = serializer.save(created_by=user)
         
-        if background_file:
-            print(f"DEBUG: Attempting to upload file: {background_file.name}")
-            gemini_ref = self._upload_file_to_gemini(background_file)
-            print(f"DEBUG: Upload result: {gemini_ref}")
-            
-        serializer.save(created_by=user, gemini_file_ref=gemini_ref)
-        print(f"DEBUG: Character saved with gemini_file_ref: {gemini_ref}")
+        # Handle multiple files
+        background_files = self.request.FILES.getlist('background_documents')
+        for file_obj in background_files:
+            gemini_ref = self._upload_file_to_gemini(file_obj)
+            if gemini_ref:
+                CharacterFile.objects.create(
+                    character=character_instance,
+                    original_filename=file_obj.name,
+                    gemini_file_ref=gemini_ref
+                )
 
     def perform_update(self, serializer):
-        gemini_ref = serializer.instance.gemini_file_ref  # Keep old reference
-        background_file = self.request.data.get('background_document')
+        character_instance = serializer.save()
         
-        if background_file:
-            # If new file is uploaded, delete old file (optional but recommended)
-            if serializer.instance.gemini_file_ref:
-                try:
-                    genai.delete_file(name=serializer.instance.gemini_file_ref)
-                    print(f"Deleted old Gemini file: {serializer.instance.gemini_file_ref}")
-                except Exception as e:
-                    print(f"Could not delete old Gemini file: {e}")
-
-            gemini_ref = self._upload_file_to_gemini(background_file)
-            
-        serializer.save(gemini_file_ref=gemini_ref)
+        # Handle multiple new files
+        background_files = self.request.FILES.getlist('background_documents')
+        for file_obj in background_files:
+            gemini_ref = self._upload_file_to_gemini(file_obj)
+            if gemini_ref:
+                CharacterFile.objects.create(
+                    character=character_instance,
+                    original_filename=file_obj.name,
+                    gemini_file_ref=gemini_ref
+                )
     
     @action(detail=False, methods=['get'])
     def my_characters(self, request):
         characters = Character.objects.filter(created_by=request.user)
         serializer = self.get_serializer(characters, many=True)
         return Response(serializer.data)
+
+    # New action to handle file deletion
+    @action(detail=True, methods=['delete'], url_path='files/(?P<file_id>[^/.]+)')
+    def delete_file(self, request, pk=None, file_id=None):
+        try:
+            character_file = CharacterFile.objects.get(id=file_id, character_id=pk)
+            
+            # Delete file from Gemini
+            try:
+                genai.delete_file(name=character_file.gemini_file_ref)
+                print(f"Deleted Gemini file: {character_file.gemini_file_ref}")
+            except Exception as e:
+                # If Gemini deletion fails, we might still want to delete the database record
+                print(f"Could not delete Gemini file, but proceeding: {e}")
+            
+            # Delete database record
+            character_file.delete()
+            
+            return Response(status=status.HTTP_204_NO_CONTENT)
+            
+        except CharacterFile.DoesNotExist:
+            return Response({'error': 'File not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):

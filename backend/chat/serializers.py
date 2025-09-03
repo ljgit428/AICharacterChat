@@ -1,19 +1,27 @@
 from rest_framework import serializers
-from .models import Character, ChatSession, Message
+from .models import Character, ChatSession, Message, CharacterFile
+
+
+# New CharacterFile Serializer
+class CharacterFileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CharacterFile
+        fields = ['id', 'original_filename', 'gemini_file_ref', 'uploaded_at']
 
 
 class CharacterSerializer(serializers.ModelSerializer):
     # Make API able to return full URLs for files
     profile_image = serializers.ImageField(max_length=None, use_url=True, required=False)
-    # background_document field is replaced with gemini_file_ref
+    # Use new serializer to show related files
+    background_files = CharacterFileSerializer(many=True, read_only=True)
     
     class Meta:
         model = Character
         fields = [
             'id', 'name', 'description', 'personality', 'appearance',
-            'created_at', 'updated_at', 'profile_image', 'gemini_file_ref'
+            'created_at', 'updated_at', 'profile_image', 'background_files'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'gemini_file_ref']
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class MessageSerializer(serializers.ModelSerializer):

@@ -5,6 +5,13 @@ export interface Message {
   timestamp: string; // Using ISO string instead of Date object for Redux serialization
 }
 
+export interface CharacterFile {
+  id: string;
+  original_filename: string;
+  gemini_file_ref: string;
+  uploaded_at: string;
+}
+
 export interface Character {
   id: string;
   name: string;
@@ -17,6 +24,7 @@ export interface Character {
     personality: boolean;
     appearance: boolean;
   };
+  background_files?: CharacterFile[]; // Make it optional for backward compatibility
 }
 
 export interface ChatState {
