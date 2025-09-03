@@ -183,9 +183,30 @@ export default function Home() {
   };
 
   const handleSaveCharacter = async (characterData: Character) => {
+    dispatch(setLoading(true)); // Start loading
+    dispatch(setError(null));   // Clear old errors
+
     try {
-      // Save character to backend
-      const response = await apiService.createCharacter(characterData);
+      let response;
+      
+      // Check if character has an ID to determine if we're creating or updating
+      if (characterData.id) {
+        // Update existing character
+        response = await apiService.updateCharacter(characterData.id, {
+          name: characterData.name,
+          description: characterData.description,
+          personality: characterData.personality,
+          appearance: characterData.appearance,
+        });
+      } else {
+        // Create new character
+        response = await apiService.createCharacter({
+          name: characterData.name,
+          description: characterData.description,
+          personality: characterData.personality,
+          appearance: characterData.appearance,
+        });
+      }
       
       if (response.error) {
         throw new Error(response.error);
@@ -199,6 +220,8 @@ export default function Home() {
     } catch (error) {
       console.error('Error saving character:', error);
       dispatch(setError(error instanceof Error ? error.message : 'Failed to save character'));
+    } finally {
+      dispatch(setLoading(false)); // End loading
     }
   };
 
@@ -260,34 +283,12 @@ export default function Home() {
         </header>
 
         {/* Main Content */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 overflow-hidden">
-          {/* Chat Window - Takes 2/3 width on large screens */}
-          <div className="lg:col-span-2">
-            <ChatWindow
-              onSendMessage={handleSendMessage}
-              isLoading={useSelector((state: RootState) => state.chat.isLoading)}
-              isFirstMessage={!hasStartedConversation}
-            />
-          </div>
-
-          {/* Character Info - Takes 1/3 width on large screens */}
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <h2 className="text-lg font-semibold mb-4">Character</h2>
-            <div className="text-gray-600">
-              <p className="mb-2">
-                <strong>Name:</strong> <span className="text-gray-800">{character?.name || 'No character set'}</span>
-              </p>
-              <p className="mb-2">
-                <strong>Description:</strong> <span className="text-gray-800">{character?.description || 'No description'}</span>
-              </p>
-              <p className="mb-2">
-                <strong>Personality:</strong> <span className="text-gray-800">{character?.personality || 'No personality set'}</span>
-              </p>
-              <p>
-                <strong>Appearance:</strong> <span className="text-gray-800">{character?.appearance || 'No appearance set'}</span>
-              </p>
-            </div>
-          </div>
+        <div className="flex-1 overflow-hidden">
+          <ChatWindow
+            onSendMessage={handleSendMessage}
+            isLoading={useSelector((state: RootState) => state.chat.isLoading)}
+            isFirstMessage={!hasStartedConversation}
+          />
         </div>
 
         {/* Settings Modal */}

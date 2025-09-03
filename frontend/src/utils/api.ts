@@ -90,22 +90,22 @@ class ApiService {
 
   // Character API
   async getCharacters(): Promise<ApiResponse<any[]>> {
-    return this.request('/characters');
+    return this.request('/characters/');
   }
 
   async createCharacter(character: CreateCharacterRequest): Promise<ApiResponse<any>> {
-    return this.request('/characters', {
+    return this.request('/characters/', {
       method: 'POST',
       body: JSON.stringify(character),
     });
   }
 
   async getCharacter(id: string): Promise<ApiResponse<any>> {
-    return this.request(`/characters/${id}`);
+    return this.request(`/characters/${id}/`);
   }
 
   async updateCharacter(id: string, character: CreateCharacterRequest): Promise<ApiResponse<any>> {
-    return this.request(`/characters/${id}`, {
+    return this.request(`/characters/${id}/`, {
       method: 'PUT',
       body: JSON.stringify(character),
     });
@@ -114,23 +114,23 @@ class ApiService {
   // Chat Session API
   async getChatSessions(characterId?: string): Promise<ApiResponse<any[]>> {
     const params = characterId ? `?character_id=${characterId}` : '';
-    return this.request(`/sessions${params}`);
+    return this.request(`/sessions/${params}`);
   }
 
   async createChatSession(characterId: string, title?: string): Promise<ApiResponse<any>> {
-    return this.request('/sessions', {
+    return this.request('/sessions/', {
       method: 'POST',
       body: JSON.stringify({ character: characterId, title }),
     });
   }
 
   async getChatSession(id: string): Promise<ApiResponse<any>> {
-    return this.request(`/sessions/${id}`);
+    return this.request(`/sessions/${id}/`);
   }
 
   // Message API
   async getMessages(chatSessionId: string): Promise<ApiResponse<any[]>> {
-    return this.request(`/messages?chat_session_id=${chatSessionId}`);
+    return this.request(`/messages/?chat_session_id=${chatSessionId}`);
   }
 
   async sendMessage(data: SendMessageRequest): Promise<ApiResponse<any>> {
