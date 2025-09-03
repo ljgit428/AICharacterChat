@@ -14,7 +14,7 @@ from .serializers import (
     CharacterFileSerializer
 )
 from .tasks import generate_ai_response
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 import google.generativeai as genai
 from django.conf import settings
 
@@ -198,7 +198,7 @@ class MessageViewSet(viewsets.ModelViewSet):
 
 class ChatViewSet(viewsets.ViewSet):
     permission_classes = []  # Allow access without authentication for development
-    parser_classes = [FormParser, MultiPartParser]
+    parser_classes = [FormParser, MultiPartParser, JSONParser]
     
     @action(detail=False, methods=['post'])
     def send_message(self, request):
