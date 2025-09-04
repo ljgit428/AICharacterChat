@@ -11,31 +11,26 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-import environ
+import dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Initialize environment variables
-env = environ.Env(
-    DEBUG=(bool, False)
-)
-
-# Reading .env file
-environ.Env.read_env(BASE_DIR / '.env')
+env = dotenv.dotenv_values(BASE_DIR / '.env')
 
 # Load API keys from environment
-GEMINI_API_KEY = env('GEMINI_API_KEY', default='')
+GEMINI_API_KEY = env.get('GEMINI_API_KEY', '')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-ip$yu!sa#f5*iw6^-zxwp&eq$&t$vt+#o%cv*sm9^qlgvg@ru&'
+SECRET_KEY = env.get('SECRET_KEY', 'django-insecure-ip$yu!sa#f5*iw6^-zxwp&eq$&t$vt+#o%cv*sm9^qlgvg@ru&')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env.get('DEBUG', True)
 
 ALLOWED_HOSTS = []
 
@@ -49,14 +44,12 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'corsheaders',
     'rest_framework',
     'rest_framework.authtoken',  # Add TokenAuthentication
     'chat',
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -93,11 +86,11 @@ WSGI_APPLICATION = 'ai_character_chat.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': env('DATABASE_NAME', default='ai_character_chat'),
-        'USER': env('DATABASE_USER', default='postgres'),
-        'PASSWORD': env('DATABASE_PASSWORD', default='0324'),
-        'HOST': env('DATABASE_HOST', default='localhost'),
-        'PORT': env('DATABASE_PORT', default='5432'),
+        'NAME': env.get('DATABASE_NAME', 'ai_character_chat'),
+        'USER': env.get('DATABASE_USER', 'postgres'),
+        'PASSWORD': env.get('DATABASE_PASSWORD', '0324'),
+        'HOST': env.get('DATABASE_HOST', 'localhost'),
+        'PORT': env.get('DATABASE_PORT', '5432'),
     }
 }
 
@@ -160,12 +153,12 @@ REST_FRAMEWORK = {
     ],
 }
 
-# CORS settings for development
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+# CORS settings for development (temporarily disabled)
+# CORS_ALLOW_ALL_ORIGINS = True
+# CORS_ALLOWED_ORIGINS = [
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+# ]
 
 # Celery settings
 CELERY_BROKER_URL = 'redis://localhost:6379/0'

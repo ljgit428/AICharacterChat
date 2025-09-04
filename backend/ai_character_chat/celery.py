@@ -1,5 +1,6 @@
 import os
 from celery import Celery
+from django.conf import settings
 
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'ai_character_chat.settings')
@@ -24,4 +25,6 @@ app.conf.update(
     accept_content=['json'],
     timezone='UTC',
     enable_utc=True,
+    worker_pool='gevent',
+    worker_concurrency=10,
 )
