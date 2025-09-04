@@ -187,8 +187,9 @@ export default function Home() {
           const lastMessage = messagesResponse.data[messagesResponse.data.length - 1];
           
           // Check if the latest message is from AI and we haven't added it yet
+          // Fix type mismatch by comparing IDs as strings
           if (lastMessage && lastMessage.role === 'assistant' &&
-              !messages.some((m: Message) => m.id === lastMessage.id)) {
+              !messages.some((m: Message) => String(m.id) === String(lastMessage.id))) {
             
             // Found the AI response! Stop polling and add to UI
             clearInterval(intervalId);

@@ -16,8 +16,10 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from test_cors import test_cors_view
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('chat.urls')),
+    path('api/test-cors/', test_cors_view, name='test-cors'),
 ]
