@@ -14,6 +14,7 @@ from .serializers import (
     CharacterFileSerializer
 )
 from .tasks import generate_ai_response
+from celery.result import AsyncResult
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 import google.generativeai as genai
 from django.conf import settings
@@ -268,5 +269,91 @@ class ChatViewSet(viewsets.ViewSet):
         except ChatSession.DoesNotExist:
             return Response(
                 {'error': 'Chat session not found or access denied'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=False, methods=['get'])
+    def message_status(self, request):
+        """
+        Check the status of a message processing task
+        """
+        message_id = request.query_params.get('message_id')
+        if not message_id:
+            return Response(
+                {'error': 'message_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Find the user message to get the task ID
+            user_message = Message.objects.get(id=message_id, role='user')
+            
+            # Check if there's an AI response for this message
+            ai_response = Message.objects.filter(
+                chat_session=user_message.chat_session,
+                role='assistant',
+                timestamp__gt=user_message.timestamp
+            ).first()
+            
+            if ai_response:
+                # AI response already exists
+                return Response({
+                    'status': 'completed',
+                    'ai_message': MessageSerializer(ai_response).data
+                })
+            else:
+                # Check if there's a task error stored
+                # For now, we'll just return processing status
+                # In a more advanced implementation, you might want to store task errors
+                return Response({
+                    'status': 'processing'
+                })
+                
+        except Message.DoesNotExist:
+            return Response(
+                {'error': 'Message not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=False, methods=['get'])
+    def check_message_status(self, request):
+        """
+        Check if a message has been processed and return status
+        """
+        message_id = request.query_params.get('message_id')
+        if not message_id:
+            return Response(
+                {'error': 'message_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Find the user message to get the chat session
+            user_message = Message.objects.get(id=message_id, role='user')
+            
+            # Check if there's an AI response for this message
+            ai_response = Message.objects.filter(
+                chat_session=user_message.chat_session,
+                role='assistant',
+                timestamp__gt=user_message.timestamp
+            ).first()
+            
+            if ai_response:
+                # AI response already exists
+                return Response({
+                    'status': 'completed',
+                    'ai_message': MessageSerializer(ai_response).data
+                })
+            else:
+                # Still processing - check for any error indicators
+                # For now, we'll just return processing status
+                # In a more advanced implementation, you might want to check task results
+                return Response({
+                    'status': 'processing'
+                })
+                
+        except Message.DoesNotExist:
+            return Response(
+                {'error': 'Message not found'},
                 status=status.HTTP_404_NOT_FOUND
             )

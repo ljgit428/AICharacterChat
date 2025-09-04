@@ -190,7 +190,7 @@ export default function Home() {
           // Fix type mismatch by comparing IDs as strings
           if (lastMessage && lastMessage.role === 'assistant' &&
               !messages.some((m: Message) => String(m.id) === String(lastMessage.id))) {
-            
+             
             // Found the AI response! Stop polling and add to UI
             clearInterval(intervalId);
             dispatch(addMessage(lastMessage));
@@ -200,9 +200,56 @@ export default function Home() {
       } catch (error) {
         console.error('Polling error:', error);
         clearInterval(intervalId);
+        
+        // Check for specific error types
+        if (error instanceof Error) {
+          let errorMessage = 'Sorry, I encountered an error. Please try again.';
+          
+          // Handle specific error cases
+          if (error.message.includes('429') || error.message.includes('quota')) {
+            errorMessage = 'AI service is temporarily unavailable due to quota limits. Please try again later.';
+          } else if (error.message.includes('permission') || error.message.includes('API key')) {
+            errorMessage = 'AI service configuration error. Please contact the administrator.';
+          }
+          
+          // Add error message to chat
+          const errorMsg: Message = {
+            id: (Date.now() + 1).toString(),
+            content: errorMessage,
+            role: 'assistant',
+            timestamp: new Date().toISOString(),
+          };
+          dispatch(addMessage(errorMsg));
+        } else {
+          // Generic error
+          const errorMessage = {
+            id: (Date.now() + 1).toString(),
+            content: 'Sorry, I encountered an error. Please try again.',
+            role: 'assistant' as const,
+            timestamp: new Date().toISOString(),
+          };
+          dispatch(addMessage(errorMessage));
+        }
+        
         dispatch(setLoading(false));
       }
     }, 3000); // Poll every 3 seconds
+    
+    // Set a timeout to stop polling after a reasonable time (e.g., 5 minutes)
+    setTimeout(() => {
+      clearInterval(intervalId);
+      const state = useSelector((state: RootState) => state.chat);
+      if (state.isLoading) {
+        dispatch(setLoading(false));
+        const timeoutMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          content: 'AI response is taking longer than expected. Please try sending your message again.',
+          role: 'assistant',
+          timestamp: new Date().toISOString(),
+        };
+        dispatch(addMessage(timeoutMessage));
+      }
+    }, 5 * 60 * 1000); // 5 minutes timeout
   };
 
   // Helper function to generate character prompt based on available data

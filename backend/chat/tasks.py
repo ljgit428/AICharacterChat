@@ -2,6 +2,7 @@ from celery import shared_task
 import sys
 from django.conf import settings
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
 from .models import Message, Character, ChatSession, CharacterFile
 
 
@@ -99,6 +100,36 @@ def generate_ai_response(message_id, character_id):
             'content': ai_response_text
         }
         
+    except ResourceExhausted as e:
+        # 处理 API 配额限制错误
+        error_message = "AI服务暂时不可用，请稍后再试。配额已用完。"
+        print(f"!!! QUOTA EXHAUSTED: {str(e)}")
+        return {
+            'success': False,
+            'error': error_message,
+            'error_type': 'quota_exhausted'
+        }
+        
+    except PermissionDenied as e:
+        # 处理 API 密钥错误
+        error_message = "AI服务配置错误，请联系管理员检查API密钥。"
+        print(f"!!! PERMISSION DENIED: {str(e)}")
+        return {
+            'success': False,
+            'error': error_message,
+            'error_type': 'permission_denied'
+        }
+        
+    except InvalidArgument as e:
+        # 处理参数错误
+        error_message = "AI请求参数错误，请检查输入内容。"
+        print(f"!!! INVALID ARGUMENT: {str(e)}")
+        return {
+            'success': False,
+            'error': error_message,
+            'error_type': 'invalid_argument'
+        }
+        
     except Exception as e:
         # 记录详细错误，方便调试
         import traceback
@@ -106,5 +137,6 @@ def generate_ai_response(message_id, character_id):
         print(traceback.format_exc())
         return {
             'success': False,
-            'error': str(e)
+            'error': 'AI回复生成失败，请稍后再试。',
+            'error_type': 'general_error'
         }
