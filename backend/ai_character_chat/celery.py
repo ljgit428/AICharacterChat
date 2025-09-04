@@ -25,6 +25,6 @@ app.conf.update(
     accept_content=['json'],
     timezone='UTC',
     enable_utc=True,
-    worker_pool='gevent',
-    worker_concurrency=10,
+    worker_pool='solo',
+    worker_concurrency=1,
 )

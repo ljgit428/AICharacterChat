@@ -10,7 +10,7 @@ def generate_ai_response(message_id, character_id):
     """
     Generate AI response using Gemini API, referencing multiple uploaded files for context.
     """
-    print(f"Task started for message_id={message_id}, character_id={character_id}")
+    print(f"--- Task started for message_id={message_id}, character_id={character_id} ---")
     try:
         # 1. 获取核心对象
         user_message = Message.objects.get(id=message_id)
@@ -19,6 +19,7 @@ def generate_ai_response(message_id, character_id):
         
         print(f"Found user_message: {user_message.content[:50]}...")
         print(f"Found character: {character.name}")
+        print("Step 1: Database objects retrieved successfully.")
 
         # 2. 配置 Gemini API
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
@@ -73,8 +74,13 @@ def generate_ai_response(message_id, character_id):
                 "parts": [msg.content]
             })
 
-        # 4. 调用 Gemini API 生成回复
+        print("Step 2: Prompt constructed. Preparing to call Gemini API.")
+        
+        # --- The suspected blocking call ---
         response = model.generate_content(formatted_history)
+        
+        print("Step 3: Gemini API call completed successfully!")
+        
         ai_response_text = response.text
         
         # 5. 保存 AI 的回复到数据库
@@ -85,7 +91,7 @@ def generate_ai_response(message_id, character_id):
             character=character
         )
         
-        print(f"Successfully generated and saved AI response for message_id={ai_message.id}")
+        print(f"--- Task finished successfully for message_id={ai_message.id} ---")
 
         return {
             'success': True,
@@ -96,7 +102,7 @@ def generate_ai_response(message_id, character_id):
     except Exception as e:
         # 记录详细错误，方便调试
         import traceback
-        print(f"Error generating AI response: {str(e)}")
+        print(f"!!! TASK FAILED: Error generating AI response: {str(e)}")
         print(traceback.format_exc())
         return {
             'success': False,
