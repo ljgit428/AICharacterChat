@@ -5,5 +5,6 @@ python-dotenv==1.1.1
 celery==5.5.3
 redis==6.4.0
 requests==2.32.3
-django-corsheaders==4.4.0
+django-corsheaders==4.6.0
 google-generativeai==0.8.3
+gevent==25.8.2
