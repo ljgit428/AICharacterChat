@@ -27,40 +27,14 @@ def generate_ai_response(message_id, character_id):
 
         # --- vvv 核心逻辑修正 vvv ---
 
-        # 1. 构建初始系统提示 (包含角色文件)
-        initial_prompt_text = (
-            f"You are roleplaying as '{character.name}'.\n"
-            f"Personality: {character.personality}.\n"
-            f"Appearance: {character.appearance}.\n"
-            f"Background: {character.description}.\n"
-            f"Guidelines: {character.response_guidelines}\n"
-            "Respond and act entirely as this character."
-        )
+        # 直接使用数据库中的对话历史，移除重复的角色提示生成
+        formatted_history = []
         
-        initial_prompt_parts = []
-        if character.image_uri:
-            print(f"Adding character file URI: {character.image_uri}")
-            # 正确的字典结构
-            file_part = {
-                "file_data": {
-                    "mime_type": "image/jpeg", # 可以是一个猜测值，Gemini通常能自己识别
-                    "file_uri": character.image_uri
-                }
-            }
-            initial_prompt_parts.append(file_part)
-        
-        # 正确的文本部分结构
-        initial_prompt_parts.append({"text": initial_prompt_text})
-
-        formatted_history = [
-            {"role": "user", "parts": initial_prompt_parts},
-            {"role": "model", "parts": [{"text": "Understood. I am ready."}]}
-        ]
-
-        # 2. 构建包含文件和文本的完整对话历史
+        # 获取此会话的所有历史消息（包括用户发送的完整prompt）
         history_messages = Message.objects.filter(chat_session=chat_session).order_by('timestamp')
 
         for msg in history_messages:
+            # 数据库中的 role ('assistant') 需要映射为 'model'
             role = 'model' if msg.role == 'assistant' else 'user'
             message_parts = []
 
@@ -83,6 +57,10 @@ def generate_ai_response(message_id, character_id):
                     "role": role,
                     "parts": message_parts
                 })
+
+        # 如果历史记录为空（理论上不应该，因为至少有用户的消息），可以添加一个安全检查
+        if not formatted_history:
+             raise ValueError("Cannot generate response from an empty chat history.")
 
         # --- ^^^ 核心逻辑修正结束 ^^^ ---
 
