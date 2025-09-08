@@ -37,11 +37,18 @@ export default function Home() {
         description: 'A friendly AI companion ready to chat with you.',
         personality: 'Helpful, cheerful, and curious.',
         appearance: 'A friendly digital companion with a warm smile.',
+        // 添加响应指南的默认值
+        responseGuidelines: `Instructions:
+- Respond consistently with your character's traits and background
+- Maintain character voice throughout the conversation
+- Be engaging and responsive to user input
+- Stay true to Default Character's established character`,
         disabled: {
           name: false,
           description: false,
           personality: false,
           appearance: false,
+          responseGuidelines: false, // 添加响应指南的disabled开关
         },
       };
       dispatch(setCharacter(defaultCharacter));
@@ -156,16 +163,10 @@ export default function Home() {
       characterDefinitionSections.push('');
     }
 
-    // Response Guidelines section
-    if (characterDefinitionSections.length > 0) {
+    // Response Guidelines section (现在从 character 对象动态读取)
+    if (character.responseGuidelines && character.responseGuidelines.trim() && !character.disabled.responseGuidelines) {
       characterDefinitionSections.push(`=== RESPONSE GUIDELINES ===`);
-      characterDefinitionSections.push(`Instructions:`);
-      characterDefinitionSections.push(`- Respond consistently with your character's traits and background`);
-      characterDefinitionSections.push(`- Maintain character voice throughout the conversation`);
-      characterDefinitionSections.push(`- Be engaging and responsive to user input`);
-      if (character.name && !character.disabled.name) {
-        characterDefinitionSections.push(`- Stay true to ${character.name}'s established character`);
-      }
+      characterDefinitionSections.push(character.responseGuidelines); // 直接使用字段内容
     }
     
     // 将角色设定部分转换为字符串
@@ -196,6 +197,7 @@ export default function Home() {
           description: characterData.description,
           personality: characterData.personality,
           appearance: characterData.appearance,
+          responseGuidelines: characterData.responseGuidelines,
         });
       } else {
         // Create new character
@@ -204,6 +206,7 @@ export default function Home() {
           description: characterData.description,
           personality: characterData.personality,
           appearance: characterData.appearance,
+          responseGuidelines: characterData.responseGuidelines,
         });
       }
       

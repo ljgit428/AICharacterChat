@@ -11,11 +11,13 @@ export interface Character {
   description: string;
   personality: string;
   appearance: string;
+  responseGuidelines: string; // 添加响应指南字段
   disabled: {
     name: boolean;
     description: boolean;
     personality: boolean;
     appearance: boolean;
+    responseGuidelines: boolean; // 添加响应指南的disabled开关
   };
 }
 

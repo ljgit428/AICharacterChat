@@ -30,6 +30,7 @@ interface CreateCharacterRequest {
   description: string;
   personality: string;
   appearance: string;
+  responseGuidelines: string;
 }
 
 class ApiService {

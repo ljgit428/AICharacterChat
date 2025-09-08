@@ -17,11 +17,13 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     description: character?.description || '',
     personality: character?.personality || '',
     appearance: character?.appearance || '',
+    responseGuidelines: character?.responseGuidelines || '',
     disabled: character?.disabled || {
       name: false,
       description: false,
       personality: false,
       appearance: false,
+      responseGuidelines: false,
     },
   });
 
@@ -182,6 +184,35 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
             placeholder="Describe your character's appearance"
             required={!formData.disabled.appearance}
             disabled={formData.disabled.appearance}
+          />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Response Guidelines
+            </label>
+            <button
+              type="button"
+              onClick={() => handleDisableToggle('responseGuidelines')}
+              className={`px-2 py-1 text-xs rounded ${
+                formData.disabled.responseGuidelines
+                  ? 'bg-red-100 text-red-800 hover:bg-red-200'
+                  : 'bg-green-100 text-green-800 hover:bg-green-200'
+              } transition-colors`}
+            >
+              {formData.disabled.responseGuidelines ? 'Enable' : 'Disable'}
+            </button>
+          </div>
+          <textarea
+            name="responseGuidelines"
+            value={formData.responseGuidelines}
+            onChange={handleInputChange}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            rows={5}
+            placeholder="Enter AI response guidelines (e.g., instructions on how to behave)"
+            required={!formData.disabled.responseGuidelines}
+            disabled={formData.disabled.responseGuidelines}
           />
         </div>
 
