@@ -22,7 +22,7 @@ env = environ.Env(
 )
 
 # Reading .env file
-environ.Env.read_env(BASE_DIR / '.env')
+environ.Env.read_env(str(BASE_DIR / '.env'))
 
 # Load API keys from environment
 GEMINI_API_KEY = env('GEMINI_API_KEY', default='')
