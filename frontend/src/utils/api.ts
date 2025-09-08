@@ -32,7 +32,7 @@ interface CreateCharacterRequest {
   personality: string;
   appearance: string;
   responseGuidelines: string;
-  image_uri?: string;
+  file_uri?: string;
 }
 
 class ApiService {
@@ -103,7 +103,7 @@ class ApiService {
       personality: character.personality,
       appearance: character.appearance,
       response_guidelines: character.responseGuidelines, // Convert field name
-      image_uri: character.image_uri
+      file_uri: character.file_uri
     };
     return this.request('/characters/', {
       method: 'POST',
@@ -122,8 +122,8 @@ class ApiService {
     for (const key in character) {
       if (key === 'responseGuidelines') {
         payload['response_guidelines'] = character[key];
-      } else if (key === 'image_uri') {
-        payload['image_uri'] = character[key];
+      } else if (key === 'file_uri') {
+        payload['file_uri'] = character[key];
       } else {
         payload[key] = (character as any)[key];
       }
@@ -190,7 +190,7 @@ class ApiService {
     });
   }
 
-  async uploadImage(file: File): Promise<ApiResponse<{ uri: string; name: string }>> {
+  async uploadFile(file: File): Promise<ApiResponse<{ uri: string; name: string }>> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -217,7 +217,7 @@ class ApiService {
       const data = await response.json();
       return { data };
     } catch (error) {
-      console.error('API image upload failed:', error);
+      console.error('API file upload failed:', error);
       return { error: error instanceof Error ? error.message : 'Unknown error' };
     }
   }

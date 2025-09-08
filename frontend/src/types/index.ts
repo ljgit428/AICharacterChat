@@ -13,8 +13,8 @@ export interface Character {
   personality: string;
   appearance: string;
   responseGuidelines: string; // 添加响应指南字段
-  imageUri?: string; // The final Gemini URI
-  imagePreviewUrl?: string; // For UI preview only
+  fileUri?: string; // The final Gemini URI
+  filePreviewUrl?: string; // For UI preview only
   disabled: {
     name: boolean;
     description: boolean;

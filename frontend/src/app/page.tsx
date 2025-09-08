@@ -203,7 +203,7 @@ export default function Home() {
           personality: characterData.personality,
           appearance: characterData.appearance,
           responseGuidelines: characterData.responseGuidelines,
-          imageUri: characterData.imageUri,
+          fileUri: characterData.fileUri,
       };
 
       let response;
@@ -235,7 +235,7 @@ export default function Home() {
         description: serverResponseData.description || characterData.description,
         personality: serverResponseData.personality || characterData.personality,
         appearance: serverResponseData.appearance || characterData.appearance,
-        imageUri: serverResponseData.image_uri || characterData.imageUri,
+        fileUri: serverResponseData.file_uri || characterData.fileUri,
         responseGuidelines: serverResponseData.response_guidelines || characterData.responseGuidelines,
       };
       
@@ -279,7 +279,7 @@ export default function Home() {
     if (!file) return;
 
     setIsChatUploading(true);
-    const response = await apiService.uploadImage(file);
+    const response = await apiService.uploadFile(file);
     setIsChatUploading(false);
 
     if (response.data) {

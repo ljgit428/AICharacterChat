@@ -30,7 +30,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [fileName, setFileName] = useState<string | null>(character?.imagePreviewUrl || null);
+  const [fileName, setFileName] = useState<string | null>(character?.filePreviewUrl || null);
   const [isUploading, setIsUploading] = useState(false);
 
   // Clean up the object URL to prevent memory leaks
@@ -78,30 +78,30 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     e.preventDefault();
     setIsUploading(true);
 
-    let finalImageUri = character?.imageUri;
+    let finalFileUri = character?.fileUri;
 
     // If a new file has been selected, upload it
     if (selectedFile) {
-      const response = await apiService.uploadImage(selectedFile);
+      const response = await apiService.uploadFile(selectedFile);
       if (response.data?.uri) {
-        finalImageUri = response.data.uri;
+        finalFileUri = response.data.uri;
       } else {
-        console.error("Image upload failed:", response.error);
+        console.error("File upload failed:", response.error);
         alert("Error: Could not upload the file. Please try again.");
         setIsUploading(false);
         return; // Stop the submission process
       }
     } else if (!fileName) {
       // If the file was removed, ensure the URI is cleared
-      finalImageUri = undefined;
+      finalFileUri = undefined;
     }
 
     const updatedCharacter: Character = {
       ...character,
       ...formData,
       id: character?.id || Date.now().toString(),
-      imageUri: finalImageUri,
-      imagePreviewUrl: fileName || undefined,
+      fileUri: finalFileUri,
+      filePreviewUrl: fileName || undefined,
     };
     
     // The onSave prop now handles the actual API call to save the character
