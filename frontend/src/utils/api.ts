@@ -23,6 +23,7 @@ interface SendMessageRequest {
   message: string;
   character_id: string;
   chat_session_id?: string;
+  file_uri?: string;
 }
 
 interface CreateCharacterRequest {
@@ -31,7 +32,17 @@ interface CreateCharacterRequest {
   personality: string;
   appearance: string;
   responseGuidelines: string;
+  image_uri?: string;
 }
+
+// Helper function to convert field names for API requests
+const convertCharacterFields = (character: any) => {
+  return {
+    ...character,
+    response_guidelines: character.responseGuidelines,
+    image_uri: character.imageUri
+  };
+};
 
 class ApiService {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
@@ -97,7 +108,7 @@ class ApiService {
   async createCharacter(character: CreateCharacterRequest): Promise<ApiResponse<any>> {
     return this.request('/characters/', {
       method: 'POST',
-      body: JSON.stringify(character),
+      body: JSON.stringify(convertCharacterFields(character)),
     });
   }
 
@@ -108,7 +119,7 @@ class ApiService {
   async updateCharacter(id: string, character: CreateCharacterRequest): Promise<ApiResponse<any>> {
     return this.request(`/characters/${id}/`, {
       method: 'PUT',
-      body: JSON.stringify(character),
+      body: JSON.stringify(convertCharacterFields(character)),
     });
   }
 
@@ -165,6 +176,38 @@ class ApiService {
     return this.request('/auth/logout/', {
       method: 'POST',
     });
+  }
+
+  async uploadImage(file: File): Promise<ApiResponse<{ uri: string; name: string }>> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    // IMPORTANT: When using fetch with FormData, DO NOT set the 'Content-Type' header.
+    // The browser will automatically set it to 'multipart/form-data' with the correct boundary.
+    try {
+      const token = getAuthToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Token ${token}`;
+      }
+
+      const response = await fetch(`${API_BASE_URL}/files/upload/`, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+      }
+
+      const data = await response.json();
+      return { data };
+    } catch (error) {
+      console.error('API image upload failed:', error);
+      return { error: error instanceof Error ? error.message : 'Unknown error' };
+    }
   }
 
   // Utility methods

@@ -2,68 +2,85 @@ from celery import shared_task
 import sys
 from django.conf import settings
 import google.generativeai as genai
+from google.generativeai.types import file_types
 from .models import Message, Character, ChatSession
 
 @shared_task
 def generate_ai_response(message_id, character_id):
     """
-    Generate AI response using Gemini 2.5 Flash API with persistent chat sessions
+    Generate AI response using Gemini API with full multimodal support
+    for both character images and per-message files.
     """
-    print(f"Task started: generate_ai_response for message_id={message_id}, character_id={character_id}")
+    print(f"Task started for message_id={message_id}, character_id={character_id}")
     try:
-        # 1. 获取核心对象
         user_message = Message.objects.get(id=message_id)
         character = Character.objects.get(id=character_id)
         chat_session = user_message.chat_session
-        
-        print(f"Found user_message: {user_message.content[:50]}...")
-        print(f"Found character: {character.name}")
 
-        # 2. 配置 Gemini API
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
         if not api_key:
-            raise ValueError("GEMINI_API_KEY not found in settings")
-        
+            raise ValueError("GEMINI_API_KEY not found")
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash') # 使用 1.5-flash 或 2.5-pro
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
-        # 3. 构建完整的对话历史
-        # 首先，构建角色设定的初始提示
-        initial_prompt = (
-            f"You are now roleplaying as the character '{character.name}'. "
-            f"Your personality is: {character.personality}. "
-            f"Your appearance is: {character.appearance}. "
-            f"Here is your background story: {character.description}. "
-            "From this moment on, you must respond and act entirely as this character. Do not break character. "
-            "Engage with the user naturally based on your defined traits."
+        # --- vvv 核心逻辑重构 vvv ---
+
+        # 1. 构建初始系统提示 (包含角色图片)
+        initial_prompt_text = (
+            f"You are roleplaying as '{character.name}'.\n"
+            f"Personality: {character.personality}.\n"
+            f"Appearance: {character.appearance}.\n"
+            f"Background: {character.description}.\n"
+            f"Guidelines: {character.responseGuidelines}\n" # Assuming you have this field
+            "Respond and act entirely as this character."
         )
+        
+        initial_prompt_parts = []
+        if character.image_uri:
+            print(f"Adding character image URI: {character.image_uri}")
+            # MIME type is often inferred, but specifying helps.
+            # For generic files, we might need a better way to determine this.
+            image_part = {"file_data": {"mime_type": "image/jpeg", "file_uri": character.image_uri}}
+            initial_prompt_parts.append(image_part)
+        initial_prompt_parts.append({"text": initial_prompt_text})
 
-        # Gemini API 期望的格式是 [{"role": "user/model", "parts": [text]}]
-        # 我们用一个 "system" instruction 来设定角色
         formatted_history = [
-            # Gemini 没有 system role, 我们用 user/model 对来模拟
-            {"role": "user", "parts": [initial_prompt]},
-            {"role": "model", "parts": ["Understood. I am ready to embody the character and begin our conversation."]}
+            {"role": "user", "parts": initial_prompt_parts},
+            {"role": "model", "parts": [{"text": "Understood. I am ready."}]}
         ]
 
-        # 从数据库获取此会话的所有历史消息 (除了刚刚收到的最新一条)
-        # 注意：这里我们获取的是所有消息，包括最新的用户消息，因为下面会直接用 generate_content
+        # 2. 构建包含文件和文本的完整对话历史
         history_messages = Message.objects.filter(chat_session=chat_session).order_by('timestamp')
 
         for msg in history_messages:
-            # 数据库中的 role ('assistant') 需要映射为 'model'
             role = 'model' if msg.role == 'assistant' else 'user'
+            
+            # 为每条消息创建一个 parts 列表
+            message_parts = []
+
+            # 如果消息有关联的文件URI，将其作为第一个 part 添加
+            if msg.file_uri:
+                print(f"Adding file URI for message {msg.id}: {msg.file_uri}")
+                # For non-images, we need a generic MIME type or a lookup.
+                # For now, we let Gemini infer it by not providing one.
+                file_part = {"file_data": {"mime_type": None, "file_uri": msg.file_uri}}
+                message_parts.append(file_part)
+
+            # 将消息的文本内容作为下一个 part 添加
+            # Gemini要求，如果有多媒体内容，文本不能是空的
+            if msg.content or not message_parts:
+                 message_parts.append({"text": msg.content or ""}) # Use empty string if content is null but file exists
+
             formatted_history.append({
                 "role": role,
-                "parts": [msg.content]
+                "parts": message_parts
             })
 
-        # 4. 调用 Gemini API 生成回复
-        # 使用 generate_content 并传入完整的历史记录
+        # --- ^^^ 核心逻辑重构结束 ^^^ ---
+
         response = model.generate_content(formatted_history)
         ai_response_text = response.text
         
-        # 5. 保存 AI 的回复到数据库
         ai_message = Message.objects.create(
             chat_session=chat_session,
             role='assistant',
@@ -71,20 +88,11 @@ def generate_ai_response(message_id, character_id):
             character=character
         )
         
-        print(f"Successfully generated and saved AI response for message_id={ai_message.id}")
-
-        return {
-            'success': True,
-            'message_id': ai_message.id,
-            'content': ai_response_text
-        }
+        print(f"Successfully generated response for message_id={ai_message.id}")
+        return {'success': True, 'message_id': ai_message.id, 'content': ai_response_text}
         
     except Exception as e:
-        # 记录详细错误，方便调试
         import traceback
-        print(f"Error generating AI response: {str(e)}")
+        print(f"Error in generate_ai_response: {str(e)}")
         print(traceback.format_exc())
-        return {
-            'success': False,
-            'error': str(e)
-        }
+        return {'success': False, 'error': str(e)}

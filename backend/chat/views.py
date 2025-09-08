@@ -124,6 +124,7 @@ class ChatViewSet(viewsets.ViewSet):
         message_content = request.data.get('message')
         character_id = request.data.get('character_id')
         chat_session_id = request.data.get('chat_session_id')
+        file_uri = request.data.get('file_uri', None)
         
         if not message_content or not character_id:
             return Response(
@@ -155,12 +156,13 @@ class ChatViewSet(viewsets.ViewSet):
                     title=f"Chat with {character.name}"
                 )
             
-            # Save user message
+            # Save user message with optional file_uri
             user_message = Message.objects.create(
                 chat_session=chat_session,
                 role='user',
                 content=message_content,
-                character=character
+                character=character,
+                file_uri=file_uri
             )
             
             # --- START OF MODIFICATION ---

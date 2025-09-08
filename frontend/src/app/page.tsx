@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Character, RootState, Message } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, addMessage, setLoading, setError, clearChat } from '@/store/chatSlice';
@@ -15,6 +15,11 @@ export default function Home() {
   const [showLogin, setShowLogin] = useState(false);
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  
+  // For chat file upload
+  const [stagedFile, setStagedFile] = useState<{ name: string; uri: string } | null>(null);
+  const [isChatUploading, setIsChatUploading] = useState(false);
+  const chatFileInputRef = useRef<HTMLInputElement>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
 
@@ -98,12 +103,16 @@ export default function Home() {
     dispatch(setError(null));
 
     try {
-      // 将 messageToSendToAI (可能是完整提示，也可能是普通消息) 发送到后端
+      // Send message to backend, now including the staged file URI
       const response = await apiService.sendMessage({
         message: messageToSendToAI,
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
+        file_uri: stagedFile?.uri, // <-- Pass the file URI
       });
+
+      // Clear the staged file after successful send
+      setStagedFile(null);
 
       if (response.error) {
         throw new Error(response.error);
@@ -189,25 +198,23 @@ export default function Home() {
     try {
       let response;
       
+      // This part now correctly receives characterData with imageUri
+      const payload = {
+          name: characterData.name,
+          description: characterData.description,
+          personality: characterData.personality,
+          appearance: characterData.appearance,
+          image_uri: characterData.imageUri, // <-- Make sure to send this
+          responseGuidelines: characterData.responseGuidelines,
+      };
+      
       // Check if character has an ID to determine if we're creating or updating
       if (characterData.id) {
         // Update existing character
-        response = await apiService.updateCharacter(characterData.id, {
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          responseGuidelines: characterData.responseGuidelines,
-        });
+        response = await apiService.updateCharacter(characterData.id, payload);
       } else {
         // Create new character
-        response = await apiService.createCharacter({
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          responseGuidelines: characterData.responseGuidelines,
-        });
+        response = await apiService.createCharacter(payload);
       }
       
       if (response.error) {
@@ -244,6 +251,26 @@ export default function Home() {
 
   const handleLoginClick = () => {
     setShowLogin(true);
+  };
+
+  // Handle chat file upload
+  const handleChatFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsChatUploading(true);
+    const response = await apiService.uploadImage(file);
+    setIsChatUploading(false);
+
+    if (response.data) {
+      setStagedFile({ name: file.name, uri: response.data.uri });
+    } else {
+      alert(`File upload failed: ${response.error}`);
+    }
+    // Clear the input value to allow re-uploading the same file
+    if (chatFileInputRef.current) {
+      chatFileInputRef.current.value = "";
+    }
   };
 
   return (
@@ -290,8 +317,21 @@ export default function Home() {
             onSendMessage={handleSendMessage}
             isLoading={useSelector((state: RootState) => state.chat.isLoading)}
             isFirstMessage={!hasStartedConversation}
+            // Pass new props for file upload
+            stagedFile={stagedFile}
+            onStagedFileRemove={() => setStagedFile(null)}
+            onFileUploadClick={() => chatFileInputRef.current?.click()}
+            isChatUploading={isChatUploading}
           />
         </div>
+        
+        {/* Hidden file input for chat uploads */}
+        <input
+          type="file"
+          ref={chatFileInputRef}
+          className="hidden"
+          onChange={handleChatFileSelect}
+        />
 
         {/* Settings Modal */}
         {showSettings && (

@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Character, RootState } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, updateCharacter } from '@/store/chatSlice';
+import FileDropzone from './FileDropzone';
+import { apiService } from '@/utils/api';
 
 interface CharacterSettingsProps {
   character?: Character;
@@ -27,6 +29,19 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     },
   });
 
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileName, setFileName] = useState<string | null>(character?.imagePreviewUrl || null);
+  const [isUploading, setIsUploading] = useState(false);
+
+  // Clean up the object URL to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (fileName && fileName.startsWith('blob:')) {
+        URL.revokeObjectURL(fileName);
+      }
+    };
+  }, [fileName]);
+
   const dispatch = useDispatch();
   const currentCharacter = useSelector((state: RootState) => state.chat.character);
 
@@ -36,6 +51,17 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       ...prev,
       [name]: value
     }));
+  };
+
+  const handleFileSelect = (file: File) => {
+    setSelectedFile(file);
+    setFileName(file.name);
+  };
+
+  const handleFileRemove = () => {
+    setSelectedFile(null);
+    setFileName(null);
+    setFormData(prev => ({...prev, imageUri: undefined }));
   };
 
   const handleDisableToggle = (attribute: keyof typeof formData.disabled) => {
@@ -48,20 +74,40 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
     }));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const updatedCharacter = {
+    setIsUploading(true);
+
+    let finalImageUri = character?.imageUri;
+
+    // If a new file has been selected, upload it
+    if (selectedFile) {
+      const response = await apiService.uploadImage(selectedFile);
+      if (response.data?.uri) {
+        finalImageUri = response.data.uri;
+      } else {
+        console.error("Image upload failed:", response.error);
+        alert("Error: Could not upload the file. Please try again.");
+        setIsUploading(false);
+        return; // Stop the submission process
+      }
+    } else if (!fileName) {
+      // If the file was removed, ensure the URI is cleared
+      finalImageUri = undefined;
+    }
+
+    const updatedCharacter: Character = {
+      ...character,
       ...formData,
       id: character?.id || Date.now().toString(),
+      imageUri: finalImageUri,
+      imagePreviewUrl: fileName || undefined,
     };
     
-    if (character) {
-      dispatch(updateCharacter(updatedCharacter));
-    } else {
-      dispatch(setCharacter(updatedCharacter));
-    }
-    
-    onSave(updatedCharacter);
+    // The onSave prop now handles the actual API call to save the character
+    await onSave(updatedCharacter);
+
+    setIsUploading(false);
   };
 
   return (
@@ -71,6 +117,18 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       </h2>
       
       <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Image Upload Section */}
+        <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Character File (Image, PDF, etc.)
+            </label>
+            <FileDropzone
+              onFileSelect={handleFileSelect}
+              onFileRemove={handleFileRemove}
+              fileName={fileName}
+            />
+        </div>
+        
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="block text-sm font-medium text-gray-700">
@@ -219,9 +277,10 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
         <div className="flex space-x-3 pt-4">
           <button
             type="submit"
-            className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors"
+            className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50"
+            disabled={isUploading}
           >
-            {character ? 'Update Character' : 'Create Character'}
+            {isUploading ? 'Uploading...' : (character ? 'Update Character' : 'Create Character')}
           </button>
           <button
             type="button"

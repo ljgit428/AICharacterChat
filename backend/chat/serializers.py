@@ -5,14 +5,14 @@ from .models import Character, ChatSession, Message
 class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Character
-        fields = ['id', 'name', 'description', 'personality', 'appearance', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'description', 'personality', 'appearance', 'response_guidelines', 'image_uri', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at']
 
 
 class MessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Message
-        fields = ['id', 'role', 'content', 'timestamp', 'character']
+        fields = ['id', 'role', 'content', 'timestamp', 'character', 'file_uri']
         read_only_fields = ['timestamp']
 
 
@@ -35,4 +35,4 @@ class ChatSessionCreateSerializer(serializers.ModelSerializer):
 class MessageCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Message
-        fields = ['role', 'content', 'character']
+        fields = ['role', 'content', 'character', 'file_uri']

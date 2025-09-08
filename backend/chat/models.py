@@ -8,6 +8,8 @@ class Character(models.Model):
     description = models.TextField()
     personality = models.TextField()
     appearance = models.TextField()
+    response_guidelines = models.TextField(blank=True, null=True)
+    image_uri = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_characters')
@@ -40,6 +42,7 @@ class Message(models.Model):
     content = models.TextField()
     timestamp = models.DateTimeField(auto_now_add=True)
     character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
+    file_uri = models.CharField(max_length=255, blank=True, null=True)
     
     class Meta:
         ordering = ['timestamp']

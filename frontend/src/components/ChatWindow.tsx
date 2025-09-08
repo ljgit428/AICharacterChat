@@ -9,9 +9,21 @@ interface ChatWindowProps {
   onSendMessage: (message: string) => void;
   isLoading: boolean;
   isFirstMessage: boolean;
+  stagedFile: { name: string; uri: string } | null;
+  onStagedFileRemove: () => void;
+  onFileUploadClick: () => void;
+  isChatUploading: boolean;
 }
 
-export default function ChatWindow({ onSendMessage, isLoading, isFirstMessage }: ChatWindowProps) {
+export default function ChatWindow({
+  onSendMessage,
+  isLoading,
+  isFirstMessage,
+  stagedFile,
+  onStagedFileRemove,
+  onFileUploadClick,
+  isChatUploading
+}: ChatWindowProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
@@ -98,7 +110,33 @@ export default function ChatWindow({ onSendMessage, isLoading, isFirstMessage }:
 
       {/* Input Area */}
       <div className="border-t border-gray-200 p-4">
+        {/* Show uploading indicator */}
+        {isChatUploading && (
+           <div className="mb-2 p-2 bg-gray-100 rounded-lg text-sm text-gray-600">
+             Uploading file...
+           </div>
+        )}
+        
+        {/* Show staged file */}
+        {stagedFile && !isChatUploading && (
+          <div className="mb-2 flex items-center justify-between p-2 bg-blue-100 text-blue-800 rounded-lg text-sm">
+            <div className="flex items-center space-x-2 truncate">
+              <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+              <span className="truncate">{stagedFile.name}</span>
+            </div>
+            <button onClick={onStagedFileRemove} className="font-bold text-lg leading-none">&times;</button>
+          </div>
+        )}
+        
         <div className="flex space-x-2">
+          {/* File upload button */}
+          <button
+            onClick={onFileUploadClick}
+            className="p-2 border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50"
+            disabled={isLoading || isChatUploading}
+          >
+            <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+          </button>
           <textarea
             className="flex-1 border border-gray-300 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             placeholder={isFirstMessage ? "Click Start to begin conversation (can be empty)" : "Type your message..."}
