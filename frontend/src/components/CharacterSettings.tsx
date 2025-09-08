@@ -61,7 +61,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   const handleFileRemove = () => {
     setSelectedFile(null);
     setFileName(null);
-    setFormData(prev => ({...prev, imageUri: undefined }));
+    // That's it. No need to modify formData here.
   };
 
   const handleDisableToggle = (attribute: keyof typeof formData.disabled) => {

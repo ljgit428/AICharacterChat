@@ -197,8 +197,6 @@ export default function Home() {
     dispatch(setError(null));
 
     try {
-      // The payload should contain all fields from the characterData form
-      // and use camelCase, as our apiService now handles the conversion.
       const payload: Partial<Character> = {
           name: characterData.name,
           description: characterData.description,
@@ -209,8 +207,9 @@ export default function Home() {
       };
 
       let response;
-      if (characterData.id && !characterData.id.startsWith('temp-')) { // Check if it's a real ID
-        response = await apiService.updateCharacter(characterData.id, payload);
+      // Use String() to ensure characterData.id is always a string for the check
+      if (characterData.id && !String(characterData.id).startsWith('temp-')) {
+        response = await apiService.updateCharacter(String(characterData.id), payload);
       } else {
         response = await apiService.createCharacter(payload as Character);
       }
@@ -219,9 +218,29 @@ export default function Home() {
         throw new Error(response.error);
       }
 
-      // Update the frontend state with the complete data, including the new ID from the server if created
-      const savedCharacter = { ...characterData, id: response.data.id || characterData.id };
+      // --- vvv 核心修正：确保存入Redux的ID永远是字符串 vvv ---
+      const serverResponseData = response.data;
+      
+      // Get the ID from the server response and explicitly convert it to a string.
+      const finalId = serverResponseData.id ? String(serverResponseData.id) : characterData.id;
+
+      // Create the final character object for the Redux store
+      const savedCharacter: Character = {
+        ...characterData,
+        id: finalId, // Now it's guaranteed to be a string
+        // The backend returns snake_case, so we need to map it back if needed,
+        // or just rely on the data we already have on the frontend.
+        // Using characterData is safer here.
+        name: serverResponseData.name || characterData.name,
+        description: serverResponseData.description || characterData.description,
+        personality: serverResponseData.personality || characterData.personality,
+        appearance: serverResponseData.appearance || characterData.appearance,
+        imageUri: serverResponseData.image_uri || characterData.imageUri,
+        responseGuidelines: serverResponseData.response_guidelines || characterData.responseGuidelines,
+      };
+      
       dispatch(setCharacter(savedCharacter));
+      // --- ^^^ 核心修正结束 ^^^ ---
       
       dispatch(clearChat());
       setHasStartedConversation(false);
