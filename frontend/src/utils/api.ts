@@ -39,9 +39,7 @@ class ApiService {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     try {
       const token = getAuthToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
+      const headers: Record<string, string> = {};
       
       // Add any existing headers from options
       if (options.headers) {
@@ -50,6 +48,11 @@ class ApiService {
             headers[key] = value;
           }
         });
+      }
+      
+      // Only set Content-Type if the body is not FormData (for file uploads)
+      if (!(options.body instanceof FormData)) {
+        headers['Content-Type'] = 'application/json';
       }
       
       if (token) {
@@ -80,6 +83,11 @@ class ApiService {
         const errorText = await response.text();
         console.error('API Response Error:', errorText);
         throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+      }
+
+      // Handle cases where the response might be empty (e.g., a 204 No Content)
+      if (response.status === 204) {
+        return { data: undefined };
       }
 
       const data = await response.json();
