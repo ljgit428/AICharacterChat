@@ -23,7 +23,7 @@ def generate_ai_response(message_id, character_id):
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found")
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-pro')
 
         # --- vvv 核心逻辑修正 vvv ---
 
