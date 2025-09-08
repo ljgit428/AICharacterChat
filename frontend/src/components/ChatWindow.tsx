@@ -2,8 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { Message, RootState } from '@/types';
-import { useSelector, useDispatch } from 'react-redux';
-import { addMessage, setLoading } from '@/store/chatSlice';
+import { useSelector } from 'react-redux';
 
 interface ChatWindowProps {
   onSendMessage: (message: string) => void;
@@ -25,7 +24,6 @@ export default function ChatWindow({
   isChatUploading
 }: ChatWindowProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
   
   const scrollToBottom = () => {
@@ -39,6 +37,8 @@ export default function ChatWindow({
   const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (isFirstMessage) return; // Ignore Enter key before conversation starts
+
       const textarea = e.target as HTMLTextAreaElement;
       const message = textarea.value.trim();
       if (message) {
@@ -62,8 +62,8 @@ export default function ChatWindow({
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-gray-500">
             <div className="text-center">
-              <div className="text-4xl mb-4">💬</div>
-              <p>Start a conversation with your character!</p>
+              <div className="text-4xl mb-4">👋</div>
+              <p>Click &quot;Start&quot; below to begin the conversation!</p>
             </div>
           </div>
         ) : (
@@ -148,27 +148,24 @@ export default function ChatWindow({
           <button
             onClick={onFileUploadClick}
             className="p-2 border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50"
-            disabled={isLoading || isChatUploading}
+            disabled={isLoading || isFirstMessage || isChatUploading}
           >
             <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
           </button>
           <textarea
-            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder={isFirstMessage ? "Click Start to begin conversation (can be empty)" : "Type your message..."}
+            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100"
+            placeholder={isFirstMessage ? "Click 'Start' to begin." : "Type your message..."}
             rows={2}
             onKeyDown={handleKeyPress}
-            disabled={isLoading}
+            disabled={isLoading || isFirstMessage}
           />
           <button
             className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+            // MODIFICATION: Simplified onClick logic
             onClick={() => {
               const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
-              const message = textarea.value.trim();
-              // Allow sending empty message if it's the first message
-              if (message || isFirstMessage) {
-                onSendMessage(message);
-                textarea.value = '';
-              }
+              onSendMessage(textarea.value.trim()); // Pass the content, handleSendMessage will ignore it if it's the first message
+              textarea.value = '';
             }}
             disabled={isLoading}
           >

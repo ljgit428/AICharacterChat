@@ -61,56 +61,44 @@ export default function Home() {
     }
   }, [character, dispatch]);
 
-  const handleSendMessage = async (message: string) => {
+  const handleSendMessage = async (userInput: string) => {
     if (!character) return;
 
-    // 这个变量将存储最终要发送给后端AI的内容
-    let messageToSendToAI = message;
+    let messageToSend: string;
+    const isFirstMessage = !hasStartedConversation;
 
-    // --- 核心改动：处理第一条消息 ---
-    if (!hasStartedConversation) {
-      // 1. 获取角色设定部分和完整的AI提示
-      const { fullPrompt, settingsPart } = generateCharacterPrompt(character, message);
-      
-      // 更新将要发送给AI的内容为完整提示
-      messageToSendToAI = fullPrompt;
-
-      // 2.【显示第一个气泡】：如果角色设定存在，就把它作为一条消息显示出来
-      if (settingsPart) {
-        const settingsMessage: Message = {
-          id: Date.now().toString(),
-          content: settingsPart,
-          role: 'user', // 仍然是用户发出的，但内容是系统生成的设定
-          timestamp: new Date().toISOString(),
-        };
-        dispatch(addMessage(settingsMessage));
-      }
-      
+    if (isFirstMessage) {
+      // On the first message, the content sent is the generated character prompt.
+      messageToSend = generateCharacterPrompt(character);
       setHasStartedConversation(true);
+    } else {
+      // On subsequent messages, if the input is empty, do nothing.
+      if (!userInput) return;
+      messageToSend = userInput;
     }
 
-    // ---【显示第二个气泡】：将用户实际输入的内容作为一条独立消息显示出来 ---
-    // 这段代码对所有消息（包括第一条和后续的）都有效
+    // Always add the message that will be sent to the UI.
+    // On the first run, this will be the settings prompt.
+    // On subsequent runs, it will be the user's typed message.
     const userMessage: Message = {
-      id: (Date.now() + 1).toString(), // +1确保ID唯一
-      content: message, // 这里只显示用户输入的原始、干净的消息
+      id: Date.now().toString(),
+      content: messageToSend,
       role: 'user' as const,
       timestamp: new Date().toISOString(),
-      fileUri: stagedFile?.uri, // <--- ADD THIS LINE
+      fileUri: isFirstMessage ? undefined : stagedFile?.uri,
     };
     dispatch(addMessage(userMessage));
-    
-    // --- 后续逻辑保持不变 ---
+
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
-      // Send message to backend, now including the staged file URI
+      // Send the prepared message to the backend
       const response = await apiService.sendMessage({
-        message: messageToSendToAI,
+        message: messageToSend,
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
-        file_uri: stagedFile?.uri, // <-- Pass the file URI
+        file_uri: isFirstMessage ? undefined : stagedFile?.uri,
       });
 
       // Clear the staged file after successful send
@@ -120,6 +108,7 @@ export default function Home() {
         throw new Error(response.error);
       }
 
+      // Add AI response after normalizing it
       if (response.data?.ai_message) {
         const rawAiMessage = response.data.ai_message;
         const formattedAiMessage: Message = {
@@ -129,17 +118,19 @@ export default function Home() {
           timestamp: rawAiMessage.timestamp,
         };
         dispatch(addMessage(formattedAiMessage));
+        
         if (response.data?.chat_session_id) {
           setChatSessionId(response.data.chat_session_id);
         }
       }
-      
     } catch (error) {
       console.error('Error sending message:', error);
-      dispatch(setError(error instanceof Error ? error.message : 'Failed to send message'));
-      const errorMessage = {
-        id: (Date.now() + 2).toString(),
-        content: 'Sorry, I encountered an error. Please try again.',
+      const errorMessageContent = error instanceof Error ? error.message : 'Failed to get a response';
+      dispatch(setError(errorMessageContent));
+      
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: `Sorry, I encountered an error: ${errorMessageContent}`,
         role: 'assistant' as const,
         timestamp: new Date().toISOString(),
       };
@@ -149,48 +140,46 @@ export default function Home() {
     }
   };
 
-  // Helper function to generate character prompt based on available data
-  const generateCharacterPrompt = (character: Character, userMessage: string): { fullPrompt: string, settingsPart: string } => {
-    
-    // --- 构建角色定义和响应指南部分 ---
-    const characterDefinitionSections: string[] = [];
+  // MODIFICATION: Removed `userMessage` parameter. This prompt now only contains settings.
+  const generateCharacterPrompt = (character: Character): string => {
+    const promptSections: string[] = [];
 
-    // Character Identity section
     if (character.name || character.description || character.personality || character.appearance) {
-      characterDefinitionSections.push(`=== CHARACTER IDENTITY ===`);
-      
+      promptSections.push(`=== CHARACTER IDENTITY ===`);
       if (character.name && character.name.trim() && !character.disabled.name) {
-        characterDefinitionSections.push(`Name: ${character.name}`);
+        promptSections.push(`Name: ${character.name}`);
       }
       if (character.description && character.description.trim() && !character.disabled.description) {
-        characterDefinitionSections.push(`Description: ${character.description}`);
+        promptSections.push(`Description: ${character.description}`);
       }
       if (character.personality && character.personality.trim() && !character.disabled.personality) {
-        characterDefinitionSections.push(`Personality: ${character.personality}`);
+        promptSections.push(`Personality: ${character.personality}`);
       }
       if (character.appearance && character.appearance.trim() && !character.disabled.appearance) {
-        characterDefinitionSections.push(`Appearance: ${character.appearance}`);
+        promptSections.push(`Appearance: ${character.appearance}`);
       }
-      characterDefinitionSections.push('');
+      promptSections.push('');
     }
 
-    // Response Guidelines section (现在从 character 对象动态读取)
     if (character.responseGuidelines && character.responseGuidelines.trim() && !character.disabled.responseGuidelines) {
-      characterDefinitionSections.push(`=== RESPONSE GUIDELINES ===`);
-      characterDefinitionSections.push(character.responseGuidelines); // 直接使用字段内容
+      promptSections.push(`=== RESPONSE GUIDELINES ===`);
+      promptSections.push(character.responseGuidelines);
+      promptSections.push('');
     }
-    
-    // 将角色设定部分转换为字符串
-    const settingsPart = characterDefinitionSections.join('\n').trim();
 
-    // --- 创建用户消息块 ---
-    const userMessageBlock = `\n\n=== USER MESSAGE ===\nUser Input: ${userMessage}\nPlease respond to the following user message while staying in character.`;
+    if (promptSections.length > 0) {
+      promptSections.push(`=== RESPONSE GUIDELINES ===`);
+      promptSections.push(`Instructions:`);
+      promptSections.push(`- Respond consistently with your character's traits and background.`);
+      promptSections.push(`- Maintain your character voice throughout the conversation.`);
+      promptSections.push(`- Your first response should be an engaging greeting or opening line that invites conversation.`);
+      promptSections.push('');
+    }
 
-    // --- 组合成最终的完整提示 ---
-    const fullPrompt = `${settingsPart}${userMessageBlock}`;
-    
-    // --- 返回两个部分 ---
-    return { fullPrompt, settingsPart };
+    // REMOVED: The "USER MESSAGE" section has been completely removed from this initial prompt.
+    promptSections.push(`Please provide your initial greeting based on your character settings.`);
+
+    return promptSections.join('\n');
   };
 
   const handleSaveCharacter = async (characterData: Character, file?: File) => {
