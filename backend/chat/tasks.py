@@ -1,16 +1,17 @@
+# backend/chat/tasks.py
+
 from celery import shared_task
 import sys
 from django.conf import settings
 import google.generativeai as genai
-# --- CORRECT IMPORT ---
-from google.generativeai.types import Part
+# --- 移除所有来自 google.generativeai.types 的错误导入 ---
 from .models import Message, Character, ChatSession
 
 @shared_task
 def generate_ai_response(message_id, character_id):
     """
-    Generate AI response using Gemini API with full multimodal support
-    for both character images and per-message files.
+    Generate AI response using Gemini API with full multimodal support,
+    using the correct dictionary format for parts.
     """
     print(f"Task started for message_id={message_id}, character_id={character_id}")
     try:
@@ -24,7 +25,9 @@ def generate_ai_response(message_id, character_id):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
 
-        # 1. Build initial system prompt (with character file if it exists)
+        # --- vvv 核心逻辑修正 vvv ---
+
+        # 1. 构建初始系统提示 (包含角色文件)
         initial_prompt_text = (
             f"You are roleplaying as '{character.name}'.\n"
             f"Personality: {character.personality}.\n"
@@ -37,18 +40,24 @@ def generate_ai_response(message_id, character_id):
         initial_prompt_parts = []
         if character.image_uri:
             print(f"Adding character file URI: {character.image_uri}")
-            # The SDK handles determining the MIME type from the URI for common types
-            file_part = Part.from_uri(uri=character.image_uri, mime_type=None)
+            # 正确的字典结构
+            file_part = {
+                "file_data": {
+                    "mime_type": "image/jpeg", # 可以是一个猜测值，Gemini通常能自己识别
+                    "file_uri": character.image_uri
+                }
+            }
             initial_prompt_parts.append(file_part)
         
-        initial_prompt_parts.append(Part.from_text(initial_prompt_text))
+        # 正确的文本部分结构
+        initial_prompt_parts.append({"text": initial_prompt_text})
 
         formatted_history = [
             {"role": "user", "parts": initial_prompt_parts},
-            {"role": "model", "parts": [Part.from_text("Understood. I am ready.")]}
+            {"role": "model", "parts": [{"text": "Understood. I am ready."}]}
         ]
 
-        # 2. Build the rest of the chat history, including per-message files
+        # 2. 构建包含文件和文本的完整对话历史
         history_messages = Message.objects.filter(chat_session=chat_session).order_by('timestamp')
 
         for msg in history_messages:
@@ -57,15 +66,25 @@ def generate_ai_response(message_id, character_id):
 
             if msg.file_uri:
                 print(f"Adding file URI for message {msg.id}: {msg.file_uri}")
-                file_part = Part.from_uri(uri=msg.file_uri, mime_type=None)
+                # 对于未知文件类型，不提供 mime_type 让 Gemini 自行推断
+                file_part = {
+                    "file_data": {
+                        "mime_type": None,
+                        "file_uri": msg.file_uri
+                    }
+                }
                 message_parts.append(file_part)
 
             if msg.content or not message_parts:
-                message_parts.append(Part.from_text(msg.content or ""))
+                 message_parts.append({"text": msg.content or ""})
 
-            # Avoid adding empty user messages unless they contain a file
             if message_parts:
-                formatted_history.append({"role": role, "parts": message_parts})
+                formatted_history.append({
+                    "role": role,
+                    "parts": message_parts
+                })
+
+        # --- ^^^ 核心逻辑修正结束 ^^^ ---
 
         response = model.generate_content(formatted_history)
         ai_response_text = response.text
