@@ -32,7 +32,7 @@ interface CreateCharacterRequest {
   personality: string;
   appearance: string;
   responseGuidelines: string;
-  image_uri?: string;
+  file_url?: string;
 }
 
 class ApiService {
@@ -96,18 +96,20 @@ class ApiService {
     return this.request('/characters/');
   }
 
-  async createCharacter(character: CreateCharacterRequest): Promise<ApiResponse<any>> {
-    const payload = {
-      name: character.name,
-      description: character.description,
-      personality: character.personality,
-      appearance: character.appearance,
-      response_guidelines: character.responseGuidelines, // Convert field name
-      image_uri: character.image_uri
-    };
+  async createCharacter(character: CreateCharacterRequest, file?: File): Promise<ApiResponse<any>> {
+    const formData = new FormData();
+    Object.entries(character).forEach(([key, value]) => {
+      if (value !== undefined) {
+        formData.append(key, value);
+      }
+    });
+    if (file) {
+      formData.append('file', file);
+    }
+
     return this.request('/characters/', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: formData,
     });
   }
 
@@ -116,22 +118,20 @@ class ApiService {
   }
 
   // Allow partial updates
-  async updateCharacter(id: string, character: Partial<CreateCharacterRequest>): Promise<ApiResponse<any>> {
-    const payload: { [key: string]: any } = {};
-    // Dynamically build the payload, converting keys as needed
-    for (const key in character) {
-      if (key === 'responseGuidelines') {
-        payload['response_guidelines'] = character[key];
-      } else if (key === 'image_uri') {
-        payload['image_uri'] = character[key];
-      } else {
-        payload[key] = (character as any)[key];
+  async updateCharacter(id: string, character: Partial<CreateCharacterRequest>, file?: File): Promise<ApiResponse<any>> {
+    const formData = new FormData();
+    Object.entries(character).forEach(([key, value]) => {
+      if (value !== undefined) {
+        formData.append(key, value);
       }
+    });
+    if (file) {
+      formData.append('file', file);
     }
-    
+
     return this.request(`/characters/${id}/`, {
       method: 'PUT',
-      body: JSON.stringify(payload),
+      body: formData,
     });
   }
 

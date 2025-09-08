@@ -54,6 +54,7 @@ export default function Home() {
           personality: false,
           appearance: false,
           responseGuidelines: false, // 添加响应指南的disabled开关
+          file: false,
         },
       };
       dispatch(setCharacter(defaultCharacter));
@@ -192,26 +193,31 @@ export default function Home() {
     return { fullPrompt, settingsPart };
   };
 
-  const handleSaveCharacter = async (characterData: Character) => {
+  const handleSaveCharacter = async (characterData: Character, file?: File) => {
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
-      const payload: Partial<Character> = {
+      let response;
+      // Use String() to ensure characterData.id is always a string for the check
+      if (characterData.id && !String(characterData.id).startsWith('temp-')) {
+        response = await apiService.updateCharacter(String(characterData.id), {
           name: characterData.name,
           description: characterData.description,
           personality: characterData.personality,
           appearance: characterData.appearance,
           responseGuidelines: characterData.responseGuidelines,
-          imageUri: characterData.imageUri,
-      };
-
-      let response;
-      // Use String() to ensure characterData.id is always a string for the check
-      if (characterData.id && !String(characterData.id).startsWith('temp-')) {
-        response = await apiService.updateCharacter(String(characterData.id), payload);
+          file_url: characterData.fileUrl,
+        }, file);
       } else {
-        response = await apiService.createCharacter(payload as Character);
+        response = await apiService.createCharacter({
+          name: characterData.name,
+          description: characterData.description,
+          personality: characterData.personality,
+          appearance: characterData.appearance,
+          responseGuidelines: characterData.responseGuidelines,
+          file_url: characterData.fileUrl,
+        }, file);
       }
       
       if (response.error) {
@@ -235,7 +241,7 @@ export default function Home() {
         description: serverResponseData.description || characterData.description,
         personality: serverResponseData.personality || characterData.personality,
         appearance: serverResponseData.appearance || characterData.appearance,
-        imageUri: serverResponseData.image_uri || characterData.imageUri,
+        fileUrl: serverResponseData.file_url || characterData.fileUrl,
         responseGuidelines: serverResponseData.response_guidelines || characterData.responseGuidelines,
       };
       

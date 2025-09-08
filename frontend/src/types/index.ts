@@ -13,14 +13,15 @@ export interface Character {
   personality: string;
   appearance: string;
   responseGuidelines: string; // 添加响应指南字段
-  imageUri?: string; // The final Gemini URI
-  imagePreviewUrl?: string; // For UI preview only
+  fileUrl?: string; // The file URL
+  filePreviewUrl?: string; // For UI preview only
   disabled: {
     name: boolean;
     description: boolean;
     personality: boolean;
     appearance: boolean;
     responseGuidelines: boolean; // 添加响应指南的disabled开关
+    file: boolean; // Add file disabled switch
   };
 }
 
