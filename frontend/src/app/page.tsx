@@ -167,15 +167,6 @@ export default function Home() {
       promptSections.push('');
     }
 
-    if (promptSections.length > 0) {
-      promptSections.push(`=== RESPONSE GUIDELINES ===`);
-      promptSections.push(`Instructions:`);
-      promptSections.push(`- Respond consistently with your character's traits and background.`);
-      promptSections.push(`- Maintain your character voice throughout the conversation.`);
-      promptSections.push(`- Your first response should be an engaging greeting or opening line that invites conversation.`);
-      promptSections.push('');
-    }
-
     // REMOVED: The "USER MESSAGE" section has been completely removed from this initial prompt.
     promptSections.push(`Please provide your initial greeting based on your character settings.`);
 
