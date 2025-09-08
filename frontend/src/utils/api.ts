@@ -35,15 +35,6 @@ interface CreateCharacterRequest {
   image_uri?: string;
 }
 
-// Helper function to convert field names for API requests
-const convertCharacterFields = (character: any) => {
-  return {
-    ...character,
-    response_guidelines: character.responseGuidelines,
-    image_uri: character.imageUri
-  };
-};
-
 class ApiService {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     try {
@@ -106,9 +97,17 @@ class ApiService {
   }
 
   async createCharacter(character: CreateCharacterRequest): Promise<ApiResponse<any>> {
+    const payload = {
+      name: character.name,
+      description: character.description,
+      personality: character.personality,
+      appearance: character.appearance,
+      response_guidelines: character.responseGuidelines, // Convert field name
+      image_uri: character.image_uri
+    };
     return this.request('/characters/', {
       method: 'POST',
-      body: JSON.stringify(convertCharacterFields(character)),
+      body: JSON.stringify(payload),
     });
   }
 
@@ -116,10 +115,23 @@ class ApiService {
     return this.request(`/characters/${id}/`);
   }
 
-  async updateCharacter(id: string, character: CreateCharacterRequest): Promise<ApiResponse<any>> {
+  // Allow partial updates
+  async updateCharacter(id: string, character: Partial<CreateCharacterRequest>): Promise<ApiResponse<any>> {
+    const payload: { [key: string]: any } = {};
+    // Dynamically build the payload, converting keys as needed
+    for (const key in character) {
+      if (key === 'responseGuidelines') {
+        payload['response_guidelines'] = character[key];
+      } else if (key === 'image_uri') {
+        payload['image_uri'] = character[key];
+      } else {
+        payload[key] = (character as any)[key];
+      }
+    }
+    
     return this.request(`/characters/${id}/`, {
       method: 'PUT',
-      body: JSON.stringify(convertCharacterFields(character)),
+      body: JSON.stringify(payload),
     });
   }
 

@@ -3,6 +3,7 @@ export interface Message {
   content: string;
   role: 'user' | 'assistant';
   timestamp: string; // Using ISO string instead of Date object for Redux serialization
+  fileUri?: string; // Add fileUri field
 }
 
 export interface Character {

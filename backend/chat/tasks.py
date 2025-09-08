@@ -2,7 +2,8 @@ from celery import shared_task
 import sys
 from django.conf import settings
 import google.generativeai as genai
-from google.generativeai.types import file_types
+# --- CORRECT IMPORT ---
+from google.generativeai.types import Part
 from .models import Message, Character, ChatSession
 
 @shared_task
@@ -23,60 +24,48 @@ def generate_ai_response(message_id, character_id):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
 
-        # --- vvv 核心逻辑重构 vvv ---
-
-        # 1. 构建初始系统提示 (包含角色图片)
+        # 1. Build initial system prompt (with character file if it exists)
         initial_prompt_text = (
             f"You are roleplaying as '{character.name}'.\n"
             f"Personality: {character.personality}.\n"
             f"Appearance: {character.appearance}.\n"
             f"Background: {character.description}.\n"
-            f"Guidelines: {character.responseGuidelines}\n" # Assuming you have this field
+            f"Guidelines: {character.response_guidelines}\n"
             "Respond and act entirely as this character."
         )
         
         initial_prompt_parts = []
         if character.image_uri:
-            print(f"Adding character image URI: {character.image_uri}")
-            # MIME type is often inferred, but specifying helps.
-            # For generic files, we might need a better way to determine this.
-            image_part = {"file_data": {"mime_type": "image/jpeg", "file_uri": character.image_uri}}
-            initial_prompt_parts.append(image_part)
-        initial_prompt_parts.append({"text": initial_prompt_text})
+            print(f"Adding character file URI: {character.image_uri}")
+            # The SDK handles determining the MIME type from the URI for common types
+            file_part = Part.from_uri(uri=character.image_uri, mime_type=None)
+            initial_prompt_parts.append(file_part)
+        
+        initial_prompt_parts.append(Part.from_text(initial_prompt_text))
 
         formatted_history = [
             {"role": "user", "parts": initial_prompt_parts},
-            {"role": "model", "parts": [{"text": "Understood. I am ready."}]}
+            {"role": "model", "parts": [Part.from_text("Understood. I am ready.")]}
         ]
 
-        # 2. 构建包含文件和文本的完整对话历史
+        # 2. Build the rest of the chat history, including per-message files
         history_messages = Message.objects.filter(chat_session=chat_session).order_by('timestamp')
 
         for msg in history_messages:
             role = 'model' if msg.role == 'assistant' else 'user'
-            
-            # 为每条消息创建一个 parts 列表
             message_parts = []
 
-            # 如果消息有关联的文件URI，将其作为第一个 part 添加
             if msg.file_uri:
                 print(f"Adding file URI for message {msg.id}: {msg.file_uri}")
-                # For non-images, we need a generic MIME type or a lookup.
-                # For now, we let Gemini infer it by not providing one.
-                file_part = {"file_data": {"mime_type": None, "file_uri": msg.file_uri}}
+                file_part = Part.from_uri(uri=msg.file_uri, mime_type=None)
                 message_parts.append(file_part)
 
-            # 将消息的文本内容作为下一个 part 添加
-            # Gemini要求，如果有多媒体内容，文本不能是空的
             if msg.content or not message_parts:
-                 message_parts.append({"text": msg.content or ""}) # Use empty string if content is null but file exists
+                message_parts.append(Part.from_text(msg.content or ""))
 
-            formatted_history.append({
-                "role": role,
-                "parts": message_parts
-            })
-
-        # --- ^^^ 核心逻辑重构结束 ^^^ ---
+            # Avoid adding empty user messages unless they contain a file
+            if message_parts:
+                formatted_history.append({"role": role, "parts": message_parts})
 
         response = model.generate_content(formatted_history)
         ai_response_text = response.text

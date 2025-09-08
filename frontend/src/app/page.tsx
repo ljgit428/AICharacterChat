@@ -95,6 +95,7 @@ export default function Home() {
       content: message, // 这里只显示用户输入的原始、干净的消息
       role: 'user' as const,
       timestamp: new Date().toISOString(),
+      fileUri: stagedFile?.uri, // <--- ADD THIS LINE
     };
     dispatch(addMessage(userMessage));
     
@@ -192,45 +193,45 @@ export default function Home() {
   };
 
   const handleSaveCharacter = async (characterData: Character) => {
-    dispatch(setLoading(true)); // Start loading
-    dispatch(setError(null));   // Clear old errors
+    dispatch(setLoading(true));
+    dispatch(setError(null));
 
     try {
-      let response;
-      
-      // This part now correctly receives characterData with imageUri
-      const payload = {
+      // The payload should contain all fields from the characterData form
+      // and use camelCase, as our apiService now handles the conversion.
+      const payload: Partial<Character> = {
           name: characterData.name,
           description: characterData.description,
           personality: characterData.personality,
           appearance: characterData.appearance,
-          image_uri: characterData.imageUri, // <-- Make sure to send this
           responseGuidelines: characterData.responseGuidelines,
+          imageUri: characterData.imageUri,
       };
-      
-      // Check if character has an ID to determine if we're creating or updating
-      if (characterData.id) {
-        // Update existing character
+
+      let response;
+      if (characterData.id && !characterData.id.startsWith('temp-')) { // Check if it's a real ID
         response = await apiService.updateCharacter(characterData.id, payload);
       } else {
-        // Create new character
-        response = await apiService.createCharacter(payload);
+        response = await apiService.createCharacter(payload as Character);
       }
       
       if (response.error) {
         throw new Error(response.error);
       }
 
-      dispatch(setCharacter(characterData));
-      dispatch(clearChat()); // Clear previous messages when character changes
-      setHasStartedConversation(false); // Reset conversation state
-      setChatSessionId(null); // Reset chat session ID when character changes
+      // Update the frontend state with the complete data, including the new ID from the server if created
+      const savedCharacter = { ...characterData, id: response.data.id || characterData.id };
+      dispatch(setCharacter(savedCharacter));
+      
+      dispatch(clearChat());
+      setHasStartedConversation(false);
+      setChatSessionId(null);
       setShowSettings(false);
     } catch (error) {
       console.error('Error saving character:', error);
       dispatch(setError(error instanceof Error ? error.message : 'Failed to save character'));
     } finally {
-      dispatch(setLoading(false)); // End loading
+      dispatch(setLoading(false));
     }
   };
 
