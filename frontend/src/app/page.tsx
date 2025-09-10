@@ -201,23 +201,31 @@ export default function Home() {
     return promptSections.join('\n');
   };
 
-  const handleSaveCharacter = async (characterData: Character, file?: File, clearFile?: boolean) => {
+  const handleSaveCharacter = async (characterData: Character, file?: File) => {
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
-      let response;
-      
-      // 从发送给后端的数据中移除 file_url，因为后端会通过上传的文件自动处理
+      // 从 Redux 获取保存操作之前的角色状态
+      const originalCharacter = character;
+
+      // 核心决策逻辑：
+      // 我们需要告诉后端清除文件，当且仅当：
+      // 1. 原始角色有一个文件 (originalCharacter.fileUrl 存在)
+      // 2. 提交的新数据中没有文件 (characterData.fileUrl 不存在)
+      // 3. 用户没有正在上传一个新文件来替换它 (!file)
+      const shouldClearFile = !!(originalCharacter?.fileUrl && !characterData.fileUrl && !file);
+
       const payload = {
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          response_guidelines: characterData.responseGuidelines,
-          clear_file: clearFile,
+        name: characterData.name,
+        description: characterData.description,
+        personality: characterData.personality,
+        appearance: characterData.appearance,
+        response_guidelines: characterData.responseGuidelines,
+        clear_file: shouldClearFile, // 使用我们刚刚计算出的、绝对正确的标志
       };
 
+      let response;
       if (characterData.id && !String(characterData.id).startsWith('temp-')) {
         response = await apiService.updateCharacter(String(characterData.id), payload, file);
       } else {
@@ -231,16 +239,12 @@ export default function Home() {
       const serverResponseData = response.data;
       
       const savedCharacter: Character = {
-        // 保留前端特有的状态，比如 'disabled' 开关
         ...characterData,
-        
-        // 用服务器返回的权威数据覆盖所有共享字段
         id: String(serverResponseData.id),
         name: serverResponseData.name,
         description: serverResponseData.description,
         personality: serverResponseData.personality,
         appearance: serverResponseData.appearance,
-        // 核心修正：直接使用后端返回的URL，它已经是完整的了
         fileUrl: serverResponseData.file,
         responseGuidelines: serverResponseData.response_guidelines,
       };
