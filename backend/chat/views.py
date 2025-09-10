@@ -109,6 +109,7 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
             # Clear fields in the database
             instance.gemini_file_uri = None
+            instance.file = None  # Add this line to clear the file field in the database
             instance.save()
 
     @action(detail=False, methods=['get'])
