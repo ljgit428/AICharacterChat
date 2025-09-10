@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react';
 import Image from 'next/image';
 import { Message, RootState } from '@/types';
 import { useSelector } from 'react-redux';
+import ImageMagnifier from './ImageMagnifier';
 
 interface ChatWindowProps {
   onSendMessage: (message: string) => void;
@@ -95,11 +96,10 @@ export default function ChatWindow({
                 {/* --- vvv 修改：渲染图片预览或通用文件附件 vvv --- */}
                 {message.filePreviewUrl ? (
                   <div className="mt-2">
-                    <Image
+                    <ImageMagnifier
                       src={message.filePreviewUrl}
                       alt={message.fileName || 'Attached image'}
                       className="max-w-full h-auto rounded-lg"
-                      style={{ maxHeight: '200px' }}
                       width={200}
                       height={200}
                     />
@@ -149,7 +149,7 @@ export default function ChatWindow({
           <div className="mb-2 p-2 bg-blue-100 rounded-lg relative">
             {stagedFile.previewUrl ? (
               <div>
-                <Image
+                <ImageMagnifier
                   src={stagedFile.previewUrl}
                   alt="Preview"
                   className="max-h-32 rounded-md mx-auto"
