@@ -1,3 +1,5 @@
+// frontend/src/components/FileThumbnail.tsx
+
 import React from 'react';
 import Image from 'next/image';
 import ImageMagnifier from './ImageMagnifier';
@@ -53,8 +55,17 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({ fileName, fileType, previ
     return <GenericFileIcon />;
   };
   
-  // Case 1: It's an image with a preview URL. Use ImageMagnifier.
-  if (previewUrl && fileType?.startsWith('image/')) {
+  // --- ▼▼▼ 核心逻辑修正 ▼▼▼ ---
+
+  // 判断文件是否为图片
+  // 优先策略 1: 检查明确传入的 fileType。
+  // 优先策略 2: 如果没有 fileType，则检查 previewUrl 的文件扩展名。
+  const isImage = fileType
+    ? fileType.startsWith('image/')
+    : previewUrl && /\.(jpe?g|png|gif|webp|svg)$/i.test(previewUrl);
+
+  // 情况 1: 如果是图片并且有预览URL，就使用 ImageMagnifier 组件显示图片。
+  if (previewUrl && isImage) {
     return (
       <div className="flex flex-col items-center justify-center w-full">
         <ImageMagnifier
@@ -69,7 +80,9 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({ fileName, fileType, previ
     );
   }
   
-  // Case 2: It's another file type. Show the corresponding icon.
+  // --- ▲▲▲ 修正结束 ▲▲▲ ---
+
+  // 情况 2: 如果是其他文件类型，显示对应的图标。
   return (
     <div className="flex flex-col items-center justify-center p-2 bg-gray-100 rounded-lg w-full">
       {getFileIcon()}

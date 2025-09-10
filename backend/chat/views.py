@@ -24,17 +24,35 @@ class CharacterViewSet(viewsets.ModelViewSet):
     serializer_class = CharacterSerializer
     permission_classes = []
     
+    def _delete_gemini_file(self, gemini_uri):
+        """Helper to delete a file from Gemini API."""
+        if not gemini_uri:
+            return
+            
+        api_key = getattr(settings, 'GEMINI_API_KEY', '')
+        if not api_key:
+            print("CRITICAL: GEMINI_API_KEY is not configured. Cannot delete Gemini file.")
+            return
+        
+        genai.configure(api_key=api_key)
+        try:
+            print(f"Deleting old Gemini file: {gemini_uri}")
+            genai.delete_file(name=gemini_uri)
+        except Exception as e:
+            # It's okay if it fails (e.g., file already deleted), just log it.
+            print(f"Could not delete Gemini file {gemini_uri}: {e}")
+
     def _upload_to_gemini_and_save_uri(self, instance, request):
         """
         Helper function to upload file from request to Gemini and save the URI.
+        Also deletes the old Gemini file if one exists.
         """
         if 'file' not in request.FILES:
-            # If no file is in the request, and the user wants to remove the old file
-            # by not providing one, we can clear the URI.
-            # Check if an explicit 'clear_file' flag is sent if needed.
-            # For now, if no new file, we assume we keep the old one.
             return
 
+        # If there was an old file, delete it from Gemini first to avoid orphans
+        self._delete_gemini_file(instance.gemini_file_uri)
+        
         file_obj = request.FILES['file']
         
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
@@ -53,8 +71,8 @@ class CharacterViewSet(viewsets.ModelViewSet):
             print(f"Uploading character file '{file_obj.name}' to Gemini...")
             gemini_file = genai.upload_file(path=temp_file_path, display_name=file_obj.name)
             
-            # Save the permanent ID (gemini_file.name)
             instance.gemini_file_uri = gemini_file.name
+            # The file itself will be saved by the serializer, here we just update the URI
             instance.save(update_fields=['gemini_file_uri'])
             print(f"Successfully uploaded. Stored Gemini URI: {gemini_file.name}")
         
@@ -72,7 +90,26 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         instance = serializer.save()
-        self._upload_to_gemini_and_save_uri(instance, self.request)
+
+        # Case 1: A new file is being uploaded. The helper will handle it.
+        if 'file' in self.request.FILES:
+            self._upload_to_gemini_and_save_uri(instance, self.request)
+        
+        # Case 2: NO new file is uploaded, check if we should CLEAR the existing one.
+        # FormData sends boolean 'true' as a string.
+        elif self.request.data.get('clear_file') in ['true', 'True', True]:
+            print("Clear file request received. Deleting existing file.")
+            
+            # Delete remote file
+            self._delete_gemini_file(instance.gemini_file_uri)
+            
+            # Delete local file from storage
+            if instance.file:
+                instance.file.delete(save=False)
+
+            # Clear fields in the database
+            instance.gemini_file_uri = None
+            instance.save()
 
     @action(detail=False, methods=['get'])
     def my_characters(self, request):

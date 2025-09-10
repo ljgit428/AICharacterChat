@@ -25,14 +25,14 @@ export default function Home() {
 
   // Clean up Object URLs to prevent memory leaks
   useEffect(() => {
-    // This is a cleanup function. It runs when the component unmounts or stagedFile state changes.
-    const currentPreviewUrl = stagedFile?.previewUrl;
+    // This cleanup function now ONLY runs when the component unmounts.
+    // The empty dependency array [] ensures this.
     return () => {
-        if (currentPreviewUrl) {
-            URL.revokeObjectURL(currentPreviewUrl);
-        }
+      if (stagedFile?.previewUrl) {
+          URL.revokeObjectURL(stagedFile.previewUrl);
+      }
     };
-  }, [stagedFile]);
+  }, []); // <-- Crucially, this is now empty
 
   // Check for existing token on mount
   useEffect(() => {
@@ -115,8 +115,14 @@ export default function Home() {
         file_uri: isFirstMessage ? undefined : stagedFile?.uri,
       });
 
+      // --- ▼▼▼ 添加/修改这里的代码 ▼▼▼ ---
+      // Manually revoke the URL before clearing the staged file
+      if (stagedFile?.previewUrl) {
+        URL.revokeObjectURL(stagedFile.previewUrl);
+      }
       // Clear the staged file after successful send
       setStagedFile(null);
+      // --- ▲▲▲ 修改结束 ▲▲▲ ---
 
       if (response.error) {
         throw new Error(response.error);
@@ -187,7 +193,7 @@ export default function Home() {
     return promptSections.join('\n');
   };
 
-  const handleSaveCharacter = async (characterData: Character, file?: File) => {
+  const handleSaveCharacter = async (characterData: Character, file?: File, clearFile?: boolean) => {
     dispatch(setLoading(true));
     dispatch(setError(null));
 
@@ -202,6 +208,7 @@ export default function Home() {
           appearance: characterData.appearance,
           responseGuidelines: characterData.responseGuidelines,
           file_url: characterData.fileUrl,
+          clear_file: clearFile, // Pass the clear_file flag
         }, file);
       } else {
         response = await apiService.createCharacter({
@@ -211,6 +218,7 @@ export default function Home() {
           appearance: characterData.appearance,
           responseGuidelines: characterData.responseGuidelines,
           file_url: characterData.fileUrl,
+          clear_file: clearFile, // Pass the clear_file flag
         }, file);
       }
       
@@ -277,6 +285,13 @@ export default function Home() {
   const handleChatFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    // --- ▼▼▼ 在这里添加代码 ▼▼▼ ---
+    // If a file was already staged, revoke its preview URL first
+    if (stagedFile?.previewUrl) {
+      URL.revokeObjectURL(stagedFile.previewUrl);
+    }
+    // --- ▲▲▲ 添加结束 ▲▲▲ ---
 
     // If it's an image, create a local preview URL
     let previewUrl: string | undefined;
@@ -354,7 +369,14 @@ export default function Home() {
             isFirstMessage={!hasStartedConversation}
             // Pass new props for file upload
             stagedFile={stagedFile}
-            onStagedFileRemove={() => setStagedFile(null)}
+            onStagedFileRemove={() => {
+              // --- ▼▼▼ 修改这里的逻辑 ▼▼▼ ---
+              if (stagedFile?.previewUrl) {
+                URL.revokeObjectURL(stagedFile.previewUrl);
+              }
+              setStagedFile(null);
+              // --- ▲▲▲ 修改结束 ▲▲▲ ---
+            }}
             onFileUploadClick={() => chatFileInputRef.current?.click()}
             isChatUploading={isChatUploading}
           />

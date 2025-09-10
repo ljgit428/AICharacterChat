@@ -6,7 +6,7 @@ import FileDropzone from './FileDropzone';
 
 interface CharacterSettingsProps {
   character?: Character;
-  onSave: (character: Character, file?: File) => void;
+  onSave: (character: Character, file?: File, clearFile?: boolean) => void;
   onCancel: () => void;
 }
 
@@ -29,6 +29,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [clearFile, setClearFile] = useState(false);
   
   // --- ▼▼▼ 核心状态管理逻辑修正 ▼▼▼ ---
   const [fileName, setFileName] = useState<string | null>(character?.fileUrl?.split('/').pop() || null);
@@ -78,6 +79,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       URL.revokeObjectURL(previewUrl);
     }
     setPreviewUrl(null);
+    setClearFile(true); // 设置 clearFile 标志
   };
 
   const handleDisableToggle = (attribute: keyof typeof formData.disabled) => {
@@ -99,11 +101,11 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
       ...formData,
       id: character?.id || `temp-${Date.now()}`,
       // 当提交时，让父组件处理URL的更新
-      fileUrl: character?.fileUrl, 
+      fileUrl: character?.fileUrl,
       filePreviewUrl: previewUrl || undefined, // 传递当前的预览URL
     };
     
-    await onSave(updatedCharacter, selectedFile || undefined);
+    await onSave(updatedCharacter, selectedFile || undefined, clearFile);
     
     setIsUploading(false);
   };
