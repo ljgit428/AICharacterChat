@@ -1,67 +1,65 @@
+// frontend/src/components/ImageMagnifier.tsx
+
 "use client";
 
 import React, { useState } from 'react';
 import Image from 'next/image';
 
-interface ImageMagnifierProps {
+// 从 'next/image' 的 props 类型中继承，同时移除我们不需要的 'src' 和 'alt'
+type ImageMagnifierProps = Omit<React.ComponentProps<typeof Image>, 'src' | 'alt'> & {
   src: string;
   alt: string;
-  width: number;
-  height: number;
-  className?: string;
-}
+};
 
-const ImageMagnifier: React.FC<ImageMagnifierProps> = ({ src, alt, width, height, className }) => {
-  const [isModalOpen, setIsModalOpen] = useState(false);
+const ImageMagnifier: React.FC<ImageMagnifierProps> = ({ src, alt, width, height, className, ...props }) => {
+  const [isMagnified, setIsMagnified] = useState(false);
 
-  const openModal = () => setIsModalOpen(true);
-  const closeModal = () => setIsModalOpen(false);
+  const handleToggleMagnify = () => {
+    setIsMagnified(!isMagnified);
+  };
+
+  // --- ▼▼▼ 核心修正：判断是否为 Blob URL ▼▼▼ ---
+  const isBlobUrl = src && src.startsWith('blob:');
+  // --- ▲▲▲ 修正结束 ▲▲▲ ---
 
   return (
     <>
-      {/* 这是聊天或文件上传区域中可见的、较小的图片 */}
-      <div
-        className="relative cursor-zoom-in"
-        onClick={openModal} // 将事件从 onMouseEnter 改为 onClick
-      >
-        <Image
-          src={src}
-          alt={alt}
-          width={width}
-          height={height}
-          className={className}
-          style={{ objectFit: 'contain' }}
-        />
+      <div className="cursor-zoom-in" onClick={handleToggleMagnify}>
+        {/*
+          如果 src 是 blob URL，我们必须使用标准的 <img> 标签。
+          否则，我们使用经过优化的 next/image 组件。
+        */}
+        {isBlobUrl ? (
+          <img
+            src={src}
+            alt={alt}
+            width={Number(width)}
+            height={Number(height)}
+            className={className}
+          />
+        ) : (
+          <Image
+            src={src}
+            alt={alt}
+            width={width}
+            height={height}
+            className={className}
+            {...props}
+          />
+        )}
       </div>
 
-      {/* 这是全屏显示的图片模态框 */}
-      {isModalOpen && (
+      {isMagnified && (
         <div
-          // 背景遮罩层，点击它可以关闭模态框
-          className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-[100] cursor-zoom-out"
-          onClick={closeModal}
+          className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4"
+          onClick={handleToggleMagnify}
         >
-          {/* 右上角的关闭按钮，提供明确的关闭操作 */}
-          <button
-            className="absolute top-4 right-4 text-white text-5xl font-light leading-none"
-            onClick={closeModal}
-            aria-label="Close image view"
-          >
-            &times;
-          </button>
-
-          {/* 图片容器，防止点击图片本身时关闭模态框 */}
-          <div
-            className="relative max-w-[90vw] max-h-[90vh]"
-            onClick={(e) => e.stopPropagation()} // 阻止事件冒泡到背景层
-          >
-            {/* 在浮层中使用原生img标签可以更好地自适应尺寸 */}
-            <img
-              src={src}
-              alt={alt}
-              className="max-w-full max-h-full object-contain"
-            />
-          </div>
+          {/* 使用标准的 <img> 标签来显示放大后的图片，因为它能最好地自适应屏幕大小 */}
+          <img
+            src={src}
+            alt={alt}
+            className="max-w-full max-h-full object-contain"
+          />
         </div>
       )}
     </>
