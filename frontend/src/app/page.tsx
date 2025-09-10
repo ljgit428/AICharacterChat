@@ -17,11 +17,22 @@ export default function Home() {
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   
   // For chat file upload
-  const [stagedFile, setStagedFile] = useState<{ name: string; uri: string } | null>(null);
+  const [stagedFile, setStagedFile] = useState<{ name: string; uri: string; type: string; previewUrl?: string } | null>(null);
   const [isChatUploading, setIsChatUploading] = useState(false);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
+
+  // Clean up Object URLs to prevent memory leaks
+  useEffect(() => {
+    // This is a cleanup function. It runs when the component unmounts or stagedFile state changes.
+    const currentPreviewUrl = stagedFile?.previewUrl;
+    return () => {
+        if (currentPreviewUrl) {
+            URL.revokeObjectURL(currentPreviewUrl);
+        }
+    };
+  }, [stagedFile]);
 
   // Check for existing token on mount
   useEffect(() => {
@@ -86,6 +97,8 @@ export default function Home() {
       role: 'user' as const,
       timestamp: new Date().toISOString(),
       fileUri: isFirstMessage ? undefined : stagedFile?.uri,
+      fileName: isFirstMessage ? undefined : stagedFile?.name,
+      filePreviewUrl: isFirstMessage ? undefined : stagedFile?.previewUrl,
     };
     dispatch(addMessage(userMessage));
 
@@ -264,14 +277,29 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    // If it's an image, create a local preview URL
+    let previewUrl: string | undefined;
+    if (file.type.startsWith('image/')) {
+      previewUrl = URL.createObjectURL(file);
+    }
+
     setIsChatUploading(true);
     const response = await apiService.uploadImage(file);
     setIsChatUploading(false);
 
     if (response.data) {
-      setStagedFile({ name: file.name, uri: response.data.uri });
+      setStagedFile({
+        name: file.name,
+        uri: response.data.uri,
+        type: file.type,
+        previewUrl: previewUrl
+      });
     } else {
       alert(`File upload failed: ${response.error}`);
+      // If upload failed, ensure to clean up the created preview URL
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
     }
     // Clear the input value to allow re-uploading the same file
     if (chatFileInputRef.current) {
