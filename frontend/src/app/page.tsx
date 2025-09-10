@@ -96,9 +96,9 @@ export default function Home() {
       content: messageToSend,
       role: 'user' as const,
       timestamp: new Date().toISOString(),
-      fileUri: isFirstMessage ? undefined : stagedFile?.uri,
-      fileName: isFirstMessage ? undefined : stagedFile?.name,
-      filePreviewUrl: isFirstMessage ? undefined : stagedFile?.previewUrl,
+      fileUri: isFirstMessage ? character?.fileUrl : stagedFile?.uri,
+      fileName: isFirstMessage ? 'Character File' : stagedFile?.name,
+      filePreviewUrl: isFirstMessage ? character?.fileUrl : stagedFile?.previewUrl,
     };
     dispatch(addMessage(userMessage));
 
@@ -234,7 +234,7 @@ export default function Home() {
         description: serverResponseData.description || characterData.description,
         personality: serverResponseData.personality || characterData.personality,
         appearance: serverResponseData.appearance || characterData.appearance,
-        fileUrl: serverResponseData.file_url || characterData.fileUrl,
+        fileUrl: serverResponseData.file || characterData.fileUrl,
         responseGuidelines: serverResponseData.response_guidelines || characterData.responseGuidelines,
       };
       
