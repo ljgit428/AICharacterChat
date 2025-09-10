@@ -55,34 +55,44 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({ fileName, fileType, previ
     return <GenericFileIcon />;
   };
   
-  // --- ▼▼▼ 核心逻辑修正 ▼▼▼ ---
-
-  // 判断文件是否为图片
-  // 优先策略 1: 检查明确传入的 fileType。
-  // 优先策略 2: 如果没有 fileType，则检查 previewUrl 的文件扩展名。
   const isImage = fileType
     ? fileType.startsWith('image/')
     : previewUrl && /\.(jpe?g|png|gif|webp|svg)$/i.test(previewUrl);
 
-  // 情况 1: 如果是图片并且有预览URL，就使用 ImageMagnifier 组件显示图片。
+  // --- ▼▼▼ 核心修正逻辑 ▼▼▼ ---
+  // 情况 1: 如果是图片并且有预览URL
   if (previewUrl && isImage) {
+    const isBlobUrl = previewUrl.startsWith('blob:');
+
     return (
       <div className="flex flex-col items-center justify-center w-full">
-        <ImageMagnifier
-          src={previewUrl}
-          alt={fileName || 'Image preview'}
-          width={128}
-          height={128}
-          className="max-h-32 w-auto rounded-md object-contain"
-        />
+        {/*
+          如果是 blob URL，必须使用标准 <img> 标签，因为 next/image 不支持它。
+          这用于文件上传前的本地即时预览。
+          如果是普通的 http URL，则使用支持优化的 ImageMagnifier 组件。
+        */}
+        {isBlobUrl ? (
+          <img
+            src={previewUrl}
+            alt={fileName || 'Image preview'}
+            className="max-h-32 w-auto rounded-md object-contain"
+          />
+        ) : (
+          <ImageMagnifier
+            src={previewUrl}
+            alt={fileName || 'Image preview'}
+            width={128}
+            height={128}
+            className="max-h-32 w-auto rounded-md object-contain"
+          />
+        )}
         <p className="mt-2 text-xs font-medium text-gray-700 truncate max-w-full px-2">{fileName}</p>
       </div>
     );
   }
-  
   // --- ▲▲▲ 修正结束 ▲▲▲ ---
 
-  // 情况 2: 如果是其他文件类型，显示对应的图标。
+  // 情况 2: 如果不是图片或没有预览，显示对应的图标
   return (
     <div className="flex flex-col items-center justify-center p-2 bg-gray-100 rounded-lg w-full">
       {getFileIcon()}

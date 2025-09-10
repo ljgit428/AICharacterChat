@@ -9,6 +9,7 @@ import CharacterSettings from '@/components/CharacterSettings';
 import LoginModal from '@/components/LoginModal';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
+
 export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [hasStartedConversation, setHasStartedConversation] = useState(false);
@@ -199,42 +200,31 @@ export default function Home() {
 
     try {
       let response;
-      // Use String() to ensure characterData.id is always a string for the check
+      
+      // 从发送给后端的数据中移除 file_url，因为后端会通过上传的文件自动处理
+      const payload = {
+          name: characterData.name,
+          description: characterData.description,
+          personality: characterData.personality,
+          appearance: characterData.appearance,
+          response_guidelines: characterData.responseGuidelines,
+          clear_file: clearFile,
+      };
+
       if (characterData.id && !String(characterData.id).startsWith('temp-')) {
-        // --- ▼▼▼ 核心修正 #1 (更新角色) ▼▼▼ ---
-        response = await apiService.updateCharacter(String(characterData.id), {
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          response_guidelines: characterData.responseGuidelines, // 使用蛇形式的键
-          file_url: characterData.fileUrl,
-          clear_file: clearFile,
-        }, file);
-        // --- ▲▲▲ 修正结束 ▲▲▲ ---
+        response = await apiService.updateCharacter(String(characterData.id), payload, file);
       } else {
-        // --- ▼▼▼ 核心修正 #2 (创建角色) ▼▼▼ ---
-        response = await apiService.createCharacter({
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          response_guidelines: characterData.responseGuidelines, // 使用蛇形式的键
-          file_url: characterData.fileUrl,
-          clear_file: clearFile,
-        }, file);
-        // --- ▲▲▲ 修正结束 ▲▲▲ ---
+        response = await apiService.createCharacter(payload, file);
       }
       
       if (response.error) {
         throw new Error(response.error);
       }
 
-      // --- ▼▼▼ 核心修正：构建Redux状态对象时，完全信任服务器的响应 ▼▼▼ ---
       const serverResponseData = response.data;
       
       const savedCharacter: Character = {
-        // 从表单数据中继承前端特有的状态（如 'disabled' 开关）
+        // 保留前端特有的状态，比如 'disabled' 开关
         ...characterData,
         
         // 用服务器返回的权威数据覆盖所有共享字段
@@ -243,14 +233,12 @@ export default function Home() {
         description: serverResponseData.description,
         personality: serverResponseData.personality,
         appearance: serverResponseData.appearance,
-        // 这里的 serverResponseData.file 可能是 URL 字符串或 null，
-        // 我们直接使用它，不再回退到旧的 characterData.fileUrl
+        // 核心修正：直接使用后端返回的URL，它已经是完整的了
         fileUrl: serverResponseData.file,
         responseGuidelines: serverResponseData.response_guidelines,
       };
       
       dispatch(setCharacter(savedCharacter));
-      // --- ^^^ 核心修正结束 ^^^ ---
       
       dispatch(clearChat());
       setHasStartedConversation(false);
