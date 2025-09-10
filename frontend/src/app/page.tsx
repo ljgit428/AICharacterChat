@@ -122,14 +122,15 @@ export default function Home() {
         file_uri: isFirstMessage ? undefined : stagedFile?.uri,
       });
 
-      // --- ▼▼▼ 添加/修改这里的代码 ▼▼▼ ---
-      // Manually revoke the URL before clearing the staged file
-      if (stagedFile?.previewUrl) {
-        URL.revokeObjectURL(stagedFile.previewUrl);
-      }
-      // Clear the staged file after successful send
+      // --- ▼▼▼ 核心修正：移除过早的URL销毁逻辑 ▼▼▼ ---
+      // 之前这里的代码过早地销毁了 blob URL，导致放大功能失效。
+      // if (stagedFile?.previewUrl) {
+      //   URL.revokeObjectURL(stagedFile.previewUrl);
+      // }
+      
+      // 我们仍然需要在发送后清空已暂存的文件状态
       setStagedFile(null);
-      // --- ▲▲▲ 修改结束 ▲▲▲ ---
+      // --- ▲▲▲ 修正结束 ▲▲▲ ---
 
       if (response.error) {
         throw new Error(response.error);
