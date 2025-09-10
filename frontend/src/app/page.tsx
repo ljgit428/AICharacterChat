@@ -201,25 +201,29 @@ export default function Home() {
       let response;
       // Use String() to ensure characterData.id is always a string for the check
       if (characterData.id && !String(characterData.id).startsWith('temp-')) {
+        // --- ▼▼▼ 核心修正 #1 (更新角色) ▼▼▼ ---
         response = await apiService.updateCharacter(String(characterData.id), {
           name: characterData.name,
           description: characterData.description,
           personality: characterData.personality,
           appearance: characterData.appearance,
-          responseGuidelines: characterData.responseGuidelines,
+          response_guidelines: characterData.responseGuidelines, // 使用蛇形式的键
           file_url: characterData.fileUrl,
-          clear_file: clearFile, // Pass the clear_file flag
+          clear_file: clearFile,
         }, file);
+        // --- ▲▲▲ 修正结束 ▲▲▲ ---
       } else {
+        // --- ▼▼▼ 核心修正 #2 (创建角色) ▼▼▼ ---
         response = await apiService.createCharacter({
           name: characterData.name,
           description: characterData.description,
           personality: characterData.personality,
           appearance: characterData.appearance,
-          responseGuidelines: characterData.responseGuidelines,
+          response_guidelines: characterData.responseGuidelines, // 使用蛇形式的键
           file_url: characterData.fileUrl,
-          clear_file: clearFile, // Pass the clear_file flag
+          clear_file: clearFile,
         }, file);
+        // --- ▲▲▲ 修正结束 ▲▲▲ ---
       }
       
       if (response.error) {

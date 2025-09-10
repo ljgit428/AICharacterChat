@@ -31,7 +31,9 @@ interface CreateCharacterRequest {
   description: string;
   personality: string;
   appearance: string;
-  responseGuidelines: string;
+  // --- ▼▼▼ 核心修正 ▼▼▼ ---
+  response_guidelines: string; // 将驼峰式改为蛇形式
+  // --- ▲▲▲ 修正结束 ▲▲▲ ---
   file_url?: string;
   clear_file?: boolean;
 }
