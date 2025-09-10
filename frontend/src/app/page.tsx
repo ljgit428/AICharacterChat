@@ -290,7 +290,7 @@ export default function Home() {
     if (response.data) {
       setStagedFile({
         name: file.name,
-        uri: response.data.uri,
+        uri: response.data.name,
         type: file.type,
         previewUrl: previewUrl
       });
