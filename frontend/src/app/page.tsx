@@ -226,25 +226,23 @@ export default function Home() {
         throw new Error(response.error);
       }
 
-      // --- vvv 核心修正：确保存入Redux的ID永远是字符串 vvv ---
+      // --- ▼▼▼ 核心修正：构建Redux状态对象时，完全信任服务器的响应 ▼▼▼ ---
       const serverResponseData = response.data;
       
-      // Get the ID from the server response and explicitly convert it to a string.
-      const finalId = serverResponseData.id ? String(serverResponseData.id) : characterData.id;
-
-      // Create the final character object for the Redux store
       const savedCharacter: Character = {
+        // 从表单数据中继承前端特有的状态（如 'disabled' 开关）
         ...characterData,
-        id: finalId, // Now it's guaranteed to be a string
-        // The backend returns snake_case, so we need to map it back if needed,
-        // or just rely on the data we already have on the frontend.
-        // Using characterData is safer here.
-        name: serverResponseData.name || characterData.name,
-        description: serverResponseData.description || characterData.description,
-        personality: serverResponseData.personality || characterData.personality,
-        appearance: serverResponseData.appearance || characterData.appearance,
-        fileUrl: serverResponseData.file || characterData.fileUrl,
-        responseGuidelines: serverResponseData.response_guidelines || characterData.responseGuidelines,
+        
+        // 用服务器返回的权威数据覆盖所有共享字段
+        id: String(serverResponseData.id),
+        name: serverResponseData.name,
+        description: serverResponseData.description,
+        personality: serverResponseData.personality,
+        appearance: serverResponseData.appearance,
+        // 这里的 serverResponseData.file 可能是 URL 字符串或 null，
+        // 我们直接使用它，不再回退到旧的 characterData.fileUrl
+        fileUrl: serverResponseData.file,
+        responseGuidelines: serverResponseData.response_guidelines,
       };
       
       dispatch(setCharacter(savedCharacter));
