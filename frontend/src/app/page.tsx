@@ -92,16 +92,22 @@ export default function Home() {
     // Always add the message that will be sent to the UI.
     // On the first run, this will be the settings prompt.
     // On subsequent runs, it will be the user's typed message.
+    // --- ▼▼▼ 核心修正：动态获取文件名 ▼▼▼ ---
     const userMessage: Message = {
       id: Date.now().toString(),
       content: messageToSend,
       role: 'user' as const,
       timestamp: new Date().toISOString(),
       fileUri: isFirstMessage ? character?.fileUrl : stagedFile?.uri,
-      fileName: isFirstMessage ? 'Character File' : stagedFile?.name,
+      // 如果是第一条消息，就从 character.fileUrl 中解析文件名
+      // 否则，使用聊天时临时上传的文件名
+      fileName: isFirstMessage
+        ? character?.fileUrl?.split('/').pop() || 'Character File'
+        : stagedFile?.name,
       filePreviewUrl: isFirstMessage ? character?.fileUrl : stagedFile?.previewUrl,
       fileType: isFirstMessage ? undefined : stagedFile?.type,
     };
+    // --- ▲▲▲ 修正结束 ▲▲▲ ---
     dispatch(addMessage(userMessage));
 
     dispatch(setLoading(true));
