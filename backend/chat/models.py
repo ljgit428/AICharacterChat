@@ -10,6 +10,7 @@ class Character(models.Model):
     appearance = models.TextField()
     response_guidelines = models.TextField(blank=True, null=True)
     file = models.FileField(upload_to='character_files/', blank=True, null=True)
+    gemini_file_uri = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_characters')
