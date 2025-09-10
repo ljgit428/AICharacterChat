@@ -5,8 +5,8 @@ from .models import Character, ChatSession, Message
 class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Character
-        fields = ['id', 'name', 'description', 'personality', 'appearance', 'response_guidelines', 'file', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
+        fields = ['id', 'name', 'description', 'personality', 'appearance', 'response_guidelines', 'file', 'gemini_file_uri', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'gemini_file_uri']
 
 
 class MessageSerializer(serializers.ModelSerializer):

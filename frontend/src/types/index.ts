@@ -4,6 +4,8 @@ export interface Message {
   role: 'user' | 'assistant';
   timestamp: string; // Using ISO string instead of Date object for Redux serialization
   fileUri?: string; // Add fileUri field
+  fileName?: string; // 新增：用于显示文件名
+  filePreviewUrl?: string; // 新增：用于图片预览
 }
 
 export interface Character {

@@ -4,6 +4,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from django.db.models import Q
+from django.conf import settings
+import tempfile
+import os
+import google.generativeai as genai
 from .models import Character, ChatSession, Message
 from .serializers import (
     CharacterSerializer,
@@ -18,17 +22,58 @@ from .tasks import generate_ai_response
 class CharacterViewSet(viewsets.ModelViewSet):
     queryset = Character.objects.all()
     serializer_class = CharacterSerializer
-    permission_classes = []  # Allow access without authentication for development
+    permission_classes = []
     
+    def _upload_to_gemini_and_save_uri(self, instance, request):
+        """
+        Helper function to upload file from request to Gemini and save the URI.
+        """
+        if 'file' not in request.FILES:
+            # If no file is in the request, and the user wants to remove the old file
+            # by not providing one, we can clear the URI.
+            # Check if an explicit 'clear_file' flag is sent if needed.
+            # For now, if no new file, we assume we keep the old one.
+            return
+
+        file_obj = request.FILES['file']
+        
+        api_key = getattr(settings, 'GEMINI_API_KEY', '')
+        if not api_key:
+            print("CRITICAL: GEMINI_API_KEY is not configured.")
+            return
+        genai.configure(api_key=api_key)
+
+        temp_file_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file_obj.name}") as temp_file:
+                for chunk in file_obj.chunks():
+                    temp_file.write(chunk)
+                temp_file_path = temp_file.name
+            
+            print(f"Uploading character file '{file_obj.name}' to Gemini...")
+            gemini_file = genai.upload_file(path=temp_file_path, display_name=file_obj.name)
+            
+            # Save the permanent ID (gemini_file.name)
+            instance.gemini_file_uri = gemini_file.name
+            instance.save(update_fields=['gemini_file_uri'])
+            print(f"Successfully uploaded. Stored Gemini URI: {gemini_file.name}")
+        
+        except Exception as e:
+            print(f"Failed to upload character file to Gemini: {e}")
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
     def perform_create(self, serializer):
-        # Get or create default user for development
         User = get_user_model()
-        user, created = User.objects.get_or_create(
-            username='default_user',
-            defaults={'email': 'default@example.com'}
-        )
-        serializer.save(created_by=user)
-    
+        user, _ = User.objects.get_or_create(username='default_user')
+        instance = serializer.save(created_by=user)
+        self._upload_to_gemini_and_save_uri(instance, self.request)
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        self._upload_to_gemini_and_save_uri(instance, self.request)
+
     @action(detail=False, methods=['get'])
     def my_characters(self, request):
         characters = Character.objects.filter(created_by=request.user)
