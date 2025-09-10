@@ -1,11 +1,8 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Character, RootState } from '@/types';
-import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, updateCharacter } from '@/store/chatSlice';
+import { Character } from '@/types';
 import FileDropzone from './FileDropzone';
-import { apiService } from '@/utils/api';
 
 interface CharacterSettingsProps {
   character?: Character;
@@ -31,20 +28,21 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [fileName, setFileName] = useState<string | null>(character?.filePreviewUrl || null);
   const [isUploading, setIsUploading] = useState(false);
+  
+  // --- ▼▼▼ 核心状态管理逻辑修正 ▼▼▼ ---
+  const [fileName, setFileName] = useState<string | null>(character?.fileUrl?.split('/').pop() || null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(character?.fileUrl || null); // 直接使用来自Redux的相对路径
+  // --- ▲▲▲ 修正结束 ▲▲▲ ---
 
-  // Clean up the object URL to prevent memory leaks
+  // 清理临时的blob URL
   useEffect(() => {
     return () => {
-      if (fileName && fileName.startsWith('blob:')) {
-        URL.revokeObjectURL(fileName);
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
       }
     };
-  }, [fileName]);
-
-  const dispatch = useDispatch();
-  const currentCharacter = useSelector((state: RootState) => state.chat.character);
+  }, [previewUrl]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -57,12 +55,26 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
     setFileName(file.name);
+    
+    // 如果是图片，创建本地预览URL
+    if (file.type.startsWith('image/')) {
+      const localPreviewUrl = URL.createObjectURL(file);
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      setPreviewUrl(localPreviewUrl);
+    } else {
+      setPreviewUrl(null);
+    }
   };
 
   const handleFileRemove = () => {
     setSelectedFile(null);
     setFileName(null);
-    // That's it. No need to modify formData here.
+    if (previewUrl && previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setPreviewUrl(null);
   };
 
   const handleDisableToggle = (attribute: keyof typeof formData.disabled) => {
@@ -78,36 +90,18 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsUploading(true);
-
-    let finalFileUrl = character?.fileUrl;
-
-    // If a new file has been selected, upload it
-    if (selectedFile) {
-      const response = await apiService.uploadImage(selectedFile);
-      if (response.data?.uri) {
-        finalFileUrl = response.data.uri;
-      } else {
-        console.error("Image upload failed:", response.error);
-        alert("Error: Could not upload the file. Please try again.");
-        setIsUploading(false);
-        return; // Stop the submission process
-      }
-    } else if (!fileName) {
-      // If the file was removed, ensure the URL is cleared
-      finalFileUrl = undefined;
-    }
-
+    
     const updatedCharacter: Character = {
       ...character,
       ...formData,
-      id: character?.id || Date.now().toString(),
-      fileUrl: finalFileUrl,
-      filePreviewUrl: fileName || undefined,
+      id: character?.id || `temp-${Date.now()}`,
+      // 当提交时，让父组件处理URL的更新
+      fileUrl: character?.fileUrl, 
+      filePreviewUrl: previewUrl || undefined, // 传递当前的预览URL
     };
     
-    // The onSave prop now handles the actual API call to save the character
     await onSave(updatedCharacter, selectedFile || undefined);
-
+    
     setIsUploading(false);
   };
 
@@ -127,6 +121,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
               onFileSelect={handleFileSelect}
               onFileRemove={handleFileRemove}
               fileName={fileName}
+              previewUrl={previewUrl}
             />
         </div>
         
