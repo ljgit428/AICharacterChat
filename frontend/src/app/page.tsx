@@ -9,6 +9,7 @@ import CharacterSettings from '@/components/CharacterSettings';
 import LoginModal from '@/components/LoginModal';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
+
 export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [hasStartedConversation, setHasStartedConversation] = useState(false);
@@ -25,14 +26,14 @@ export default function Home() {
 
   // Clean up Object URLs to prevent memory leaks
   useEffect(() => {
-    // This is a cleanup function. It runs when the component unmounts or stagedFile state changes.
-    const currentPreviewUrl = stagedFile?.previewUrl;
+    // This cleanup function now ONLY runs when the component unmounts.
+    // The empty dependency array [] ensures this.
     return () => {
-        if (currentPreviewUrl) {
-            URL.revokeObjectURL(currentPreviewUrl);
-        }
+      if (stagedFile?.previewUrl) {
+          URL.revokeObjectURL(stagedFile.previewUrl);
+      }
     };
-  }, [stagedFile]);
+  }, []); // <-- Crucially, this is now empty
 
   // Check for existing token on mount
   useEffect(() => {
@@ -91,15 +92,22 @@ export default function Home() {
     // Always add the message that will be sent to the UI.
     // On the first run, this will be the settings prompt.
     // On subsequent runs, it will be the user's typed message.
+    // --- ▼▼▼ 核心修正：动态获取文件名 ▼▼▼ ---
     const userMessage: Message = {
       id: Date.now().toString(),
       content: messageToSend,
       role: 'user' as const,
       timestamp: new Date().toISOString(),
       fileUri: isFirstMessage ? character?.fileUrl : stagedFile?.uri,
-      fileName: isFirstMessage ? 'Character File' : stagedFile?.name,
+      // 如果是第一条消息，就从 character.fileUrl 中解析文件名
+      // 否则，使用聊天时临时上传的文件名
+      fileName: isFirstMessage
+        ? character?.fileUrl?.split('/').pop() || 'Character File'
+        : stagedFile?.name,
       filePreviewUrl: isFirstMessage ? character?.fileUrl : stagedFile?.previewUrl,
+      fileType: isFirstMessage ? undefined : stagedFile?.type,
     };
+    // --- ▲▲▲ 修正结束 ▲▲▲ ---
     dispatch(addMessage(userMessage));
 
     dispatch(setLoading(true));
@@ -114,8 +122,15 @@ export default function Home() {
         file_uri: isFirstMessage ? undefined : stagedFile?.uri,
       });
 
-      // Clear the staged file after successful send
+      // --- ▼▼▼ 核心修正：移除过早的URL销毁逻辑 ▼▼▼ ---
+      // 之前这里的代码过早地销毁了 blob URL，导致放大功能失效。
+      // if (stagedFile?.previewUrl) {
+      //   URL.revokeObjectURL(stagedFile.previewUrl);
+      // }
+      
+      // 我们仍然需要在发送后清空已暂存的文件状态
       setStagedFile(null);
+      // --- ▲▲▲ 修正结束 ▲▲▲ ---
 
       if (response.error) {
         throw new Error(response.error);
@@ -186,60 +201,51 @@ export default function Home() {
     return promptSections.join('\n');
   };
 
-  const handleSaveCharacter = async (characterData: Character, file?: File) => {
+  const handleSaveCharacter = async (characterData: Character, file?: File, clearFile?: boolean) => {
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
       let response;
-      // Use String() to ensure characterData.id is always a string for the check
+      
+      // 从发送给后端的数据中移除 file_url，因为后端会通过上传的文件自动处理
+      const payload = {
+          name: characterData.name,
+          description: characterData.description,
+          personality: characterData.personality,
+          appearance: characterData.appearance,
+          response_guidelines: characterData.responseGuidelines,
+          clear_file: clearFile,
+      };
+
       if (characterData.id && !String(characterData.id).startsWith('temp-')) {
-        response = await apiService.updateCharacter(String(characterData.id), {
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          responseGuidelines: characterData.responseGuidelines,
-          file_url: characterData.fileUrl,
-        }, file);
+        response = await apiService.updateCharacter(String(characterData.id), payload, file);
       } else {
-        response = await apiService.createCharacter({
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          responseGuidelines: characterData.responseGuidelines,
-          file_url: characterData.fileUrl,
-        }, file);
+        response = await apiService.createCharacter(payload, file);
       }
       
       if (response.error) {
         throw new Error(response.error);
       }
 
-      // --- vvv 核心修正：确保存入Redux的ID永远是字符串 vvv ---
       const serverResponseData = response.data;
       
-      // Get the ID from the server response and explicitly convert it to a string.
-      const finalId = serverResponseData.id ? String(serverResponseData.id) : characterData.id;
-
-      // Create the final character object for the Redux store
       const savedCharacter: Character = {
+        // 保留前端特有的状态，比如 'disabled' 开关
         ...characterData,
-        id: finalId, // Now it's guaranteed to be a string
-        // The backend returns snake_case, so we need to map it back if needed,
-        // or just rely on the data we already have on the frontend.
-        // Using characterData is safer here.
-        name: serverResponseData.name || characterData.name,
-        description: serverResponseData.description || characterData.description,
-        personality: serverResponseData.personality || characterData.personality,
-        appearance: serverResponseData.appearance || characterData.appearance,
-        fileUrl: serverResponseData.file || characterData.fileUrl,
-        responseGuidelines: serverResponseData.response_guidelines || characterData.responseGuidelines,
+        
+        // 用服务器返回的权威数据覆盖所有共享字段
+        id: String(serverResponseData.id),
+        name: serverResponseData.name,
+        description: serverResponseData.description,
+        personality: serverResponseData.personality,
+        appearance: serverResponseData.appearance,
+        // 核心修正：直接使用后端返回的URL，它已经是完整的了
+        fileUrl: serverResponseData.file,
+        responseGuidelines: serverResponseData.response_guidelines,
       };
       
       dispatch(setCharacter(savedCharacter));
-      // --- ^^^ 核心修正结束 ^^^ ---
       
       dispatch(clearChat());
       setHasStartedConversation(false);
@@ -276,6 +282,13 @@ export default function Home() {
   const handleChatFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    // --- ▼▼▼ 在这里添加代码 ▼▼▼ ---
+    // If a file was already staged, revoke its preview URL first
+    if (stagedFile?.previewUrl) {
+      URL.revokeObjectURL(stagedFile.previewUrl);
+    }
+    // --- ▲▲▲ 添加结束 ▲▲▲ ---
 
     // If it's an image, create a local preview URL
     let previewUrl: string | undefined;
@@ -353,7 +366,14 @@ export default function Home() {
             isFirstMessage={!hasStartedConversation}
             // Pass new props for file upload
             stagedFile={stagedFile}
-            onStagedFileRemove={() => setStagedFile(null)}
+            onStagedFileRemove={() => {
+              // --- ▼▼▼ 修改这里的逻辑 ▼▼▼ ---
+              if (stagedFile?.previewUrl) {
+                URL.revokeObjectURL(stagedFile.previewUrl);
+              }
+              setStagedFile(null);
+              // --- ▲▲▲ 修改结束 ▲▲▲ ---
+            }}
             onFileUploadClick={() => chatFileInputRef.current?.click()}
             isChatUploading={isChatUploading}
           />

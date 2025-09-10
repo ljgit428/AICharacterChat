@@ -1,12 +1,15 @@
 import React, { useState, useCallback, useRef } from 'react';
+import FileThumbnail from './FileThumbnail';
 
 interface FileDropzoneProps {
   onFileSelect: (file: File) => void;
   onFileRemove: () => void;
-  fileName: string | null; // Changed from previewUrl
+  fileName: string | null;
+  fileType: string | null; // Add new prop for file type
+  previewUrl: string | null; // New prop for image preview
 }
 
-export default function FileDropzone({ onFileSelect, onFileRemove, fileName }: FileDropzoneProps) {
+export default function FileDropzone({ onFileSelect, onFileRemove, fileName, fileType, previewUrl }: FileDropzoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -48,12 +51,20 @@ export default function FileDropzone({ onFileSelect, onFileRemove, fileName }: F
       <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChange} />
       {fileName ? (
         <div className="relative flex flex-col items-center justify-center">
-          {/* File Icon */}
-          <svg className="w-12 h-12 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-          <p className="text-sm font-medium text-gray-700 truncate max-w-full px-8">{fileName}</p>
+          <div onClick={(e) => e.stopPropagation()}>
+            <FileThumbnail
+              fileName={fileName}
+              fileType={fileType}
+              previewUrl={previewUrl}
+            />
+          </div>
           <button
-            onClick={(e) => { e.stopPropagation(); onFileRemove(); }}
-            className="absolute top-0 right-0 -mt-2 -mr-2 bg-red-500 text-white rounded-full h-6 w-6 flex items-center justify-center font-bold"
+            onClick={(e) => {
+              // 确保关闭按钮也停止事件冒泡
+              e.stopPropagation();
+              onFileRemove();
+            }}
+            className="absolute top-2 right-2 bg-red-500 text-white rounded-full h-6 w-6 flex items-center justify-center font-bold"
           >
             &times;
           </button>

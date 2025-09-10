@@ -6,6 +6,7 @@ export interface Message {
   fileUri?: string; // Add fileUri field
   fileName?: string; // 新增：用于显示文件名
   filePreviewUrl?: string; // 新增：用于图片预览
+  fileType?: string; // 新增：用于区分文件类型
 }
 
 export interface Character {

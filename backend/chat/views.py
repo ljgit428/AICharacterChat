@@ -24,17 +24,37 @@ class CharacterViewSet(viewsets.ModelViewSet):
     serializer_class = CharacterSerializer
     permission_classes = []
     
+    def _delete_gemini_file(self, gemini_uri):
+        """Helper to delete a file from Gemini API."""
+        if not gemini_uri:
+            return
+            
+        api_key = getattr(settings, 'GEMINI_API_KEY', '')
+        if not api_key:
+            print("CRITICAL: GEMINI_API_KEY is not configured. Cannot delete Gemini file.")
+            return
+        
+        genai.configure(api_key=api_key)
+        try:
+            print(f"Deleting old Gemini file: {gemini_uri}")
+            genai.delete_file(name=gemini_uri)
+        except Exception as e:
+            # It's okay if it fails (e.g., file already deleted), just log it.
+            print(f"Could not delete Gemini file {gemini_uri}: {e}")
+
     def _upload_to_gemini_and_save_uri(self, instance, request):
         """
         Helper function to upload file from request to Gemini and save the URI.
         """
         if 'file' not in request.FILES:
-            # If no file is in the request, and the user wants to remove the old file
-            # by not providing one, we can clear the URI.
-            # Check if an explicit 'clear_file' flag is sent if needed.
-            # For now, if no new file, we assume we keep the old one.
             return
 
+        # --- ▼▼▼ 核心修正 #1 ▼▼▼ ---
+        # 根据新要求，即使有旧文件，我们也不再从Gemini云端删除它。
+        # 我们只在数据库中用新的URI覆盖旧的URI。
+        # self._delete_gemini_file(instance.gemini_file_uri) # 注释掉此行
+        # --- ▲▲▲ 修正结束 ▲▲▲ ---
+        
         file_obj = request.FILES['file']
         
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
@@ -53,7 +73,6 @@ class CharacterViewSet(viewsets.ModelViewSet):
             print(f"Uploading character file '{file_obj.name}' to Gemini...")
             gemini_file = genai.upload_file(path=temp_file_path, display_name=file_obj.name)
             
-            # Save the permanent ID (gemini_file.name)
             instance.gemini_file_uri = gemini_file.name
             instance.save(update_fields=['gemini_file_uri'])
             print(f"Successfully uploaded. Stored Gemini URI: {gemini_file.name}")
@@ -72,7 +91,45 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         instance = serializer.save()
-        self._upload_to_gemini_and_save_uri(instance, self.request)
+
+        # Case 1: A new file is being uploaded.
+        if 'file' in self.request.FILES:
+            self._upload_to_gemini_and_save_uri(instance, self.request)
+        
+        # Case 2: Clear the existing file.
+        elif self.request.data.get('clear_file') in ['true', 'True', True]:
+            print("Clear file request received. Deleting existing file.")
+            
+            self._delete_gemini_file(instance.gemini_file_uri)
+            
+            if instance.file:
+                instance.file.delete(save=False)
+
+            instance.gemini_file_uri = None
+            instance.file = None
+            # 使用 update_fields 进行更明确、更高效的保存
+            instance.save(update_fields=['file', 'gemini_file_uri'])
+
+    # --- ▼▼▼ 新增/修改的代码 ▼▼▼ ---
+    def update(self, request, *args, **kwargs):
+        """
+        重写 update 方法以确保在执行自定义文件逻辑后，
+        返回的是最新的、与数据库一致的数据。
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # 调用我们自定义的 perform_update，它会处理所有数据库操作
+        self.perform_update(serializer)
+
+        # 从数据库重新加载实例，以确保获取到最新的状态
+        instance.refresh_from_db()
+        
+        # 使用刷新后的实例创建一个新的序列化器并返回其数据
+        return Response(self.get_serializer(instance).data)
+    # --- ▲▲▲ 代码修改结束 ▲▲▲ ---
 
     @action(detail=False, methods=['get'])
     def my_characters(self, request):

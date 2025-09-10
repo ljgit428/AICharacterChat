@@ -84,7 +84,8 @@ def generate_ai_response(message_id, character_id):
         # 4. Call Gemini API with the complete, correctly constructed history
         print("Sending complete history to Gemini...")
         response = model.generate_content(formatted_history)
-        ai_response_text = response.text
+        # --- 核心修正：清理AI回复文本开头和结尾的空白字符 ---
+        ai_response_text = response.text.strip()
         
         # 5. Save AI's response to the database
         ai_message = Message.objects.create(

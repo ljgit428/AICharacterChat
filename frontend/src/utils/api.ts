@@ -31,8 +31,11 @@ interface CreateCharacterRequest {
   description: string;
   personality: string;
   appearance: string;
-  responseGuidelines: string;
+  // --- ▼▼▼ 核心修正 ▼▼▼ ---
+  response_guidelines: string; // 将驼峰式改为蛇形式
+  // --- ▲▲▲ 修正结束 ▲▲▲ ---
   file_url?: string;
+  clear_file?: boolean;
 }
 
 class ApiService {
@@ -108,7 +111,11 @@ class ApiService {
     const formData = new FormData();
     Object.entries(character).forEach(([key, value]) => {
       if (value !== undefined) {
-        formData.append(key, value);
+        if (typeof value === 'boolean') {
+          formData.append(key, String(value));
+        } else {
+          formData.append(key, value);
+        }
       }
     });
     if (file) {
@@ -130,7 +137,11 @@ class ApiService {
     const formData = new FormData();
     Object.entries(character).forEach(([key, value]) => {
       if (value !== undefined) {
-        formData.append(key, value);
+        if (typeof value === 'boolean') {
+          formData.append(key, String(value));
+        } else {
+          formData.append(key, value);
+        }
       }
     });
     if (file) {
