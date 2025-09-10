@@ -99,6 +99,7 @@ export default function Home() {
       fileUri: isFirstMessage ? character?.fileUrl : stagedFile?.uri,
       fileName: isFirstMessage ? 'Character File' : stagedFile?.name,
       filePreviewUrl: isFirstMessage ? character?.fileUrl : stagedFile?.previewUrl,
+      fileType: isFirstMessage ? undefined : stagedFile?.type,
     };
     dispatch(addMessage(userMessage));
 

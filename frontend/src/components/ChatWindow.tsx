@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useRef } from 'react';
-import Image from 'next/image';
 import { Message, RootState } from '@/types';
 import { useSelector } from 'react-redux';
-import ImageMagnifier from './ImageMagnifier';
+import FileThumbnail from './FileThumbnail';
 
 interface ChatWindowProps {
   onSendMessage: (message: string) => void;
@@ -93,23 +92,14 @@ export default function ChatWindow({
                   </span>
                 </div>
                 
-                {/* --- vvv 修改：渲染图片预览或通用文件附件 vvv --- */}
-                {message.filePreviewUrl ? (
+                {/* --- vvv 修改：使用FileThumbnail组件渲染文件预览 vvv --- */}
+                {(message.fileUri || message.filePreviewUrl) && (
                   <div className="mt-2">
-                    <ImageMagnifier
-                      src={message.filePreviewUrl}
-                      alt={message.fileName || 'Attached image'}
-                      className="max-w-full h-auto rounded-lg"
-                      width={200}
-                      height={200}
+                    <FileThumbnail
+                      fileName={message.fileName || 'Attached File'}
+                      fileType={message.fileType}
+                      previewUrl={message.filePreviewUrl}
                     />
-                  </div>
-                ) : message.fileUri && (
-                  <div className={`mt-2 p-2 rounded-lg flex items-center space-x-2 ${message.role === 'user' ? 'bg-blue-400' : 'bg-gray-100'}`}>
-                    <svg className={`w-5 h-5 flex-shrink-0 ${message.role === 'user' ? 'text-white' : 'text-gray-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                    <span className={`text-xs truncate ${message.role === 'user' ? 'text-white' : 'text-gray-700'}`}>
-                      {message.fileName || 'Attached File'}
-                    </span>
                   </div>
                 )}
                 {/* --- ^^^ 修改结束 ^^^ --- */}
@@ -147,26 +137,14 @@ export default function ChatWindow({
         {/* Show staged file */}
         {stagedFile && !isChatUploading && (
           <div className="mb-2 p-2 bg-blue-100 rounded-lg relative">
-            {stagedFile.previewUrl ? (
-              <div>
-                <ImageMagnifier
-                  src={stagedFile.previewUrl}
-                  alt="Preview"
-                  className="max-h-32 rounded-md mx-auto"
-                  width={128}
-                  height={128}
-                />
-                <p className="text-center text-xs text-blue-800 mt-1 truncate">{stagedFile.name}</p>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between text-blue-800 text-sm">
-                <div className="flex items-center space-x-2 truncate">
-                  <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                  <span className="truncate">{stagedFile.name}</span>
-                </div>
-                <button onClick={onStagedFileRemove} className="font-bold text-lg leading-none">&times;</button>
-              </div>
-            )}
+            <FileThumbnail
+              fileName={stagedFile.name}
+              fileType={stagedFile.type}
+              previewUrl={stagedFile.previewUrl}
+            />
+            <button onClick={onStagedFileRemove} className="absolute top-2 right-2 bg-red-500 text-white rounded-full h-6 w-6 flex items-center justify-center font-bold">
+              &times;
+            </button>
           </div>
         )}
         

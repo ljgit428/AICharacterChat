@@ -33,6 +33,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   // --- ▼▼▼ 核心状态管理逻辑修正 ▼▼▼ ---
   const [fileName, setFileName] = useState<string | null>(character?.fileUrl?.split('/').pop() || null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(character?.fileUrl || null); // 直接使用来自Redux的相对路径
+  const [fileType, setFileType] = useState<string | null>(null);
   // --- ▲▲▲ 修正结束 ▲▲▲ ---
 
   // 清理临时的blob URL
@@ -55,6 +56,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
     setFileName(file.name);
+    setFileType(file.type);
     
     // 如果是图片，创建本地预览URL
     if (file.type.startsWith('image/')) {
@@ -71,6 +73,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
   const handleFileRemove = () => {
     setSelectedFile(null);
     setFileName(null);
+    setFileType(null);
     if (previewUrl && previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrl);
     }
@@ -121,6 +124,7 @@ export default function CharacterSettings({ character, onSave, onCancel }: Chara
               onFileSelect={handleFileSelect}
               onFileRemove={handleFileRemove}
               fileName={fileName}
+              fileType={fileType}
               previewUrl={previewUrl}
             />
         </div>
