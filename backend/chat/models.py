@@ -3,6 +3,18 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 
 
+# 定义一个函数，返回一个默认的字典，用于JSONField
+def get_default_disabled_states():
+    return {
+        "name": False,
+        "description": False,
+        "personality": False,
+        "appearance": False,
+        "responseGuidelines": False,
+        "file": False,
+    }
+
+
 class Character(models.Model):
     name = models.CharField(max_length=100)
     description = models.TextField()
@@ -11,6 +23,9 @@ class Character(models.Model):
     response_guidelines = models.TextField(blank=True, null=True)
     file = models.FileField(upload_to='character_files/', blank=True, null=True)
     gemini_file_uri = models.CharField(max_length=255, blank=True, null=True)
+    # --- ▼▼▼ 在这里添加新字段 ▼▼▼ ---
+    disabled_states = models.JSONField(default=get_default_disabled_states)
+    # --- ▲▲▲ 添加结束 ▲▲▲ ---
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_characters')

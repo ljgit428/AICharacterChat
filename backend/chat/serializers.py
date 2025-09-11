@@ -5,7 +5,9 @@ from .models import Character, ChatSession, Message
 class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Character
-        fields = ['id', 'name', 'description', 'personality', 'appearance', 'response_guidelines', 'file', 'gemini_file_uri', 'created_at', 'updated_at']
+        # --- ▼▼▼ 在列表中添加 'disabled_states' ▼▼▼ ---
+        fields = ['id', 'name', 'description', 'personality', 'appearance', 'response_guidelines', 'file', 'gemini_file_uri', 'disabled_states', 'created_at', 'updated_at']
+        # --- ▲▲▲ 添加结束 ▲▲▲ ---
         read_only_fields = ['created_at', 'updated_at', 'gemini_file_uri']
 
 

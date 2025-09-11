@@ -79,7 +79,9 @@ export default function Home() {
             appearance: serverCharacter.appearance,
             responseGuidelines: serverCharacter.response_guidelines,
             fileUrl: serverCharacter.file ? `${apiBaseUrl}${serverCharacter.file}` : undefined,
-            disabled: { name: false, description: false, personality: false, appearance: false, responseGuidelines: false, file: false },
+            // --- ▼▼▼ 核心修正：从后端加载 disabled_states ▼▼▼ ---
+            disabled: serverCharacter.disabled_states || { name: false, description: false, personality: false, appearance: false, responseGuidelines: false, file: false },
+            // --- ▲▲▲ 修正结束 ▲▲▲ ---
           };
           dispatch(setCharacter(formattedCharacter));
 
@@ -107,7 +109,9 @@ export default function Home() {
                 appearance: newCharacterFromServer.appearance,
                 responseGuidelines: newCharacterFromServer.response_guidelines,
                 fileUrl: undefined, // 新创建的角色没有文件
-                disabled: { name: false, description: false, personality: false, appearance: false, responseGuidelines: false, file: false },
+                // --- ▼▼▼ 核心修正：从新创建的角色中获取 disabled_states ▼▼▼ ---
+                disabled: newCharacterFromServer.disabled_states,
+                // --- ▲▲▲ 修正结束 ▲▲▲ ---
               };
               dispatch(setCharacter(newCharacter));
           } else {
@@ -270,6 +274,10 @@ export default function Home() {
         appearance: characterData.appearance,
         response_guidelines: characterData.responseGuidelines,
         clear_file: shouldClearFile,
+        // --- ▼▼▼ 核心修正：将 disabled 状态发送到后端 ▼▼▼ ---
+        // 我们将其命名为 disabled_states 以匹配后端模型
+        disabled_states: characterData.disabled,
+        // --- ▲▲▲ 修正结束 ▲▲▲ ---
       };
 
       let response;
@@ -296,6 +304,9 @@ export default function Home() {
         appearance: serverResponseData.appearance,
         fileUrl: serverResponseData.file ? `${apiBaseUrl}${serverResponseData.file}` : undefined,
         responseGuidelines: serverResponseData.response_guidelines,
+        // --- ▼▼▼ 核心修正：使用从服务器返回的、已保存的 disabled_states 更新UI ▼▼▼ ---
+        disabled: serverResponseData.disabled_states,
+        // --- ▲▲▲ 修正结束 ▲▲▲ ---
       };
       
       dispatch(setCharacter(savedCharacter));
