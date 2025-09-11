@@ -45,33 +45,86 @@ export default function Home() {
     }
   }, []);
 
+  // --- ▼▼▼ 请用下面的代码块【替换】您现有的【所有】与加载角色相关的 useEffect ▼▼▼ ---
+  // ---    这将是唯一负责初始化角色的 useEffect    ---
   useEffect(() => {
-    // Load default character if none exists
-    if (!character) {
-      const defaultCharacter: Character = {
-        id: '1',
-        name: 'Default Character',
-        description: 'A friendly AI companion ready to chat with you.',
-        personality: 'Helpful, cheerful, and curious.',
-        appearance: 'A friendly digital companion with a warm smile.',
-        // 添加响应指南的默认值
-        responseGuidelines: `Instructions:
-- Respond consistently with your character's traits and background
-- Maintain character voice throughout the conversation
-- Be engaging and responsive to user input
-- Stay true to Default Character's established character`,
-        disabled: {
-          name: false,
-          description: false,
-          personality: false,
-          appearance: false,
-          responseGuidelines: false, // 添加响应指南的disabled开关
-          file: false,
-        },
-      };
-      dispatch(setCharacter(defaultCharacter));
-    }
-  }, [character, dispatch]);
+    /**
+     * 在应用启动时加载或创建角色。
+     * 1. 尝试从后端获取角色。
+     * 2. 如果成功获取，则设置为当前角色。
+     * 3. 如果未获取到 (数据库为空)，则创建并保存一个默认角色到数据库，
+     *    然后使用从后端返回的数据设置当前角色。
+     */
+    const loadOrCreateCharacter = async () => {
+      // 如果Redux中已有角色，说明初始化已完成，直接返回
+      if (character) {
+          return;
+      }
+        
+      dispatch(setLoading(true));
+      try {
+        const response = await apiService.getCharacters();
+
+        if (response.data && response.data.length > 0) {
+          // --- 场景1: 成功从数据库加载现有角色 ---
+          const serverCharacter = response.data[0];
+          console.log("Successfully loaded character from DB:", serverCharacter.id);
+          const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '');
+          
+          const formattedCharacter: Character = {
+            id: String(serverCharacter.id),
+            name: serverCharacter.name,
+            description: serverCharacter.description,
+            personality: serverCharacter.personality,
+            appearance: serverCharacter.appearance,
+            responseGuidelines: serverCharacter.response_guidelines,
+            fileUrl: serverCharacter.file ? `${apiBaseUrl}${serverCharacter.file}` : undefined,
+            disabled: { name: false, description: false, personality: false, appearance: false, responseGuidelines: false, file: false },
+          };
+          dispatch(setCharacter(formattedCharacter));
+
+        } else {
+          // --- 场景2: 数据库为空，需要创建并保存默认角色 ---
+          console.log("No character in DB. Creating a default character...");
+          const defaultCharacterData = {
+            name: 'Default Character',
+            description: 'A friendly AI companion ready to chat with you.',
+            personality: 'Helpful, cheerful, and curious.',
+            appearance: 'A friendly digital companion with a warm smile.',
+            response_guidelines: `Instructions:\n- Respond consistently with your character's traits and background\n- Maintain character voice throughout the conversation`,
+          };
+          
+          const createResponse = await apiService.createCharacter(defaultCharacterData);
+          
+          if (createResponse.data) {
+              const newCharacterFromServer = createResponse.data;
+              console.log("Default character created and saved in DB with ID:", newCharacterFromServer.id);
+              const newCharacter: Character = {
+                id: String(newCharacterFromServer.id),
+                name: newCharacterFromServer.name,
+                description: newCharacterFromServer.description,
+                personality: newCharacterFromServer.personality,
+                appearance: newCharacterFromServer.appearance,
+                responseGuidelines: newCharacterFromServer.response_guidelines,
+                fileUrl: undefined, // 新创建的角色没有文件
+                disabled: { name: false, description: false, personality: false, appearance: false, responseGuidelines: false, file: false },
+              };
+              dispatch(setCharacter(newCharacter));
+          } else {
+              throw new Error(createResponse.error || "Failed to create default character.");
+          }
+        }
+      } catch (error) {
+          console.error("Failed to load or create character:", error);
+          dispatch(setError(error instanceof Error ? error.message : 'Failed to initialize character'));
+      } finally {
+          dispatch(setLoading(false));
+      }
+    };
+
+    loadOrCreateCharacter();
+  }, [dispatch, character]); // 依赖中加入character确保不会重复执行
+  // --- ▲▲▲ 替换结束 ▲▲▲ ---
 
   const handleSendMessage = async (userInput: string) => {
     if (!character) return;
@@ -201,19 +254,13 @@ export default function Home() {
     return promptSections.join('\n');
   };
 
+  // --- ▼▼▼ 请用下面的代码块【替换】您现有的 handleSaveCharacter 函数，以优化判断逻辑 ▼▼▼ ---
   const handleSaveCharacter = async (characterData: Character, file?: File) => {
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
-      // 从 Redux 获取保存操作之前的角色状态
       const originalCharacter = character;
-
-      // 核心决策逻辑：
-      // 我们需要告诉后端清除文件，当且仅当：
-      // 1. 原始角色有一个文件 (originalCharacter.fileUrl 存在)
-      // 2. 提交的新数据中没有文件 (characterData.fileUrl 不存在)
-      // 3. 用户没有正在上传一个新文件来替换它 (!file)
       const shouldClearFile = !!(originalCharacter?.fileUrl && !characterData.fileUrl && !file);
 
       const payload = {
@@ -222,12 +269,13 @@ export default function Home() {
         personality: characterData.personality,
         appearance: characterData.appearance,
         response_guidelines: characterData.responseGuidelines,
-        clear_file: shouldClearFile, // 使用我们刚刚计算出的、绝对正确的标志
+        clear_file: shouldClearFile,
       };
 
       let response;
-      if (characterData.id && !String(characterData.id).startsWith('temp-')) {
-        response = await apiService.updateCharacter(String(characterData.id), payload, file);
+      // 优化判断：如果Redux中已有角色且有ID，则更新；否则，创建。
+      if (character && character.id) {
+        response = await apiService.updateCharacter(String(character.id), payload, file);
       } else {
         response = await apiService.createCharacter(payload, file);
       }
@@ -237,6 +285,7 @@ export default function Home() {
       }
 
       const serverResponseData = response.data;
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '');
       
       const savedCharacter: Character = {
         ...characterData,
@@ -245,12 +294,11 @@ export default function Home() {
         description: serverResponseData.description,
         personality: serverResponseData.personality,
         appearance: serverResponseData.appearance,
-        fileUrl: serverResponseData.file,
+        fileUrl: serverResponseData.file ? `${apiBaseUrl}${serverResponseData.file}` : undefined,
         responseGuidelines: serverResponseData.response_guidelines,
       };
       
       dispatch(setCharacter(savedCharacter));
-      
       dispatch(clearChat());
       setHasStartedConversation(false);
       setChatSessionId(null);
@@ -262,6 +310,7 @@ export default function Home() {
       dispatch(setLoading(false));
     }
   };
+  // --- ▲▲▲ 替换结束 ▲▲▲ ---
 
   const handleCancelSettings = () => {
     setShowSettings(false);

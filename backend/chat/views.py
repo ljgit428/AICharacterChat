@@ -90,46 +90,54 @@ class CharacterViewSet(viewsets.ModelViewSet):
         self._upload_to_gemini_and_save_uri(instance, self.request)
 
     def perform_update(self, serializer):
-        instance = serializer.save()
+        """
+        在一次原子操作中处理实例的更新，包括文件操作。
+        """
+        instance = serializer.instance
 
-        # Case 1: A new file is being uploaded.
+        # 场景1：请求中上传了一个新文件
         if 'file' in self.request.FILES:
+            # 这个辅助函数会处理上传和保存，替换旧文件
             self._upload_to_gemini_and_save_uri(instance, self.request)
         
-        # Case 2: Clear the existing file.
+        # 场景2：请求中明确要求清除文件
         elif self.request.data.get('clear_file') in ['true', 'True', True]:
-            print("Clear file request received. Deleting existing file.")
+            print("Clear file request received. Modifying instance in memory before save.")
             
+            # 从外部服务和本地存储中删除物理文件
             self._delete_gemini_file(instance.gemini_file_uri)
-            
             if instance.file:
                 instance.file.delete(save=False)
 
-            instance.gemini_file_uri = None
+            # 在内存中将实例的字段设置为空，等待统一保存
             instance.file = None
-            # 使用 update_fields 进行更明确、更高效的保存
-            instance.save(update_fields=['file', 'gemini_file_uri'])
+            instance.gemini_file_uri = None
 
-    # --- ▼▼▼ 新增/修改的代码 ▼▼▼ ---
+        # 最终，执行保存。
+        # 这会将请求中的文本字段更改，以及我们对文件字段的任何修改，一次性地保存到数据库。
+        serializer.save()
+
+    # --- ▼▼▼ 请用下面的代码块【替换】您现有的 update 方法 ▼▼▼ ---
     def update(self, request, *args, **kwargs):
         """
-        重写 update 方法以确保在执行自定义文件逻辑后，
-        返回的是最新的、与数据库一致的数据。
+        重写 update 方法，强制使用部分更新(partial=True)，并确保
+        在执行自定义文件逻辑后，返回的是最新的、与数据库一致的数据。
         """
-        partial = kwargs.pop('partial', False)
+        # 强制部分更新，防止仅更新文本字段时，现有文件被意外清除
+        partial = True
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         
-        # 调用我们自定义的 perform_update，它会处理所有数据库操作
+        # 调用我们全新的、更健壮的 perform_update 方法
         self.perform_update(serializer)
 
-        # 从数据库重新加载实例，以确保获取到最新的状态
+        # 从数据库重新加载实例，确保返回给前端的是绝对最新的状态
         instance.refresh_from_db()
         
-        # 使用刷新后的实例创建一个新的序列化器并返回其数据
+        # 返回更新后的数据
         return Response(self.get_serializer(instance).data)
-    # --- ▲▲▲ 代码修改结束 ▲▲▲ ---
+    # --- ▲▲▲ 替换结束 ▲▲▲ ---
 
     @action(detail=False, methods=['get'])
     def my_characters(self, request):
