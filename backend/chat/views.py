@@ -92,52 +92,75 @@ class CharacterViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         """
         在一次原子操作中处理实例的更新，包括文件操作。
+        确保所有更改都被正确保存到数据库。
         """
         instance = serializer.instance
+        print(f"--- PERFORM_UPDATE CALLED FOR CHARACTER ID: {instance.id} ---")
+        print(f"Request Data: {self.request.data}")
+        print(f"Request Files: {self.request.FILES}")
 
-        # 场景1：请求中上传了一个新文件
+        # 场景1：上传了新文件
         if 'file' in self.request.FILES:
-            # 这个辅助函数会处理上传和保存，替换旧文件
-            self._upload_to_gemini_and_save_uri(instance, self.request)
-        
-        # 场景2：请求中明确要求清除文件
-        elif self.request.data.get('clear_file') in ['true', 'True', True]:
-            print("Clear file request received. Modifying instance in memory before save.")
-            
-            # 从外部服务和本地存储中删除物理文件
+            print("Processing file upload...")
+            # 在上传新文件前，先删除旧文件
             self._delete_gemini_file(instance.gemini_file_uri)
             if instance.file:
                 instance.file.delete(save=False)
+            # 序列化器会自动处理新文件的保存
+        
+        # 场景2：明确要求删除文件 (且没有上传新文件)
+        elif self.request.data.get('clear_file') in ['true', 'True', True]:
+            print("Processing file clearance...")
+            self._delete_gemini_file(instance.gemini_file_uri)
+            if instance.file:
+                instance.file.delete(save=False)
+            
+            # 手动将序列化器验证过的数据中的file字段设为None
+            serializer.validated_data['file'] = None
+            serializer.validated_data['gemini_file_uri'] = None
 
-            # 在内存中将实例的字段设置为空，等待统一保存
-            instance.file = None
-            instance.gemini_file_uri = None
+        # 执行最终的、唯一的保存操作
+        # serializer.save() 会将所有验证过的文本更改和我们处理过的文件更改
+        # 一次性、原子地写入数据库。
+        try:
+            serializer.save()
+            print("--- DATABASE SAVE SUCCESSFUL ---")
+        except Exception as e:
+            print(f"--- DATABASE SAVE FAILED: {e} ---")
+            raise
 
-        # 最终，执行保存。
-        # 这会将请求中的文本字段更改，以及我们对文件字段的任何修改，一次性地保存到数据库。
-        serializer.save()
+        # 如果是上传文件，save之后我们还需要上传到Gemini并更新URI
+        if 'file' in self.request.FILES:
+            # 重新从数据库获取实例，确保它有关联的新文件
+            instance.refresh_from_db()
+            self._upload_to_gemini_and_save_uri(instance, self.request)
 
-    # --- ▼▼▼ 请用下面的代码块【替换】您现有的 update 方法 ▼▼▼ ---
     def update(self, request, *args, **kwargs):
         """
-        重写 update 方法，强制使用部分更新(partial=True)，并确保
-        在执行自定义文件逻辑后，返回的是最新的、与数据库一致的数据。
+        一个健壮的、原子化的更新方法，确保所有更改都被正确保存到数据库。
         """
-        # 强制部分更新，防止仅更新文本字段时，现有文件被意外清除
-        partial = True
+        print(f"--- UPDATE REQUEST RECEIVED FOR CHARACTER ID: {kwargs.get('pk')} ---")
+        print(f"Request Data: {request.data}")
+        print(f"Request Files: {request.FILES}")
+
+        # 1. 获取要更新的对象实例
         instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
+
+        # 2. 准备序列化器，强制使用部分更新(partial=True)
+        #    这确保了只修改文本时，文件字段不会被意外置空。
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
         
-        # 调用我们全新的、更健壮的 perform_update 方法
+        # 3. 验证前端发来的数据是否有效
+        serializer.is_valid(raise_exception=True)
+
+        # 4. 调用我们重写过的 perform_update，所有魔法都在那里发生
         self.perform_update(serializer)
 
-        # 从数据库重新加载实例，确保返回给前端的是绝对最新的状态
+        # 5. 从数据库重新加载实例，确保返回给前端的是绝对最新的真实数据
         instance.refresh_from_db()
         
-        # 返回更新后的数据
+        # 6. 返回更新后的数据
         return Response(self.get_serializer(instance).data)
-    # --- ▲▲▲ 替换结束 ▲▲▲ ---
 
     @action(detail=False, methods=['get'])
     def my_characters(self, request):
