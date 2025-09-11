@@ -87,13 +87,18 @@ export default function Home() {
 
         } else {
           // --- 场景2: 数据库为空，需要创建并保存默认角色 ---
-          console.log("No character in DB. Creating a default character...");
+          console.log("No character in DB. Creating the original default character...");
+          
           const defaultCharacterData = {
             name: 'Default Character',
             description: 'A friendly AI companion ready to chat with you.',
             personality: 'Helpful, cheerful, and curious.',
             appearance: 'A friendly digital companion with a warm smile.',
-            response_guidelines: `Instructions:\n- Respond consistently with your character's traits and background\n- Maintain character voice throughout the conversation`,
+            response_guidelines: `Instructions:
+- Respond consistently with your character's traits and background
+- Maintain character voice throughout the conversation
+- Be engaging and responsive to user input
+- Stay true to Default Character's established character`,
           };
           
           const createResponse = await apiService.createCharacter(defaultCharacterData);
