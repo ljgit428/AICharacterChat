@@ -111,10 +111,15 @@ class ApiService {
     const formData = new FormData();
     Object.entries(character).forEach(([key, value]) => {
       if (value !== undefined) {
-        if (typeof value === 'boolean') {
+        // --- ▼▼▼ 在这里添加处理逻辑 ▼▼▼ ---
+        if (key === 'disabled_states' && typeof value === 'object') {
+          formData.append(key, JSON.stringify(value));
+        }
+        // --- ▲▲▲ 添加结束 ▲▲▲ ---
+        else if (typeof value === 'boolean') {
           formData.append(key, String(value));
         } else {
-          formData.append(key, value);
+          formData.append(key, value as string);
         }
       }
     });
@@ -122,10 +127,7 @@ class ApiService {
       formData.append('file', file);
     }
 
-    return this.request('/characters/', {
-      method: 'POST',
-      body: formData,
-    });
+    return this.request('/characters/', { method: 'POST', body: formData });
   }
 
   async getCharacter(id: string): Promise<ApiResponse<any>> {
@@ -137,21 +139,24 @@ class ApiService {
     const formData = new FormData();
     Object.entries(character).forEach(([key, value]) => {
       if (value !== undefined) {
-        if (typeof value === 'boolean') {
+        // --- ▼▼▼ 在这里添加处理逻辑 ▼▼▼ ---
+        if (key === 'disabled_states' && typeof value === 'object') {
+          formData.append(key, JSON.stringify(value));
+        }
+        // --- ▲▲▲ 添加结束 ▲▲▲ ---
+        else if (typeof value === 'boolean') {
           formData.append(key, String(value));
         } else {
-          formData.append(key, value);
+          formData.append(key, value as string);
         }
       }
     });
     if (file) {
       formData.append('file', file);
     }
-
-    return this.request(`/characters/${id}/`, {
-      method: 'PUT',
-      body: formData,
-    });
+    
+    // DRF PUT with multipart needs a specific method
+    return this.request(`/characters/${id}/`, { method: 'PATCH', body: formData });
   }
 
   // Chat Session API

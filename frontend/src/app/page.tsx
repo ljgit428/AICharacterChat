@@ -45,33 +45,95 @@ export default function Home() {
     }
   }, []);
 
+  // --- ▼▼▼ 请用下面的代码块【替换】您现有的【所有】与加载角色相关的 useEffect ▼▼▼ ---
+  // ---    这将是唯一负责初始化角色的 useEffect    ---
   useEffect(() => {
-    // Load default character if none exists
-    if (!character) {
-      const defaultCharacter: Character = {
-        id: '1',
-        name: 'Default Character',
-        description: 'A friendly AI companion ready to chat with you.',
-        personality: 'Helpful, cheerful, and curious.',
-        appearance: 'A friendly digital companion with a warm smile.',
-        // 添加响应指南的默认值
-        responseGuidelines: `Instructions:
+    /**
+     * 在应用启动时加载或创建角色。
+     * 1. 尝试从后端获取角色。
+     * 2. 如果成功获取，则设置为当前角色。
+     * 3. 如果未获取到 (数据库为空)，则创建并保存一个默认角色到数据库，
+     *    然后使用从后端返回的数据设置当前角色。
+     */
+    const loadOrCreateCharacter = async () => {
+      // 如果Redux中已有角色，说明初始化已完成，直接返回
+      if (character) {
+          return;
+      }
+        
+      dispatch(setLoading(true));
+      try {
+        const response = await apiService.getCharacters();
+
+        if (response.data && response.data.length > 0) {
+          // --- 场景1: 成功从数据库加载现有角色 ---
+          const serverCharacter = response.data[0];
+          console.log("Successfully loaded character from DB:", serverCharacter.id);
+          const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '');
+          
+          const formattedCharacter: Character = {
+            id: String(serverCharacter.id),
+            name: serverCharacter.name,
+            description: serverCharacter.description,
+            personality: serverCharacter.personality,
+            appearance: serverCharacter.appearance,
+            responseGuidelines: serverCharacter.response_guidelines,
+            fileUrl: serverCharacter.file ? `${apiBaseUrl}${serverCharacter.file}` : undefined,
+            // --- ▼▼▼ 核心修正：从后端加载 disabled_states ▼▼▼ ---
+            disabled: serverCharacter.disabled_states || { name: false, description: false, personality: false, appearance: false, responseGuidelines: false, file: false },
+            // --- ▲▲▲ 修正结束 ▲▲▲ ---
+          };
+          dispatch(setCharacter(formattedCharacter));
+
+        } else {
+          // --- 场景2: 数据库为空，需要创建并保存默认角色 ---
+          console.log("No character in DB. Creating the original default character...");
+          
+          const defaultCharacterData = {
+            name: 'Default Character',
+            description: 'A friendly AI companion ready to chat with you.',
+            personality: 'Helpful, cheerful, and curious.',
+            appearance: 'A friendly digital companion with a warm smile.',
+            response_guidelines: `Instructions:
 - Respond consistently with your character's traits and background
 - Maintain character voice throughout the conversation
 - Be engaging and responsive to user input
 - Stay true to Default Character's established character`,
-        disabled: {
-          name: false,
-          description: false,
-          personality: false,
-          appearance: false,
-          responseGuidelines: false, // 添加响应指南的disabled开关
-          file: false,
-        },
-      };
-      dispatch(setCharacter(defaultCharacter));
-    }
-  }, [character, dispatch]);
+          };
+          
+          const createResponse = await apiService.createCharacter(defaultCharacterData);
+          
+          if (createResponse.data) {
+              const newCharacterFromServer = createResponse.data;
+              console.log("Default character created and saved in DB with ID:", newCharacterFromServer.id);
+              const newCharacter: Character = {
+                id: String(newCharacterFromServer.id),
+                name: newCharacterFromServer.name,
+                description: newCharacterFromServer.description,
+                personality: newCharacterFromServer.personality,
+                appearance: newCharacterFromServer.appearance,
+                responseGuidelines: newCharacterFromServer.response_guidelines,
+                fileUrl: undefined, // 新创建的角色没有文件
+                // --- ▼▼▼ 核心修正：从新创建的角色中获取 disabled_states ▼▼▼ ---
+                disabled: newCharacterFromServer.disabled_states,
+                // --- ▲▲▲ 修正结束 ▲▲▲ ---
+              };
+              dispatch(setCharacter(newCharacter));
+          } else {
+              throw new Error(createResponse.error || "Failed to create default character.");
+          }
+        }
+      } catch (error) {
+          console.error("Failed to load or create character:", error);
+          dispatch(setError(error instanceof Error ? error.message : 'Failed to initialize character'));
+      } finally {
+          dispatch(setLoading(false));
+      }
+    };
+
+    loadOrCreateCharacter();
+  }, [dispatch, character]); // 依赖中加入character确保不会重复执行
+  // --- ▲▲▲ 替换结束 ▲▲▲ ---
 
   const handleSendMessage = async (userInput: string) => {
     if (!character) return;
@@ -201,25 +263,32 @@ export default function Home() {
     return promptSections.join('\n');
   };
 
-  const handleSaveCharacter = async (characterData: Character, file?: File, clearFile?: boolean) => {
+  // --- ▼▼▼ 请用下面的代码块【替换】您现有的 handleSaveCharacter 函数，以优化判断逻辑 ▼▼▼ ---
+  const handleSaveCharacter = async (characterData: Character, file?: File) => {
     dispatch(setLoading(true));
     dispatch(setError(null));
 
     try {
-      let response;
-      
-      // 从发送给后端的数据中移除 file_url，因为后端会通过上传的文件自动处理
+      const originalCharacter = character;
+      const shouldClearFile = !!(originalCharacter?.fileUrl && !characterData.fileUrl && !file);
+
       const payload = {
-          name: characterData.name,
-          description: characterData.description,
-          personality: characterData.personality,
-          appearance: characterData.appearance,
-          response_guidelines: characterData.responseGuidelines,
-          clear_file: clearFile,
+        name: characterData.name,
+        description: characterData.description,
+        personality: characterData.personality,
+        appearance: characterData.appearance,
+        response_guidelines: characterData.responseGuidelines,
+        clear_file: shouldClearFile,
+        // --- ▼▼▼ 核心修正：将 disabled 状态发送到后端 ▼▼▼ ---
+        // 我们将其命名为 disabled_states 以匹配后端模型
+        disabled_states: characterData.disabled,
+        // --- ▲▲▲ 修正结束 ▲▲▲ ---
       };
 
-      if (characterData.id && !String(characterData.id).startsWith('temp-')) {
-        response = await apiService.updateCharacter(String(characterData.id), payload, file);
+      let response;
+      // 优化判断：如果Redux中已有角色且有ID，则更新；否则，创建。
+      if (character && character.id) {
+        response = await apiService.updateCharacter(String(character.id), payload, file);
       } else {
         response = await apiService.createCharacter(payload, file);
       }
@@ -229,24 +298,23 @@ export default function Home() {
       }
 
       const serverResponseData = response.data;
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '');
       
       const savedCharacter: Character = {
-        // 保留前端特有的状态，比如 'disabled' 开关
         ...characterData,
-        
-        // 用服务器返回的权威数据覆盖所有共享字段
         id: String(serverResponseData.id),
         name: serverResponseData.name,
         description: serverResponseData.description,
         personality: serverResponseData.personality,
         appearance: serverResponseData.appearance,
-        // 核心修正：直接使用后端返回的URL，它已经是完整的了
-        fileUrl: serverResponseData.file,
+        fileUrl: serverResponseData.file ? `${apiBaseUrl}${serverResponseData.file}` : undefined,
         responseGuidelines: serverResponseData.response_guidelines,
+        // --- ▼▼▼ 核心修正：使用从服务器返回的、已保存的 disabled_states 更新UI ▼▼▼ ---
+        disabled: serverResponseData.disabled_states,
+        // --- ▲▲▲ 修正结束 ▲▲▲ ---
       };
       
       dispatch(setCharacter(savedCharacter));
-      
       dispatch(clearChat());
       setHasStartedConversation(false);
       setChatSessionId(null);
@@ -258,6 +326,7 @@ export default function Home() {
       dispatch(setLoading(false));
     }
   };
+  // --- ▲▲▲ 替换结束 ▲▲▲ ---
 
   const handleCancelSettings = () => {
     setShowSettings(false);
