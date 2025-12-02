@@ -1,0 +1,5 @@
+# Ignore development notes folder
+dev_notes/
+
+# Ignore temporary cleanup script
+clean_comments.py
