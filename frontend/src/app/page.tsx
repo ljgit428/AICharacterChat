@@ -309,7 +309,7 @@ export default function AIStudioLayout() {
               {currentView === 'history_all' && 'History / All'}
             </div>
           </div>
-          <div className="text-xs text-gray-400">v0.0.5.3</div>
+          <div className="text-xs text-gray-400">v1.0</div>
         </header>
         <div className="flex-1 overflow-hidden relative">
           {renderContent(currentView)}
