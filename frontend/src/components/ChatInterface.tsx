@@ -29,7 +29,7 @@ export default function ChatInterface({
 
   const [pendingSettings, setPendingSettings] = useState<Partial<ChatSession>>({
     worldTime: "Current time",
-    userPersona: "Sensei",
+    userPersona: "Li, An Overwhelmed Underwriting Manager",
     enableWebSearch: false,
     outputLanguage: "English",
     additionalContext: ""
@@ -49,7 +49,7 @@ export default function ChatInterface({
   }, []);
 
   useEffect(() => {
-    const loadOrCreateCharacter = async () => {
+    const loadCharacter = async () => {
       if (character && (!characterId || character.id === characterId)) {
         return;
       }
@@ -92,7 +92,7 @@ export default function ChatInterface({
       }
     };
 
-    loadOrCreateCharacter();
+    loadCharacter();
   }, [dispatch, character, characterId]);
 
   useEffect(() => {
@@ -105,7 +105,7 @@ export default function ChatInterface({
         setHasStartedConversation(false);
         setPendingSettings({
           worldTime: "Current time",
-          userPersona: "Sensei",
+          userPersona: "Li, An Overwhelmed Underwriting Manager",
           enableWebSearch: false,
           outputLanguage: "English",
           additionalContext: ""
@@ -280,12 +280,6 @@ export default function ChatInterface({
       if (character.affiliation && character.affiliation.trim()) {
         promptSections.push(`Affiliation: ${character.affiliation}`);
       }
-      promptSections.push('');
-    }
-
-    if (character.responseGuidelines && character.responseGuidelines.trim() && !character.disabled.responseGuidelines) {
-      promptSections.push(`=== RESPONSE GUIDELINES ===`);
-      promptSections.push(character.responseGuidelines);
       promptSections.push('');
     }
 

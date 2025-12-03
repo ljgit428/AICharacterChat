@@ -21,7 +21,7 @@ class ChatSessionInput:
     world_time: Optional[str] = "Current time"
     user_persona: Optional[str] = "Sensei"
     enable_search: Optional[bool] = False
-    output_language: Optional[str] = "Simplified Chinese"
+    output_language: Optional[str] = "English"
     current_context: Optional[str] = ""
 
 @strawberry.type
