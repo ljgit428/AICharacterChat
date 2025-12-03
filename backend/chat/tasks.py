@@ -107,7 +107,6 @@ def generate_ai_response(message_id, character_id):
         formatted_history.append({"role": "user", "parts": system_parts})
 
         # Prepare text for title generation (User's first message)
-        # We use the actual user input, not the huge system prompt
         conversation_text_for_title = f"User: {user_message.content}\n"
 
         actual_chat_messages = history_messages[1:]

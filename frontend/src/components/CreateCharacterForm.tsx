@@ -95,7 +95,7 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
 
   // Input state exclusive to Auto Mode
   const [autoInputText, setAutoInputText] = useState('');
-  const [autoFile, setAutoFile] = useState<{ file: File, url: string, type: 'image' | 'file' } | null>(null);
+  const [autoFile, setAutoFile] = useState<{ file: File, url: string, type: 'file' } | null>(null);
   const [autoTargetName, setAutoTargetName] = useState('');
 
   // Drag and drop state
@@ -145,11 +145,7 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
       const data = await res.json();
 
       if (isAutoMode) {
-        const isImage = file.type.startsWith('image/');
-        setAutoFile({ file, url: data.url, type: isImage ? 'image' : 'file' });
-        if (isImage) {
-          setForm(prev => ({ ...prev, avatarUrl: data.url }));
-        }
+        setAutoFile({ file, url: data.url, type: 'file' });
       } else {
         setForm(prev => ({ ...prev, avatarUrl: data.url }));
       }
@@ -238,7 +234,6 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
         firstMessage: draft.firstMessage || prev.firstMessage,
         scenario: draft.scenario || prev.scenario,
         tags: draft.tags ? draft.tags.join(', ') : prev.tags,
-        avatarUrl: (autoFile?.type === 'image' ? autoFile.url : prev.avatarUrl)
       }));
 
       setActiveTab('manual');
@@ -346,7 +341,7 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
               </div>
               <h2 className="text-2xl font-bold text-gray-800">Magic Generation</h2>
               <p className="text-gray-600 mt-2 max-w-md mx-auto">
-                Upload a character reference image, a novel chapter, or just describe your idea. AI will extract the details for you.
+                Upload a character reference text file, or just describe your idea. AI will extract the details for you.
               </p>
             </div>
 
@@ -381,16 +376,9 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
                   </div>
                 ) : autoFile ? (
                   <div className="flex flex-col items-center gap-3">
-                    {autoFile.type === 'image' ? (
-                      <div className="relative group">
-                        <img src={autoFile.url} className="w-24 h-24 object-cover rounded-xl shadow-md" />
-                        <div className="absolute inset-0 bg-black/40 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white text-xs font-medium">Change</div>
-                      </div>
-                    ) : (
-                      <div className="w-20 h-20 bg-gray-100 rounded-xl flex items-center justify-center">
-                        <FileText size={40} className="text-gray-400" />
-                      </div>
-                    )}
+                    <div className="w-20 h-20 bg-gray-100 rounded-xl flex items-center justify-center">
+                      <FileText size={40} className="text-gray-400" />
+                    </div>
                     <div>
                       <p className="font-bold text-gray-800 truncate max-w-[200px]">{autoFile.file.name}</p>
                       <p className="text-xs text-purple-600 font-medium mt-1">Ready for analysis</p>

@@ -19,7 +19,7 @@ class ChatSessionInput:
     character_id: strawberry.ID
     title: Optional[str] = ""
     world_time: Optional[str] = "Current time"
-    user_persona: Optional[str] = "Sensei"
+    user_persona: Optional[str] = "Li, An Overwhelmed Underwriting Manager"
     enable_search: Optional[bool] = False
     output_language: Optional[str] = "English"
     current_context: Optional[str] = ""
