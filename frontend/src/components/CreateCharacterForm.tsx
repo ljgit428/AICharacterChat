@@ -71,7 +71,10 @@ const UPDATE_CHARACTER = gql`
   }
 `;
 
-export default function CreateCharacterForm({ characterId }: { characterId?: string }) {
+export default function CreateCharacterForm({
+  characterId,
+  onCancel
+}: { characterId?: string, onCancel?: () => void }) {
   const router = useRouter();
   const dispatch = useDispatch();
 
@@ -563,7 +566,13 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
 
               <div className="mt-8 flex gap-4 justify-end">
                 <button
-                  onClick={() => router.push('/')}
+                  onClick={() => {
+                    if (onCancel) {
+                      onCancel();
+                    } else {
+                      router.push('/');
+                    }
+                  }}
                   className="flex items-center gap-2 bg-gray-500 text-white px-8 py-3 rounded-xl font-medium hover:bg-gray-600 transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
                   type="button"
                 >

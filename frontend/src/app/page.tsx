@@ -303,7 +303,7 @@ export default function AIStudioLayout() {
         return (
           <div className="h-full overflow-y-auto">
             <div className="max-w-5xl mx-auto py-8 px-6">
-              <CreateCharacterForm />
+              <CreateCharacterForm onCancel={() => setCurrentView('playground')} />
             </div>
           </div>
         );
