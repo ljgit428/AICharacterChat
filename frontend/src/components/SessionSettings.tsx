@@ -14,7 +14,7 @@ export default function SessionSettings({ chatSession, onSave, onCancel }: Sessi
   const [sessionData, setSessionData] = useState<Partial<ChatSession>>({
     worldTime: chatSession?.worldTime || 'Current time',
     userPersona: chatSession?.userPersona || '',
-    enableWebSearch: chatSession?.enableWebSearch || true,
+    enableWebSearch: chatSession?.enableWebSearch ?? false,
     outputLanguage: chatSession?.outputLanguage || 'English',
     additionalContext: chatSession?.additionalContext || '',
   });

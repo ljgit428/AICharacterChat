@@ -337,8 +337,8 @@ export default function ChatInterface({
         <div className="flex items-center space-x-4">
 
           <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center overflow-hidden">
-            {character?.fileUrl ? (
-              <img src={character.fileUrl} alt={character.name} className="w-full h-full object-cover" />
+            {character?.avatarUrl ? (
+              <img src={character.avatarUrl} alt={character.name} className="w-full h-full object-cover" />
             ) : (
               <span className="text-blue-600 font-bold">
                 {character?.name?.charAt(0) || 'C'}
@@ -347,7 +347,11 @@ export default function ChatInterface({
           </div>
           <div>
             <h2 className="font-semibold text-gray-800">{character?.name || 'Loading...'}</h2>
-            <p className="text-sm text-gray-500 truncate max-w-[200px]">{character?.description || 'AI Assistant'}</p>
+            <p className="text-sm text-gray-500 truncate">{(() => {
+              const text = character?.description || 'AI Assistant';
+              const match = text.match(/^.*?[.。]/);
+              return (match ? match[0] : text).trim();
+            })()}</p>
           </div>
         </div>
 

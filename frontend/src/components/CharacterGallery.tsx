@@ -39,14 +39,14 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
   const handleDelete = async (e: React.MouseEvent, id: string, name: string) => {
     e.stopPropagation();
     if (confirm(`Are you sure you want to delete "${name}"? This action cannot be undone.`)) {
-       try {
+      try {
         const { data } = await deleteCharacter({ variables: { id } });
-        
+
         if (data?.deleteCharacter === true) {
-            setOpenMenuId(null);
-            refetch();
+          setOpenMenuId(null);
+          refetch();
         } else {
-            alert("Cannot delete this character because there are existing chat histories associated with them. Please delete the chat sessions first.");
+          alert("Cannot delete this character because there are existing chat histories associated with them. Please delete the chat sessions first.");
         }
       } catch (err) {
         console.error(err);
@@ -124,11 +124,16 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
             </div>
 
             <h3 className="font-bold text-lg text-gray-900 mb-1 truncate">{char.name}</h3>
-            <p className="text-sm text-gray-500 line-clamp-3 flex-1 break-words">
-              {char.description}
+            <p className="text-sm text-gray-500 line-clamp-4 h-[80px] break-words">
+              {(() => {
+                const text = char.description || "";
+                const match = text.match(/^.*?[.。]/);
+                const result = match ? match[0] : text;
+                return result.trim();
+              })()}
             </p>
 
-            <div className="mt-4 pt-4 border-t border-gray-50 flex items-center justify-between">
+            <div className="mt-auto pt-4 border-t border-gray-50 flex items-center justify-between">
               <div className="flex gap-2 overflow-hidden">
                 {char.tags?.slice(0, 2).map((tag: string) => (
                   <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full truncate max-w-[80px]">

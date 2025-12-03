@@ -61,6 +61,7 @@ function normalizeCharacter(apiData: ApiCharacter): Character {
     appearance: apiData.appearance,
     affiliation: apiData.affiliation,
     responseGuidelines: apiData.response_guidelines,
+    avatarUrl: apiData.avatar_url || undefined,
     fileUrl: apiData.file ? (apiData.file.startsWith('http') ? apiData.file : `${apiBaseUrl}${apiData.file}`) : undefined,
     disabled: {
       name: apiData.disabled_states?.name || false,

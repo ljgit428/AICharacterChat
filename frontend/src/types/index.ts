@@ -16,6 +16,7 @@ export interface Character {
   personality: string;
   appearance: string;
   responseGuidelines: string;
+  avatarUrl?: string;
   fileUrl?: string;
   filePreviewUrl?: string;
   affiliation: string;

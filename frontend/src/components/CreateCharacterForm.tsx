@@ -21,8 +21,8 @@ import {
 } from 'lucide-react';
 
 const GENERATE_DRAFT = gql`
-  mutation GenerateDraft($imageUrl: String, $textContext: String) {
-    generateCharacterDraft(imageUrl: $imageUrl, textContext: $textContext) {
+  mutation GenerateDraft($fileUrl: String, $textContext: String) {
+    generateCharacterDraft(fileUrl: $fileUrl, textContext: $textContext) {
       name
       description
       personality
@@ -211,7 +211,7 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
       // Call AI
       const { data } = await generateDraft({
         variables: {
-          imageUrl: autoFile?.url || "",
+          fileUrl: autoFile?.url || "",
           textContext: combinedContext
         }
       });

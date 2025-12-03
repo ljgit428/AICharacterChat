@@ -27,10 +27,10 @@ class ChatSessionInput:
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    async def generate_character_draft(self, image_url: Optional[str] = None, text_context: Optional[str] = None) -> AICharacterDraft:
+    async def generate_character_draft(self, file_url: Optional[str] = None, text_context: Optional[str] = None) -> AICharacterDraft:
         """
-        Calls Gemini API to analyze text/image and return a structured Character Draft.
-        Handles local file reading for .txt/.md files to support "Auto-Create" from text files.
+        Calls Gemini API to analyze text and return a structured Character Draft.
+        Handles local file reading for .txt/.md/.json files to support "Auto-Create" from text files.
         """
         api_key = getattr(settings, 'GEMINI_API_KEY', '')
         if not api_key:
@@ -47,11 +47,11 @@ class Mutation:
 
             file_content_str = ""
             
-            if image_url:
-                lower_url = image_url.lower()
+            if file_url:
+                lower_url = file_url.lower()
                 if lower_url.endswith('.txt') or lower_url.endswith('.md') or lower_url.endswith('.json'):
                     try:
-                        parsed_url = urlparse(image_url)
+                        parsed_url = urlparse(file_url)
                         # Remove '/media/' from the start of the path if present to join with MEDIA_ROOT
                         relative_path = unquote(parsed_url.path).lstrip('/')
                         if relative_path.startswith('media/'):
