@@ -102,7 +102,6 @@ export default function ChatInterface({
         dispatch(setChatSession(null));
         setChatSessionId(null);
         setHasStartedConversation(false);
-        setHasStartedConversation(false);
         setPendingSettings({
           worldTime: "Current time",
           userPersona: "Li, An Overwhelmed Underwriting Manager",
