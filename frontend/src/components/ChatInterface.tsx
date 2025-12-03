@@ -35,20 +35,11 @@ export default function ChatInterface({
     additionalContext: ""
   });
 
-  const [stagedFile, setStagedFile] = useState<{ name: string; uri: string; type: string; previewUrl?: string } | null>(null);
   const [isChatUploading, setIsChatUploading] = useState(false);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
   const chatSession = useSelector((state: RootState) => state.chat.chatSession);
-
-  useEffect(() => {
-    return () => {
-      if (stagedFile?.previewUrl) {
-        URL.revokeObjectURL(stagedFile.previewUrl);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     const token = getAuthToken();
@@ -108,7 +99,7 @@ export default function ChatInterface({
     const loadChatHistory = async () => {
       if (!initialSessionId) {
         dispatch(clearChat());
-        dispatch(setChatSession({} as any));
+        dispatch(setChatSession(null));
         setChatSessionId(null);
         setHasStartedConversation(false);
         setHasStartedConversation(false);
@@ -152,7 +143,7 @@ export default function ChatInterface({
 
         if (sessionRes.data) {
 
-          dispatch(setChatSession(sessionRes.data as unknown as ChatSession));
+          dispatch(setChatSession(sessionRes.data));
         }
 
       } catch (err) {
@@ -184,13 +175,7 @@ export default function ChatInterface({
       id: Date.now().toString(),
       content: messageToSend,
       role: 'user' as const,
-      timestamp: new Date().toISOString(),
-      fileUri: isFirstMessage ? character?.fileUrl : stagedFile?.uri,
-      fileName: isFirstMessage
-        ? character?.fileUrl?.split('/').pop() || 'Character File'
-        : stagedFile?.name,
-      filePreviewUrl: isFirstMessage ? character?.fileUrl : stagedFile?.previewUrl,
-      fileType: isFirstMessage ? undefined : stagedFile?.type,
+      timestamp: new Date().toISOString()
     };
     dispatch(addMessage(userMessage));
 
@@ -202,7 +187,6 @@ export default function ChatInterface({
         message: messageToSend,
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
-        file_uri: isFirstMessage ? undefined : stagedFile?.uri,
       };
 
       if (!chatSessionId) {
@@ -216,8 +200,6 @@ export default function ChatInterface({
       }
 
       const response = await apiService.sendMessage(requestData);
-
-      setStagedFile(null);
 
       if (response.error) {
         throw new Error(response.error);
@@ -318,10 +300,10 @@ export default function ChatInterface({
       dispatch(setError(null));
 
       try {
-        const response = await apiService.updateChatSession(chatSessionId, sessionData as any);
+        const response = await apiService.updateChatSession(chatSessionId, sessionData);
         if (response.error) throw new Error(response.error);
         if (response.data) {
-          dispatch(updateChatSession(response.data as unknown as Partial<ChatSession>));
+          dispatch(updateChatSession(response.data));
         }
         setShowSessionSettings(false);
       } catch (error) {
@@ -347,41 +329,6 @@ export default function ChatInterface({
   const handleLogout = () => {
     removeAuthToken();
     setCurrentUser(null);
-  };
-
-  const handleChatFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    if (stagedFile?.previewUrl) {
-      URL.revokeObjectURL(stagedFile.previewUrl);
-    }
-
-    let previewUrl: string | undefined;
-    if (file.type.startsWith('image/')) {
-      previewUrl = URL.createObjectURL(file);
-    }
-
-    setIsChatUploading(true);
-    const response = await apiService.uploadImage(file);
-    setIsChatUploading(false);
-
-    if (response.data) {
-      setStagedFile({
-        name: file.name,
-        uri: response.data.name,
-        type: file.type,
-        previewUrl: previewUrl
-      });
-    } else {
-      alert(`File upload failed: ${response.error}`);
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-      }
-    }
-    if (chatFileInputRef.current) {
-      chatFileInputRef.current.value = "";
-    }
   };
 
   return (
@@ -437,24 +384,8 @@ export default function ChatInterface({
           onSendMessage={handleSendMessage}
           isLoading={useSelector((state: RootState) => state.chat.isLoading)}
           isFirstMessage={!hasStartedConversation}
-          stagedFile={stagedFile}
-          onStagedFileRemove={() => {
-            if (stagedFile?.previewUrl) {
-              URL.revokeObjectURL(stagedFile.previewUrl);
-            }
-            setStagedFile(null);
-          }}
-          onFileUploadClick={() => chatFileInputRef.current?.click()}
-          isChatUploading={isChatUploading}
         />
       </div>
-
-      <input
-        type="file"
-        ref={chatFileInputRef}
-        className="hidden"
-        onChange={handleChatFileSelect}
-      />
 
       {showSessionSettings && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">

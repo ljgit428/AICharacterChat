@@ -28,7 +28,7 @@ const chatSlice = createSlice({
     setCharacter: (state, action: PayloadAction<Character | null>) => {
       state.character = action.payload;
     },
-    setChatSession: (state, action: PayloadAction<ChatSession>) => {
+    setChatSession: (state, action: PayloadAction<ChatSession | null>) => {
       state.chatSession = action.payload;
     },
     updateChatSession: (state, action: PayloadAction<Partial<ChatSession>>) => {

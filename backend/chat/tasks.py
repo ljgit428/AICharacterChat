@@ -7,19 +7,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def build_gemini_parts(character, initial_prompt_text):
+@shared_task(retry_backoff=True)
+def build_gemini_parts(initial_prompt_text):
     """
     Constructs the list of parts for the Gemini API, including the character file if it exists.
     """
     parts = [initial_prompt_text]
-    if character.gemini_file_uri:
-        try:
-            character_file_for_api = genai.get_file(name=character.gemini_file_uri)
-            parts.append(character_file_for_api)
-        except Exception as e:
-            logger.warning(f"Failed to load character file from Gemini: {e}")
     return parts
-
+    
+@shared_task(retry_backoff=True)
 def update_session_title(chat_session, history_text, api_key):
     """
     Helper function to generate a creative title based on chat history.
@@ -73,7 +69,7 @@ def generate_ai_response(message_id, character_id):
         
         tools = []
         if chat_session.enable_web_search:
-            tools.append({'google_search_retrieval': {
+            tools.append({'google_search': {
                 'dynamic_retrieval_config': {
                     'mode': 'dynamic',
                     'dynamic_threshold': 0.6,
@@ -107,7 +103,7 @@ def generate_ai_response(message_id, character_id):
 
         system_prompt_text = system_prompt_message.content + session_settings_text
         
-        system_parts = build_gemini_parts(character, system_prompt_text)
+        system_parts = build_gemini_parts(system_prompt_text)
         formatted_history.append({"role": "user", "parts": system_parts})
 
         # Prepare text for title generation (User's first message)

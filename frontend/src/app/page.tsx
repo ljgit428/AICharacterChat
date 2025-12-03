@@ -23,6 +23,7 @@ import CreateCharacterForm from '@/components/CreateCharacterForm';
 import ChatInterface from '@/components/ChatInterface';
 import { clearChat } from '@/store/chatSlice';
 import { apiService } from '@/utils/api';
+import { Character, ChatSession } from '@/types';
 
 type ViewState = 'home' | 'playground' | 'history_all' | 'characters' | 'create';
 
@@ -48,7 +49,7 @@ export default function AIStudioLayout() {
   const ITEMS_PER_PAGE = 10;
 
   const dispatch = useDispatch();
-  
+
   const searchParams = useSearchParams();
   const router = useRouter();
   const autoSelectId = searchParams.get('select');
@@ -59,7 +60,7 @@ export default function AIStudioLayout() {
       setCurrentView('playground');
       setSelectedSessionId(null);
       dispatch(clearChat());
-      
+
       router.replace('/');
     }
   }, [autoSelectId, dispatch, router]);
@@ -75,7 +76,7 @@ export default function AIStudioLayout() {
       }
 
       if (response.data) {
-        const formattedChats: ChatHistoryItem[] = (response.data as unknown as import('@/types').ChatSession[]).map((session) => {
+        const formattedChats: ChatHistoryItem[] = response.data.map((session) => {
           const charId = session.character?.id || '';
 
           return {
@@ -105,20 +106,9 @@ export default function AIStudioLayout() {
     fetchChatSessions();
   }, []);
 
-  const handleSelectCharacter = (idOrObject: string | any) => {
-    let safeId = '';
-
-    if (typeof idOrObject === 'object' && idOrObject !== null) {
-      safeId = idOrObject.id ? String(idOrObject.id) : '';
-    } else {
-      safeId = String(idOrObject || '');
-    }
-    if (safeId === '[object Object]' || !safeId) {
-      console.error("Critical Error: Invalid Character ID received in select:", idOrObject);
-      return;
-    }
+  const handleSelectCharacter = (characterId: string) => {
     dispatch(clearChat());
-    setSelectedCharacterId(safeId);
+    setSelectedCharacterId(characterId);
     setSelectedSessionId(null);
     setCurrentView('playground');
   };
@@ -128,39 +118,12 @@ export default function AIStudioLayout() {
     setCurrentView('playground');
   };
 
-  const handleSelectHistoryItem = (characterId: string | any, sessionId: string) => {
-    let safeCharId = '';
-    if (characterId && typeof characterId === 'object') {
-      safeCharId = characterId.id ? String(characterId.id) : '';
-    } else {
-      safeCharId = String(characterId || '');
-    }
-    if (safeCharId === '[object Object]' || !safeCharId) {
-      console.warn("Invalid ID passed to history select, attempting recovery from list...", characterId);
-      const chat = recentChats.find(c => c.id === sessionId);
-      if (chat && chat.characterId && chat.characterId !== '[object Object]') {
-        safeCharId = chat.characterId;
-      }
-    }
-    if (!safeCharId || safeCharId === '[object Object]') {
-      console.error("Cannot load session: Character ID is invalid.");
-      setError("Error: Could not identify character for this session.");
-      return;
-    }
-
-    setSelectedCharacterId(safeCharId);
+  const handleSelectHistoryItem = (characterId: string, sessionId: string) => {
+    setSelectedCharacterId(characterId);
     setSelectedSessionId(String(sessionId));
     setCurrentView('playground');
   };
 
-  const handleHistoryClick = (sessionId: string) => {
-    if (recentChats.length > 0) {
-      const chat = recentChats.find(c => c.id === sessionId);
-      if (chat) {
-        handleSelectHistoryItem(chat.characterId, sessionId);
-      }
-    }
-  };
 
   const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
@@ -173,7 +136,7 @@ export default function AIStudioLayout() {
       const response = await apiService.getChatSessions();
 
       if (response.data) {
-        const formattedChats: ChatHistoryItem[] = (response.data as unknown as import('@/types').ChatSession[]).map((session) => {
+        const formattedChats: ChatHistoryItem[] = response.data.map((session) => {
           const charId = session.character?.id || '';
 
           return {

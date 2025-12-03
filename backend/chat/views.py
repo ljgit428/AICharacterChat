@@ -25,101 +25,14 @@ class CharacterViewSet(viewsets.ModelViewSet):
     queryset = Character.objects.all()
     serializer_class = CharacterSerializer
     permission_classes = []
-    
-    def _delete_gemini_file(self, gemini_uri):
-        """Helper to delete a file from Gemini API."""
-        if not gemini_uri:
-            return
-            
-        api_key = getattr(settings, 'GEMINI_API_KEY', '')
-        if not api_key:
-            return
-        
-        genai.configure(api_key=api_key)
-        try:
-            genai.delete_file(name=gemini_uri)
-        except Exception as e:
-            logger.error(f"Failed to delete file from Gemini: {e}")
-
-    def _upload_to_gemini_and_save_uri(self, instance, request):
-        """
-        Helper function to upload file from request to Gemini and save the URI.
-        """
-        if 'file' not in request.FILES:
-            return
-
-        file_obj = request.FILES['file']
-        
-        api_key = getattr(settings, 'GEMINI_API_KEY', '')
-        if not api_key:
-            return
-        genai.configure(api_key=api_key)
-
-        temp_file_path = None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file_obj.name}") as temp_file:
-                for chunk in file_obj.chunks():
-                    temp_file.write(chunk)
-                temp_file_path = temp_file.name
-            
-            gemini_file = genai.upload_file(path=temp_file_path, display_name=file_obj.name)
-            
-            instance.gemini_file_uri = gemini_file.name
-            instance.save(update_fields=['gemini_file_uri'])
-        
-        except Exception as e:
-            logger.error(f"Failed to upload file to Gemini: {e}")
-        finally:
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
 
     def perform_create(self, serializer):
         User = get_user_model()
-        user, _ = User.objects.get_or_create(username='default_user')
-        instance = serializer.save(created_by=user)
-        self._upload_to_gemini_and_save_uri(instance, self.request)
-
-    def perform_update(self, serializer):
-        """
-        Handle instance updates in a single atomic operation, including file handling.
-        """
-        instance = serializer.instance
-
-        if 'file' in self.request.FILES:
-            self._delete_gemini_file(instance.gemini_file_uri)
-            if instance.file:
-                instance.file.delete(save=False)
-
-        elif self.request.data.get('clear_file') in ['true', 'True', True]:
-            self._delete_gemini_file(instance.gemini_file_uri)
-            if instance.file:
-                instance.file.delete(save=False)
-
-            serializer.validated_data['file'] = None
-            serializer.validated_data['gemini_file_uri'] = None
-
-        serializer.save()
-
-        if 'file' in self.request.FILES:
-            instance.refresh_from_db()
-            self._upload_to_gemini_and_save_uri(instance, self.request)
-
-    def update(self, request, *args, **kwargs):
-        """
-        Robust atomic update method ensuring all changes are persisted to the database.
-        """
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        instance.refresh_from_db()
-        return Response(self.get_serializer(instance).data)
-
-    @action(detail=False, methods=['get'])
-    def my_characters(self, request):
-        characters = Character.objects.filter(created_by=request.user)
-        serializer = self.get_serializer(characters, many=True)
-        return Response(serializer.data)
+        user, created = User.objects.get_or_create(
+            username='default_user',
+            defaults={'email': 'default@example.com'}
+        )
+        serializer.save(created_by=user)
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
     queryset = ChatSession.objects.all()

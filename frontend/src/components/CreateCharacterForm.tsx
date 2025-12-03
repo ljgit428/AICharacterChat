@@ -405,7 +405,7 @@ export default function CreateCharacterForm({ characterId }: { characterId?: str
                       <p className={`font-medium ${isDragging ? 'text-purple-700' : 'text-gray-600'}`}>
                         {isDragging ? "Drop it like it's hot!" : "Click or Drag & Drop to upload"}
                       </p>
-                      <p className="text-xs text-gray-400">Image, PDF, or TXT</p>
+                      <p className="text-xs text-gray-400">TXT, Markdown, or JSON</p>
                     </div>
                   </div>
                 )}
