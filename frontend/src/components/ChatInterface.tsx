@@ -8,6 +8,7 @@ import ChatWindow from '@/components/ChatWindow';
 import SessionSettings from '@/components/SessionSettings';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 import { Settings, User, LogOut, Clock } from 'lucide-react';
+import { DEFAULT_CHAT_SESSION_SETTINGS } from '@/constants';
 
 interface ChatInterfaceProps {
   characterId?: string;
@@ -26,13 +27,7 @@ export default function ChatInterface({
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [chatSessionId, setChatSessionId] = useState<string | null>(initialSessionId || null);
 
-  const [pendingSettings, setPendingSettings] = useState<Partial<ChatSession>>({
-    worldTime: "Current time",
-    userPersona: "Li, An Overwhelmed Underwriting Manager",
-    enableWebSearch: false,
-    outputLanguage: "English",
-    additionalContext: ""
-  });
+  const [pendingSettings, setPendingSettings] = useState<Partial<ChatSession>>(DEFAULT_CHAT_SESSION_SETTINGS);
 
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
@@ -94,13 +89,7 @@ export default function ChatInterface({
         dispatch(setChatSession(null));
         setChatSessionId(null);
         setHasStartedConversation(false);
-        setPendingSettings({
-          worldTime: "Current time",
-          userPersona: "Li, An Overwhelmed Underwriting Manager",
-          enableWebSearch: false,
-          outputLanguage: "English",
-          additionalContext: ""
-        });
+        setPendingSettings(DEFAULT_CHAT_SESSION_SETTINGS);
         return;
       }
 

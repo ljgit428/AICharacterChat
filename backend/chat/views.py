@@ -9,6 +9,7 @@ import tempfile
 import os
 import google.generativeai as genai
 from .models import Character, ChatSession, Message
+from .constants import DEFAULT_CHAT_SESSION_SETTINGS
 from .serializers import (
     CharacterSerializer,
     ChatSessionSerializer,
@@ -127,11 +128,11 @@ class ChatViewSet(viewsets.ViewSet):
                     user=user,
                     character=character,
                     title=f"Chat with {character.name}",
-                    world_time=request.data.get('world_time', "Current time"),
-                    user_persona=request.data.get('user_persona', "Li, An Overwhelmed Underwriting Manager"),
-                    enable_web_search=request.data.get('enable_web_search', False),
-                    output_language=request.data.get('output_language', "English"),
-                    additional_context=request.data.get('additional_context', "")
+                    world_time=request.data.get('world_time', DEFAULT_CHAT_SESSION_SETTINGS["world_time"]),
+                    user_persona=request.data.get('user_persona', DEFAULT_CHAT_SESSION_SETTINGS["user_persona"]),
+                    enable_web_search=request.data.get('enable_web_search', DEFAULT_CHAT_SESSION_SETTINGS["enable_web_search"]),
+                    output_language=request.data.get('output_language', DEFAULT_CHAT_SESSION_SETTINGS["output_language"]),
+                    additional_context=request.data.get('additional_context', DEFAULT_CHAT_SESSION_SETTINGS["additional_context"])
                 )
             
 

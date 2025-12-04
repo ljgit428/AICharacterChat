@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
+from .constants import DEFAULT_CHAT_SESSION_SETTINGS
 
 def get_default_disabled_states():
     return {
@@ -46,11 +47,11 @@ class ChatSession(models.Model):
     is_generating_response = models.BooleanField(default=False)
     gemini_chat_id = models.CharField(max_length=255, blank=True, null=True)
     
-    world_time = models.CharField(max_length=100, blank=True, default="Current time")
-    user_persona = models.TextField(blank=True, default="", help_text="User's role or identity in this chat")
-    enable_web_search = models.BooleanField(default=False)
-    output_language = models.CharField(max_length=50, blank=True, default="English")
-    additional_context = models.TextField(blank=True, default="", help_text="Extra instructions for this session")
+    world_time = models.CharField(max_length=100, blank=True, default=DEFAULT_CHAT_SESSION_SETTINGS["world_time"])
+    user_persona = models.TextField(blank=True, default=DEFAULT_CHAT_SESSION_SETTINGS["user_persona"], help_text="User's role or identity in this chat")
+    enable_web_search = models.BooleanField(default=DEFAULT_CHAT_SESSION_SETTINGS["enable_web_search"])
+    output_language = models.CharField(max_length=50, blank=True, default=DEFAULT_CHAT_SESSION_SETTINGS["output_language"])
+    additional_context = models.TextField(blank=True, default=DEFAULT_CHAT_SESSION_SETTINGS["additional_context"], help_text="Extra instructions for this session")
     
     def __str__(self):
         return f"{self.title or f'Chat with {self.character.name}'} - {self.user.username}"

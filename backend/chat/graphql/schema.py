@@ -12,6 +12,7 @@ from urllib.parse import urlparse, unquote
 
 from .types import CharacterType, ChatSessionType, CharacterInput, AICharacterDraft
 from chat.models import Character, ChatSession
+from chat.constants import DEFAULT_CHAT_SESSION_SETTINGS
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,11 @@ logger = logging.getLogger(__name__)
 class ChatSessionInput:
     character_id: strawberry.ID
     title: Optional[str] = ""
-    world_time: Optional[str] = "Current time"
-    user_persona: Optional[str] = "Li, An Overwhelmed Underwriting Manager"
-    enable_search: Optional[bool] = False
-    output_language: Optional[str] = "English"
-    current_context: Optional[str] = ""
+    world_time: Optional[str] = DEFAULT_CHAT_SESSION_SETTINGS["world_time"]
+    user_persona: Optional[str] = DEFAULT_CHAT_SESSION_SETTINGS["user_persona"]
+    enable_search: Optional[bool] = DEFAULT_CHAT_SESSION_SETTINGS["enable_web_search"]
+    output_language: Optional[str] = DEFAULT_CHAT_SESSION_SETTINGS["output_language"]
+    current_context: Optional[str] = DEFAULT_CHAT_SESSION_SETTINGS["additional_context"]
 
 @strawberry.type
 class Mutation:

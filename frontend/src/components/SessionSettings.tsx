@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { ChatSession } from '@/types';
 import { X, Save, Clock, User, Search, Languages, FileText } from 'lucide-react';
+import { DEFAULT_CHAT_SESSION_SETTINGS } from '@/constants';
 
 interface SessionSettingsProps {
   chatSession: ChatSession | null;
@@ -12,11 +13,11 @@ interface SessionSettingsProps {
 
 export default function SessionSettings({ chatSession, onSave, onCancel }: SessionSettingsProps) {
   const [sessionData, setSessionData] = useState<Partial<ChatSession>>({
-    worldTime: chatSession?.worldTime || 'Current time',
-    userPersona: chatSession?.userPersona || '',
-    enableWebSearch: chatSession?.enableWebSearch ?? false,
-    outputLanguage: chatSession?.outputLanguage || 'English',
-    additionalContext: chatSession?.additionalContext || '',
+    worldTime: chatSession?.worldTime || DEFAULT_CHAT_SESSION_SETTINGS.worldTime,
+    userPersona: chatSession?.userPersona || DEFAULT_CHAT_SESSION_SETTINGS.userPersona,
+    enableWebSearch: chatSession?.enableWebSearch ?? DEFAULT_CHAT_SESSION_SETTINGS.enableWebSearch,
+    outputLanguage: chatSession?.outputLanguage || DEFAULT_CHAT_SESSION_SETTINGS.outputLanguage,
+    additionalContext: chatSession?.additionalContext || DEFAULT_CHAT_SESSION_SETTINGS.additionalContext,
   });
 
   const handleInputChange = (field: keyof Partial<ChatSession>, value: string | boolean) => {
