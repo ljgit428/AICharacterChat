@@ -19,7 +19,6 @@ interface ChatInterfaceProps {
 export default function ChatInterface({
   characterId,
   initialSessionId,
-  onBack,
   onSessionUpdate
 }: ChatInterfaceProps) {
   const [showSessionSettings, setShowSessionSettings] = useState(false);
@@ -35,8 +34,6 @@ export default function ChatInterface({
     additionalContext: ""
   });
 
-  const [isChatUploading, setIsChatUploading] = useState(false);
-  const chatFileInputRef = useRef<HTMLInputElement>(null);
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
   const chatSession = useSelector((state: RootState) => state.chat.chatSession);
@@ -50,6 +47,7 @@ export default function ChatInterface({
 
   useEffect(() => {
     const loadCharacter = async () => {
+      // Same character, Performance Optimization
       if (character && (!characterId || character.id === characterId)) {
         return;
       }
@@ -74,19 +72,13 @@ export default function ChatInterface({
         }
 
         if (serverCharacter) {
-          const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '');
-
-          const formattedCharacter: Character = serverCharacter;
-          dispatch(setCharacter(formattedCharacter));
+          dispatch(setCharacter(serverCharacter));
         } else {
           console.error("Fatal Error: Character not found in database.");
-
-          alert("Character not found, please create one first.");
-          if (onBack) onBack();
         }
       } catch (error) {
         console.error("Failed to load character:", error);
-        dispatch(setError(error instanceof Error ? error.message : 'Failed to initialize character'));
+        dispatch(setError(error instanceof Error ? error.message : 'Failed to load character'));
       } finally {
         dispatch(setLoading(false));
       }
@@ -217,7 +209,6 @@ export default function ChatInterface({
         dispatch(addMessage(formattedAiMessage));
 
         if (response.data?.chat_session_id) {
-          const isNewSession = !chatSessionId;
           setChatSessionId(response.data.chat_session_id);
 
           apiService.getChatSession(response.data.chat_session_id).then(res => {
