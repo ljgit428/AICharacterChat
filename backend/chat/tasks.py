@@ -154,7 +154,6 @@ def generate_ai_response(message_id, character_id):
         }
         
     except Exception as e:
-        logger.error(f"Error generating AI response: {e}\n{traceback.format_exc()}")
         return {
             'success': False,
             'error': str(e)
