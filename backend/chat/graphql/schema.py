@@ -7,6 +7,7 @@ import google.generativeai as genai
 import json
 import logging
 import os
+import re
 from urllib.parse import urlparse, unquote
 
 from .types import CharacterType, ChatSessionType, CharacterInput, AICharacterDraft
@@ -99,12 +100,9 @@ class Mutation:
             response = await sync_to_async(model.generate_content)(content_parts)
             raw_text = response.text.strip()
             
-            if raw_text.startswith("```"):
-                first_newline = raw_text.find('\n')
-                if first_newline != -1:
-                    raw_text = raw_text[first_newline+1:]
-                if raw_text.endswith("```"):
-                    raw_text = raw_text[:-3]
+            json_match = re.search(r"```(?:json)?\s*(.*?)```", raw_text, re.DOTALL)
+            if json_match:
+                raw_text = json_match.group(1).strip()
             
             data = json.loads(raw_text)
 
