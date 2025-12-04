@@ -39,7 +39,7 @@ def update_session_title(chat_session, history_text, api_key):
         )
         
         response = model.generate_content(prompt)
-        new_title = response.text.strip().replace('"', '').replace("'", "").replace("《", "").replace("》", "")
+        new_title = response.text.strip().replace('"', '').replace("'", "")
         
         if new_title:
             chat_session.title = new_title
