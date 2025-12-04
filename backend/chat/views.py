@@ -24,19 +24,15 @@ logger = logging.getLogger(__name__)
 class CharacterViewSet(viewsets.ModelViewSet):
     queryset = Character.objects.all()
     serializer_class = CharacterSerializer
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
-        User = get_user_model()
-        user, created = User.objects.get_or_create(
-            username='default_user',
-            defaults={'email': 'default@example.com'}
-        )
+        user = self.request.user
         serializer.save(created_by=user)
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
     queryset = ChatSession.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -52,16 +48,12 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         return queryset.order_by('-updated_at')
 
     def perform_create(self, serializer):
-        User = get_user_model()
-        user, created = User.objects.get_or_create(
-            username='default_user',
-            defaults={'email': 'default@example.com'}
-        )
+        user = self.request.user
         serializer.save(user=user)
 
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -84,11 +76,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            User = get_user_model()
-            user, created = User.objects.get_or_create(
-                username='default_user',
-                defaults={'email': 'default@example.com'}
-            )
+            user = self.request.user
             
             chat_session = ChatSession.objects.get(
                 id=chat_session_id,
@@ -102,7 +90,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             )
 
 class ChatViewSet(viewsets.ViewSet):
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['post'])
     def send_message(self, request):
@@ -123,11 +111,7 @@ class ChatViewSet(viewsets.ViewSet):
         try:
             character = Character.objects.get(id=character_id)
             
-            User = get_user_model()
-            user, created = User.objects.get_or_create(
-                username='default_user',
-                defaults={'email': 'default@example.com'}
-            )
+            user = self.request.user
             
             if chat_session_id:
                 chat_session = ChatSession.objects.get(
@@ -141,7 +125,7 @@ class ChatViewSet(viewsets.ViewSet):
                     character=character,
                     title=f"Chat with {character.name}",
                     world_time=request.data.get('world_time', "Current time"),
-                    user_persona=request.data.get('user_persona', "Sensei"),
+                    user_persona=request.data.get('user_persona', "Li, An Overwhelmed Underwriting Manager"),
                     enable_web_search=request.data.get('enable_web_search', False),
                     output_language=request.data.get('output_language', "English"),
                     additional_context=request.data.get('additional_context', "")

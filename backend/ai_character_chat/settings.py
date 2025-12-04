@@ -63,6 +63,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     # 'django.middleware.csrf.CsrfViewMiddleware',  # Disabled for GraphQL API
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'chat.middleware.DevAutoLoginMiddleware'
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]

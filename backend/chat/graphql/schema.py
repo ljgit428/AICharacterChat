@@ -134,9 +134,6 @@ class Mutation:
         @sync_to_async
         def create_char_sync():
             user = info.context.request.user
-            if not user.is_authenticated:
-                User = get_user_model()
-                user, _ = User.objects.get_or_create(username='default_user')
             
             return Character.objects.create(
                 name=input.name,
@@ -199,9 +196,6 @@ class Mutation:
                 character = Character.objects.get(pk=input.character_id)
                 
                 user = info.context.request.user
-                if not user.is_authenticated:
-                    User = get_user_model()
-                    user, _ = User.objects.get_or_create(username='default_user')
 
                 return ChatSession.objects.create(
                     character=character,
