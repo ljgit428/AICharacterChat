@@ -22,16 +22,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 class CharacterViewSet(viewsets.ModelViewSet):
-    queryset = Character.objects.all()
+    queryset = Character.objects.all() 
     serializer_class = CharacterSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Character.objects.filter(created_by=self.request.user)
 
     def perform_create(self, serializer):
         user = self.request.user
         serializer.save(created_by=user)
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
-    queryset = ChatSession.objects.all()
+    queryset = ChatSession.objects.none() 
     permission_classes = [IsAuthenticated]
     
     def get_serializer_class(self):
@@ -40,7 +43,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         return ChatSessionSerializer
     
     def get_queryset(self):
-        queryset = ChatSession.objects.all()
+        queryset = ChatSession.objects.filter(user=self.request.user)
         character_id = self.request.query_params.get('character_id')
         if character_id:
             queryset = queryset.filter(character_id=character_id)
@@ -52,7 +55,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         serializer.save(user=user)
 
 class MessageViewSet(viewsets.ModelViewSet):
-    queryset = Message.objects.all()
+    queryset = Message.objects.none()
     permission_classes = [IsAuthenticated]
     
     def get_serializer_class(self):
@@ -61,7 +64,7 @@ class MessageViewSet(viewsets.ModelViewSet):
         return MessageSerializer
     
     def get_queryset(self):
-        queryset = Message.objects.all()
+        queryset = Message.objects.filter(chat_session__user=self.request.user).order_by('timestamp')
         chat_session_id = self.request.query_params.get('chat_session_id')
         if chat_session_id:
             queryset = queryset.filter(chat_session_id=chat_session_id)
