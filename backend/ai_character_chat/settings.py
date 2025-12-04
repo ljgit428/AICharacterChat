@@ -63,7 +63,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     # 'django.middleware.csrf.CsrfViewMiddleware',  # Disabled for GraphQL API
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'chat.middleware.DevAutoLoginMiddleware'
+    'chat.middleware.DevAutoLoginMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -156,7 +156,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
+        'chat.authentication.CsrfExemptSessionAuthentication',
     ],
 }
 
@@ -168,6 +168,11 @@ CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
     "http://localhost:3002",
     "http://127.0.0.1:3002",
 ])
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 # Celery settings
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
