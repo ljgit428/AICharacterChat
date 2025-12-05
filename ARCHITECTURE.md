@@ -119,11 +119,11 @@
 
 ---
 
-## 7.2 Chat Initialization (Hydration)
+## 7.2 Chat Initialization
 **Goal:** Load character details and restore chat history when entering a room.
 **Location:** `frontend/src/components/ChatInterface.tsx`
 
-**Flow A: Character Context**
+**Flow A: Character Context (for NEW chat)**
 1. [Trigger] `useEffect` (on `characterId` change)
    ↓
 2. [Function] **`loadCharacter()`** (Internal Async)
@@ -132,7 +132,7 @@
    ↓
 4. [State] `dispatch(setCharacter)` -> Update Redux
 
-**Flow B: History Restoration**
+**Flow B: History Restoration (for OLD chat)**
 1. [Trigger] `useEffect` (on `initialSessionId` change)
    ↓
 2. [Function] **`loadChatHistory()`** (Internal Async)
@@ -142,3 +142,27 @@
    └── `getChatSession(id)` -> GET /api/sessions/{id}/
    ↓
 4. [State] `dispatch(setMessages)` & `dispatch(setChatSession)`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
