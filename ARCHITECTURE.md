@@ -6,7 +6,7 @@
 ## 4. Sessions History Sidebar Display
 ## 5. Session Management
 ## 6. History List
-## 7. Message Restoration
+## 7. Message Restoration & Chat Initialization
 
 ## 1. Core Chat Loop (Sending Message) (REST API)
 **Goal:** Real-time messaging with latency control.
