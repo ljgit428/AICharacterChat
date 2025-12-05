@@ -47,7 +47,6 @@ interface ApiMessage {
   role: 'user' | 'assistant';
   timestamp: string;
   chat_session?: string;
-  file_uri?: string;
 }
 
 function normalizeCharacter(apiData: ApiCharacter): Character {
@@ -116,7 +115,6 @@ interface SendMessageRequest {
   message: string;
   character_id: string;
   chat_session_id?: string;
-  file_uri?: string;
   world_time?: string;
   user_persona?: string;
   enable_web_search?: boolean;
@@ -418,7 +416,6 @@ class ApiService {
       message: data.message,
       character_id: parseInt(data.character_id),
       chat_session_id: data.chat_session_id ? parseInt(data.chat_session_id) : undefined,
-      file_uri: data.file_uri,
       world_time: data.world_time,
       user_persona: data.user_persona,
       enable_web_search: data.enable_web_search,

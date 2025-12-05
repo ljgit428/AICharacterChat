@@ -11,7 +11,7 @@
 ## 1. Core Chat Loop (Sending Message) (REST API)
 **Goal:** Real-time messaging with latency control.
 **Flow:**
-1. [UI] `ChatInterface.tsx` (User Input)
+1. [UI] `ChatInterface.tsx` (User Input) (`handleSendMessage` function)
    ↓
 2. [Client] `api.ts` (`sendMessage` function)
    ↓ POST /api/chat/send_message/

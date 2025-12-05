@@ -31,7 +31,6 @@ class Character(models.Model):
     appearance = models.TextField(blank=True, null=True)
     response_guidelines = models.TextField(blank=True, null=True)
     file = models.FileField(upload_to='character_files/', blank=True, null=True)
-    gemini_file_uri = models.CharField(max_length=255, blank=True, null=True)
     disabled_states = models.JSONField(default=get_default_disabled_states)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -67,7 +66,6 @@ class Message(models.Model):
     content = models.TextField()
     timestamp = models.DateTimeField(auto_now_add=True)
     character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
-    file_uri = models.CharField(max_length=255, blank=True, null=True)
     
     class Meta:
         ordering = ['timestamp']

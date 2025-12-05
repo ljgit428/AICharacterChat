@@ -115,13 +115,6 @@ def generate_ai_response(message_id, character_id):
             
             parts = [msg.content]
             
-            if msg.file_uri:
-                try:
-                    chat_file = genai.get_file(name=msg.file_uri)
-                    parts.append(chat_file)
-                except Exception as e:
-                    logger.warning(f"Failed to load chat file from Gemini: {e}")
-
             formatted_history.append({"role": role, "parts": parts})
         
         response = model.generate_content(formatted_history)

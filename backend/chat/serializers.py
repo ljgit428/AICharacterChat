@@ -7,15 +7,15 @@ class CharacterSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'avatar_url', 'description', 'first_message',
             'scenario', 'example_dialogue', 'affiliation', 'tags', 'personality',
-            'appearance', 'response_guidelines', 'file', 'gemini_file_uri',
+            'appearance', 'response_guidelines', 'file',
             'disabled_states', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'gemini_file_uri']
+        read_only_fields = ['created_at', 'updated_at']
 
 class MessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Message
-        fields = ['id', 'role', 'content', 'timestamp', 'character', 'file_uri']
+        fields = ['id', 'role', 'content', 'timestamp', 'character']
         read_only_fields = ['timestamp']
 
 class ChatSessionSerializer(serializers.ModelSerializer):
@@ -38,4 +38,4 @@ class ChatSessionCreateSerializer(serializers.ModelSerializer):
 class MessageCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Message
-        fields = ['role', 'content', 'character', 'file_uri']
+        fields = ['role', 'content', 'character']

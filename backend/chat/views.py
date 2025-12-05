@@ -140,8 +140,7 @@ class ChatViewSet(viewsets.ViewSet):
                 chat_session=chat_session,
                 role='user',
                 content=message_content,
-                character=character,
-                file_uri=file_uri
+                character=character
             )
             
             chat_session.save()

@@ -111,8 +111,6 @@ export default function ChatInterface({
             content: msg.content,
             role: msg.role,
             timestamp: msg.timestamp,
-            fileUri: msg.file_uri || undefined,
-            fileName: msg.file_uri ? msg.file_uri.split('/').pop() : undefined
           }));
 
           dispatch(setMessages(formattedMessages));
@@ -192,8 +190,6 @@ export default function ChatInterface({
           content: rawAiMessage.content,
           role: rawAiMessage.role,
           timestamp: rawAiMessage.timestamp,
-          fileUri: rawAiMessage.file_uri || undefined,
-          fileName: rawAiMessage.file_uri ? rawAiMessage.file_uri.split('/').pop() : undefined
         };
         dispatch(addMessage(formattedAiMessage));
 
