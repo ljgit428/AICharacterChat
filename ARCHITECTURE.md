@@ -7,6 +7,8 @@
 ## 5. Session Management
 ## 6. History List
 ## 7. Message Restoration & Chat Initialization
+## 8. Delete Conversation (REST)
+## 9. Delete Character (GraphQL + Validation)
 
 ## 1. Core Chat Loop (Sending Message) (REST API)
 **Goal:** Real-time messaging with latency control.
@@ -16,6 +18,13 @@
 2. [Client] `api.ts` (`sendMessage` function)
    ↓ POST /api/chat/send_message/
 3. [View] `views.py` (`ChatViewSet`) -> Save User Message to DB
+   ├── **Step A: Session Handling**
+   │   Check `chat_session_id`. If null -> `ChatSession.objects.create()`
+   │   (Initialize with User Persona, World Time, etc.)
+   │
+   └── **Step B: User Persistence**
+       `Message.objects.create(role='user', content=...)`
+       **[DB Write 1]** Save User Message to PostgreSQL.
    ↓ (Synchronous Call)
 4. [Engine] `tasks.py` (`generate_ai_response`)
    ↓
@@ -23,7 +32,16 @@
    ↓
 6. [DB] `models.py` (Save Assistant Response)
    ↓
-7. [UI] Frontend Redux Store Update
+7. [Client State] `ChatInterface.tsx` (Handle Response)
+   ├── **Update Redux:** `dispatch(addMessage(ai_message))`
+   │
+   └── **Bind Session:** `setChatSessionId(response.chat_session_id)`
+       (Crucial: Transitions state from "New Chat" -> "Existing Session")
+   ↓
+8. [Cross-Component Sync]
+   `onSessionUpdate()` callback
+   ↓ Triggers `page.tsx`
+   ↓ Refreshes Sidebar History List (Shows new title/timestamp)
 
 ---
 
@@ -143,7 +161,39 @@
    ↓
 4. [State] `dispatch(setMessages)` & `dispatch(setChatSession)`
 
+---
 
+## 8. Delete Conversation (REST)
+**Goal:** Remove specific chat history and cleanup database.
+**Flow:**
+1. [UI] `page.tsx` (User clicks Trash icon in Sidebar)
+   ↓
+2. [Client] `api.ts` (`deleteChatSession`)
+   ↓ DELETE /api/sessions/{id}/
+3. [View] `views.py` (`ChatSessionViewSet`)
+   ↓ (Inherited `destroy` method)
+4. [DB] PostgreSQL
+   **[Cascade Delete]** Removes Session AND all associated Messages automatically.
+   ↓
+5. [UI] State Update (Filter out item from `recentChats` list)
+
+---
+
+## 9. Delete Character (GraphQL + Validation)
+**Goal:** Safely remove a character while preserving data integrity.
+**Flow:**
+1. [UI] `CharacterGallery.tsx` (User clicks Delete)
+   ↓ GraphQL Mutation (`DELETE_CHARACTER`)
+2. [Schema] `graphql/schema.py` (`delete_character` resolver)
+   ↓
+   **[Validation Check]**
+   `if character.chat_sessions.exists(): return False`
+   *(Prevents deleting characters that have active history)*
+   **Referential Integrity**
+   ↓
+3. [DB] PostgreSQL (Delete Row)
+   ↓
+4. [UI] Refetch List / Remove Card
 
 
 
