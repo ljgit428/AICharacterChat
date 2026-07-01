@@ -4,7 +4,6 @@ export const zhCNMessages = {
     characterWorkbenchArchive: "角色工作台与会话归档",
     home: "首页",
     sessions: "会话",
-    returnToRecentScenes: "返回最近场景",
     playground: "工作区",
     loadingConversationHistory: "正在加载会话历史...",
     viewAllHistory: "查看全部历史",

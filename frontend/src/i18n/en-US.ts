@@ -15,7 +15,6 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     characterWorkbenchArchive: "Character workbench and session archive",
     home: "Home",
     sessions: "Sessions",
-    returnToRecentScenes: "Return to recent scenes",
     playground: "Playground",
     loadingConversationHistory: "Loading conversation history...",
     viewAllHistory: "View all history",

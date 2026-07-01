@@ -359,7 +359,6 @@ function AIStudioLayoutContent() {
             <div className="mb-2 flex items-center justify-between px-1">
               <div>
                 <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.sessions}</p>
-                <p className="mt-1 text-sm font-medium text-slate-700">{messages.shell.returnToRecentScenes}</p>
               </div>
             </div>
             <div className="mb-1">
