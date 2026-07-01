@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, RootState } from '@/types';
 import { useSelector } from 'react-redux';
 import { Expand, FileText, ImageIcon, Paperclip, Sparkles, Video, X } from 'lucide-react';
@@ -84,7 +84,9 @@ export default function ImmersiveChatWindow({
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
+  const COMPOSER_MAX_HEIGHT = 192; // ~8 lines of leading-6 + py-2.5
   const [draftMessage, setDraftMessage] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -115,6 +117,15 @@ export default function ImmersiveChatWindow({
   useEffect(() => () => {
     pendingAttachmentsRef.current.forEach(revokeAttachmentPreview);
   }, []);
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+  }, [draftMessage]);
 
   useEffect(() => {
     if (!previewAttachment) {
@@ -479,9 +490,10 @@ export default function ImmersiveChatWindow({
               <Paperclip className="h-5 w-5" />
             </button>
             <textarea
-              className="min-h-[72px] flex-1 resize-none border-0 bg-transparent px-3 py-2 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+              ref={textareaRef}
+              className="max-h-48 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-3 py-2.5 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
               placeholder={isFirstMessage ? copy.immersiveChat.clickStart : copy.immersiveChat.writeNextMessage}
-              rows={3}
+              rows={1}
               value={draftMessage}
               onChange={(event) => setDraftMessage(event.target.value)}
               onKeyDown={handleKeyDown}
