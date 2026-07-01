@@ -12,7 +12,6 @@ from .views import (
 from .authentication_views import login, register, logout
 from .file_views import upload_file_view
 from .api import upload_image
-from .views import CharacterMemoryViewSet
 from strawberry.django.views import AsyncGraphQLView
 from .graphql.schema import schema
 

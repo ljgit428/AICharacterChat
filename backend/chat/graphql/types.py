@@ -2,6 +2,9 @@ import strawberry
 from typing import List, Optional
 import os
 from asgiref.sync import sync_to_async
+import strawberry_django
+from chat.models import Character, ChatSession, CharacterKnowledgeAsset
+
 
 @strawberry.type
 class AICharacterDraft:
@@ -37,9 +40,6 @@ class CharacterInput:
     background_file_url: Optional[str] = ""
     background_file_name: Optional[str] = ""
     background_files: Optional[List[CharacterKnowledgeAssetInput]] = None
-
-from chat.models import Character, ChatSession, CharacterKnowledgeAsset
-import strawberry_django
 
 
 @strawberry.type

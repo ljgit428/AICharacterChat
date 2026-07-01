@@ -1697,7 +1697,7 @@ class ChatAttachmentTests(TestCase):
             attachment_kind='image',
             sort_order=0,
         )
-        second_attachment = MessageAttachment.objects.create(
+        MessageAttachment.objects.create(
             message=user_message,
             file=SimpleUploadedFile(
                 'clip.mp4',
@@ -2289,7 +2289,7 @@ class CharacterBackgroundUploadTests(TestCase):
             attachment_text_content='He keeps a silver pocket watch.',
             sort_order=1,
         )
-        model_config = ModelConfiguration.objects.create(
+        ModelConfiguration.objects.create(
             user=self.user,
             name='Vision Default',
             provider='openai_compatible',
@@ -2317,4 +2317,3 @@ class CharacterBackgroundUploadTests(TestCase):
         self.assertEqual(len(formatted_history[1]['content']), 1)
         self.assertEqual(formatted_history[1]['content'][0]['type'], 'image_url')
         self.assertTrue(formatted_history[1]['content'][0]['image_url']['url'].startswith('data:image/png;base64,'))
-

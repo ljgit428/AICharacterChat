@@ -12,8 +12,6 @@ import google.generativeai as genai
 import requests
 from celery import shared_task
 
-from django.db import transaction
-
 from .attachments import describe_attachment_for_prompt, get_message_attachments
 from .memory.manager import MemoryManager
 from .memory.prompts import build_memory_extraction_prompt, get_memory_crud_tool_specs

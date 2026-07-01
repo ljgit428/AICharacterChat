@@ -16,9 +16,7 @@ from .models import (
     AttachmentKind,
     Character,
     CharacterKnowledgeAsset,
-    CharacterMemoryItem,
     ChatSession,
-    MemoryAuditLog,
     MemoryAuditSource,
     Message,
     MessageAttachment,
@@ -83,7 +81,7 @@ def _get_required_model_config(user, model_config_id=None):
 
     return model_config
 class CharacterViewSet(viewsets.ModelViewSet):
-    queryset = Character.objects.all() 
+    queryset = Character.objects.all()
     serializer_class = CharacterSerializer
     permission_classes = [IsAuthenticated]
 
@@ -305,20 +303,20 @@ class WebSearchConfigurationViewSet(viewsets.ViewSet):
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
-    queryset = ChatSession.objects.none() 
+    queryset = ChatSession.objects.none()
     permission_classes = [IsAuthenticated]
-    
+
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return ChatSessionWriteSerializer
         return ChatSessionSerializer
-    
+
     def get_queryset(self):
         queryset = ChatSession.objects.filter(user=self.request.user).select_related('character').prefetch_related('messages__attachments')
         character_id = self.request.query_params.get('character_id')
         if character_id:
             queryset = queryset.filter(character_id=character_id)
-        
+
         return queryset.order_by('-updated_at')
 
     def perform_create(self, serializer):
@@ -471,30 +469,30 @@ def _serialise_memory_item(item):
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.none()
     permission_classes = [IsAuthenticated]
-    
+
     def get_serializer_class(self):
         if self.action == 'create':
             return MessageCreateSerializer
         return MessageSerializer
-    
+
     def get_queryset(self):
         queryset = Message.objects.filter(chat_session__user=self.request.user).prefetch_related('attachments').order_by('timestamp')
         chat_session_id = self.request.query_params.get('chat_session_id')
         if chat_session_id:
             queryset = queryset.filter(chat_session_id=chat_session_id)
         return queryset
-    
+
     def perform_create(self, serializer):
         chat_session_id = self.request.data.get('chat_session_id')
         if not chat_session_id:
             return Response(
-                {'error': 'chat_session_id is required'}, 
+                {'error': 'chat_session_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             user = self.request.user
-            
+
             chat_session = ChatSession.objects.get(
                 id=chat_session_id,
                 user=user
@@ -502,7 +500,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             serializer.save(chat_session=chat_session)
         except ChatSession.DoesNotExist:
             return Response(
-                {'error': 'Chat session not found or access denied'}, 
+                {'error': 'Chat session not found or access denied'},
                 status=status.HTTP_404_NOT_FOUND
             )
 

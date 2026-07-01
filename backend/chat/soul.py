@@ -2,7 +2,7 @@ import os
 
 from django.db import DatabaseError
 
-from .models import AttachmentKind, CharacterMemoryItem, UserProfile
+from .models import AttachmentKind, UserProfile
 
 
 MEMORY_LAYER_DESCRIPTIONS = {

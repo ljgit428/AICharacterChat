@@ -516,7 +516,7 @@ class Mutation:
         return await create_session_sync()
 
     @strawberry.mutation
-    async def update_chat_session(self, id: strawberry.ID, input: ChatSessionInput) -> ChatSessionType:
+    async def update_chat_session(self, info, id: strawberry.ID, input: ChatSessionInput) -> ChatSessionType:
         @sync_to_async
         def update_session_sync():
             user = _get_authenticated_user(info)
@@ -532,17 +532,17 @@ class Query:
     def characters(self, info) -> List[CharacterType]:
         user = _get_authenticated_user(info)
         return Character.objects.filter(created_by=user)
-    
+
     @strawberry.django.field
     def character(self, info, id: strawberry.ID) -> CharacterType:
         user = _get_authenticated_user(info)
         return _get_owned_character(user, id)
-        
+
     @strawberry.django.field
     def chat_sessions(self, info) -> List[ChatSessionType]:
         user = _get_authenticated_user(info)
         return ChatSession.objects.filter(user=user).order_by('-updated_at')
-    
+
     @strawberry.django.field
     def chat_session(self, info, id: strawberry.ID) -> ChatSessionType:
         user = _get_authenticated_user(info)

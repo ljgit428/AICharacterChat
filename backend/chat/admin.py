@@ -26,4 +26,3 @@ class CharacterAdmin(admin.ModelAdmin):
 class MessageAdmin(admin.ModelAdmin):
     list_display = ('id', 'chat_session', 'role', 'timestamp')
     list_filter = ('role',)
-
