@@ -1,0 +1,683 @@
+import json
+import os
+
+from django.core.files import File
+from django.http import StreamingHttpResponse
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from .attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
+from .memory.interface import LongTermMemoryInterface as CharacterLongTermMemory
+from .memory.manager import MemoryItemNotFoundError, MemoryManager
+from .models import (
+    AttachmentKind,
+    Character,
+    CharacterKnowledgeAsset,
+    CharacterMemoryItem,
+    ChatSession,
+    MemoryAuditLog,
+    MemoryAuditSource,
+    Message,
+    MessageAttachment,
+    ModelConfiguration,
+    UserProfile,
+    WebSearchConfiguration,
+)
+from .search import search_web
+from .serializers import (
+    CharacterSerializer,
+    CharacterKnowledgeAssetSerializer,
+    ChatSessionSerializer,
+    ChatSessionWriteSerializer,
+    MessageSerializer,
+    MessageCreateSerializer,
+    ModelConfigurationSerializer,
+    UserProfileSerializer,
+    WebSearchConfigurationSerializer,
+)
+from .tasks import generate_ai_response, stream_ai_response
+from .soul import list_memory_explorer_path, read_memory_explorer_file
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _sync_character_primary_reference_file(character):
+    primary_text_asset = character.knowledge_assets.filter(
+        attachment_kind=AttachmentKind.TEXT,
+    ).order_by('sort_order', 'id').first()
+
+    if primary_text_asset and getattr(primary_text_asset, 'file', None):
+        with primary_text_asset.file.open('rb') as source_file:
+            character.file.save(
+                primary_text_asset.attachment_name or os.path.basename(primary_text_asset.file.name or ''),
+                File(source_file),
+                save=False,
+            )
+    elif character.file:
+        character.file.delete(save=False)
+        character.file = None
+
+    character.save(update_fields=['file', 'updated_at'])
+
+
+def _message_serializer(message, request):
+    return MessageSerializer(message, context={'request': request})
+
+
+def _get_required_model_config(user, model_config_id=None):
+    if model_config_id not in [None, "", "null"]:
+        model_config = ModelConfiguration.objects.get(id=model_config_id, user=user)
+    else:
+        model_config = ModelConfiguration.get_default_for_user(user)
+
+    if not model_config:
+        raise ValueError('Please configure your own model API in Project Settings before starting a chat.')
+
+    # Gemini 路径仍必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
+    if not model_config.api_key and model_config.provider == 'gemini':
+        raise ValueError('The selected model configuration is missing an API key.')
+
+    return model_config
+class CharacterViewSet(viewsets.ModelViewSet):
+    queryset = Character.objects.all() 
+    serializer_class = CharacterSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Character.objects.filter(created_by=self.request.user)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        serializer.save(created_by=user)
+
+    def perform_update(self, serializer):
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        character = self.get_object()
+        if character.chat_sessions.exists():
+            return Response(
+                {'error': 'Cannot delete a character with existing chat sessions'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['get'])
+    def soul_files(self, request, pk=None):
+        character = self.get_object()
+        return Response(list_memory_explorer_path(
+            character,
+            path_prefix=request.query_params.get('path_prefix', ''),
+            recursive=request.query_params.get('recursive', '').lower() == 'true',
+            max_entries=request.query_params.get('max_entries', 200),
+        ))
+
+    @action(detail=True, methods=['get'])
+    def soul_file(self, request, pk=None):
+        character = self.get_object()
+        path = request.query_params.get('path', '')
+        if not path:
+            raise ValidationError({'path': 'path is required'})
+        return Response(read_memory_explorer_file(
+            character,
+            path=path,
+            max_chars=request.query_params.get('max_chars', 6000),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='knowledge_assets')
+    def upload_knowledge_assets(self, request, pk=None):
+        character = self.get_object()
+        files = list(request.FILES.getlist('files'))
+        if not files:
+            single_file = request.FILES.get('file')
+            if single_file:
+                files = [single_file]
+
+        if not files:
+            raise ValidationError({'files': 'At least one file is required.'})
+
+        next_sort_order = (
+            character.knowledge_assets.order_by('-sort_order').values_list('sort_order', flat=True).first() or 0
+        )
+        created_assets = []
+        for index, uploaded_file in enumerate(files, start=1):
+            attachment_kind, attachment_mime_type = guess_attachment_kind(uploaded_file)
+            if attachment_kind not in {AttachmentKind.TEXT, AttachmentKind.IMAGE}:
+                raise ValidationError({'files': 'Only text files and images are supported for character reference uploads.'})
+
+            validate_attachment_size(uploaded_file, attachment_kind)
+            attachment_text_content = ''
+            if attachment_kind == AttachmentKind.TEXT:
+                attachment_text_content = extract_text_attachment_content(uploaded_file)
+
+            created_assets.append(
+                CharacterKnowledgeAsset.objects.create(
+                    character=character,
+                    file=uploaded_file,
+                    attachment_name=uploaded_file.name or '',
+                    attachment_mime_type=attachment_mime_type,
+                    attachment_kind=attachment_kind,
+                    attachment_text_content=attachment_text_content,
+                    sort_order=next_sort_order + index,
+                )
+            )
+
+        _sync_character_primary_reference_file(character)
+        serializer = CharacterKnowledgeAssetSerializer(created_assets, many=True, context={'request': request})
+        return Response({'assets': serializer.data}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['delete'], url_path=r'knowledge_assets/(?P<asset_id>[^/.]+)')
+    def delete_knowledge_asset(self, request, pk=None, asset_id=None):
+        character = self.get_object()
+        try:
+            asset = character.knowledge_assets.get(pk=asset_id)
+        except CharacterKnowledgeAsset.DoesNotExist as exc:
+            raise ValidationError({'asset_id': 'Knowledge asset not found for this character.'}) from exc
+
+        asset.file.delete(save=False)
+        asset.delete()
+        _sync_character_primary_reference_file(character)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get', 'post', 'delete'], url_path='memory')
+    def memory_collection(self, request, pk=None):
+        view = CharacterMemoryViewSet()
+        view.permission_classes = self.permission_classes
+        view.request = request
+        if request.method == 'GET':
+            return view.list(request=request, pk=pk)
+        if request.method == 'POST':
+            return view.create(request=request, pk=pk)
+        return view.wipe_all(request=request, pk=pk)
+
+    # NOTE: ``memory/merge`` is declared BEFORE ``memory/{short_id}`` so the
+    # literal route is tried first by DRF's router. The ``memory_item``
+    # regex below ALSO uses a negative lookahead to reject reserved
+    # sub-action names ("merge", "audit", "narrative", "wipe"). The
+    # lookahead uses ``/?$`` (not bare ``$``) so reserved names match
+    # even when the trailing slash is present (``memory/merge/`` would
+    # otherwise slip past the bare ``$`` anchor and be captured as a
+    # ``short_id``). The lookahead is the structural enforcement; the
+    # declaration ordering is belt-and-suspenders that future readers
+    # can safely ignore.
+    @action(detail=True, methods=['post'], url_path='memory/merge')
+    def memory_merge(self, request, pk=None):
+        view = CharacterMemoryViewSet()
+        view.permission_classes = self.permission_classes
+        view.request = request
+        return view.merge(request=request, pk=pk)
+
+    @action(
+        detail=True,
+        methods=['patch', 'delete'],
+        url_path=r'memory/(?P<short_id>(?!merge/?$|audit/?$|narrative/?$|wipe/?$)[^/.]+)',
+    )
+    def memory_item(self, request, pk=None, short_id=None):
+        view = CharacterMemoryViewSet()
+        view.permission_classes = self.permission_classes
+        view.request = request
+        if request.method == 'PATCH':
+            return view.update(request=request, pk=pk, short_id=short_id)
+        return view.destroy(request=request, pk=pk, short_id=short_id)
+
+
+class ModelConfigurationViewSet(viewsets.ModelViewSet):
+    queryset = ModelConfiguration.objects.none()
+    serializer_class = ModelConfigurationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return ModelConfiguration.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        user = instance.user
+        was_default = instance.is_default
+        instance.delete()
+
+        if was_default:
+            replacement = ModelConfiguration.objects.filter(user=user).first()
+            if replacement and not replacement.is_default:
+                replacement.is_default = True
+                replacement.save(update_fields=['is_default'])
+
+
+class UserProfileViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['get', 'patch'])
+    def me(self, request):
+        profile = UserProfile.get_or_create_for_user(request.user)
+
+        if request.method == 'GET':
+            return Response(UserProfileSerializer(profile).data)
+
+        serializer = UserProfileSerializer(profile, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class WebSearchConfigurationViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['get', 'patch'])
+    def me(self, request):
+        config = WebSearchConfiguration.get_for_user(request.user)
+
+        if request.method == 'GET':
+            config = config or WebSearchConfiguration(
+                user=request.user,
+                provider='tavily',
+                api_key='',
+                max_results=5,
+            )
+            return Response(WebSearchConfigurationSerializer(config).data)
+
+        serializer = WebSearchConfigurationSerializer(
+            config,
+            data=request.data,
+            partial=True,
+            context={'user': request.user},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def test(self, request):
+        query = (request.data.get('query') or '').strip()
+        if not query:
+            raise ValidationError({'query': 'query is required'})
+
+        config = WebSearchConfiguration.get_for_user(request.user)
+        payload = search_web(query, user=request.user, config=config)
+        return Response(payload)
+
+
+class ChatSessionViewSet(viewsets.ModelViewSet):
+    queryset = ChatSession.objects.none() 
+    permission_classes = [IsAuthenticated]
+    
+    def get_serializer_class(self):
+        if self.action in ['create', 'update', 'partial_update']:
+            return ChatSessionWriteSerializer
+        return ChatSessionSerializer
+    
+    def get_queryset(self):
+        queryset = ChatSession.objects.filter(user=self.request.user).select_related('character').prefetch_related('messages__attachments')
+        character_id = self.request.query_params.get('character_id')
+        if character_id:
+            queryset = queryset.filter(character_id=character_id)
+        
+        return queryset.order_by('-updated_at')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        try:
+            _get_required_model_config(user=user)
+        except ValueError as exc:
+            raise ValidationError({'title': str(exc)}) from exc
+        serializer.save(user=user)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Allow toggling ``is_private_mode`` from the chat composer without
+        sending every other field."""
+        instance = self.get_object()
+        if 'is_private_mode' in request.data:
+            is_private_mode = self._parse_bool(request.data.get('is_private_mode'))
+            instance.is_private_mode = is_private_mode
+            instance.save(update_fields=['is_private_mode', 'updated_at'])
+            return Response(ChatSessionSerializer(instance).data)
+        return super().partial_update(request, *args, **kwargs)
+
+    @staticmethod
+    def _parse_bool(value):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).lower() in {'1', 'true', 'yes', 'on'}
+
+
+class CharacterMemoryViewSet(viewsets.ViewSet):
+    """REST surface for ``wiki/memory.md`` (per-character long-term memory).
+
+    Five CRUD verbs mirroring SonettoHeres tools byte-for-byte:
+
+    - ``GET /api/characters/{id}/memory/`` — snapshot grouped by section.
+    - ``POST /api/characters/{id}/memory/`` — ``create_memory`` action.
+    - ``PATCH /api/characters/{id}/memory/{short_id}/`` — ``update_memory``.
+    - ``DELETE /api/characters/{id}/memory/{short_id}/`` — ``delete_memory``.
+    - ``POST /api/characters/{id}/memory/merge/`` — ``merge_memories``.
+
+    Every write logs to ``MemoryAuditLog`` with source ``user_edit``,
+    matching the audit trail that ``sync_long_term_memory`` already writes.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _memory(self, request, pk):
+        # Use get_object_or_404 so cross-user access surfaces as 404
+        # instead of leaking a 500 from an uncaught DoesNotExist.
+        character = get_object_or_404(
+            Character,
+            pk=pk,
+            created_by=request.user,
+        )
+        return character, MemoryManager(character)
+
+    def list(self, request, pk=None):
+        character, manager = self._memory(request, pk)
+        snapshot = CharacterLongTermMemory.snapshot(character)
+        return Response({
+            'sections': snapshot['sections'],
+            'wiki_markdown': manager.render_wiki_markdown(),
+            'count': sum(len(section['items']) for section in snapshot['sections']),
+        })
+
+    def create(self, request, pk=None):
+        character, manager = self._memory(request, pk)
+        description = request.data.get('description', '')
+        section = request.data.get('section', '')
+        reason = request.data.get('reason', '')
+        try:
+            item = manager.create_item(
+                section=section,
+                description=description,
+                source=MemoryAuditSource.USER_EDIT,
+                reason=reason or 'User edit via /memory page.',
+            )
+        except ValueError as exc:
+            raise ValidationError({'description': str(exc)}) from exc
+        return Response(_serialise_memory_item(item), status=status.HTTP_201_CREATED)
+
+    def update(self, request, pk=None, short_id=None):
+        character, manager = self._memory(request, pk)
+        description = request.data.get('description', '')
+        section = request.data.get('section')
+        reason = request.data.get('reason', '')
+        try:
+            item = manager.update_item(
+                short_id=short_id,
+                description=description,
+                section=section,
+                reason=reason or 'User edit via /memory page.',
+                source=MemoryAuditSource.USER_EDIT,
+            )
+        except ValueError as exc:
+            raise ValidationError({'description': str(exc)}) from exc
+        except MemoryItemNotFoundError as exc:
+            raise ValidationError({'short_id': str(exc)}) from exc
+        return Response(_serialise_memory_item(item))
+
+    def destroy(self, request, pk=None, short_id=None):
+        character, manager = self._memory(request, pk)
+        reason = request.data.get('reason', '') or 'User delete via /memory page.'
+        try:
+            deleted_desc = manager.delete_item(
+                short_id=short_id,
+                reason=reason,
+                source=MemoryAuditSource.USER_EDIT,
+            )
+        except MemoryItemNotFoundError as exc:
+            raise ValidationError({'short_id': str(exc)}) from exc
+        return Response({'deleted': short_id, 'description': deleted_desc}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'])
+    def merge(self, request, pk=None):
+        character, manager = self._memory(request, pk)
+        try:
+            item = manager.merge_items(
+                id1=request.data.get('id1', ''),
+                id2=request.data.get('id2', ''),
+                content=request.data.get('content', ''),
+                section=request.data.get('section', ''),
+                reason=request.data.get('reason', '') or 'User merge via /memory page.',
+                source=MemoryAuditSource.USER_EDIT,
+            )
+        except ValueError as exc:
+            raise ValidationError({'content': str(exc)}) from exc
+        except MemoryItemNotFoundError as exc:
+            raise ValidationError({'short_id': str(exc)}) from exc
+        return Response(_serialise_memory_item(item))
+
+    @action(detail=False, methods=['delete'])
+    def wipe_all(self, request, pk=None):
+        character, _ = self._memory(request, pk)
+        deleted = CharacterLongTermMemory.wipe(character)
+        return Response({'deleted': deleted})
+
+
+def _serialise_memory_item(item):
+    return {
+        'short_id': item.short_id,
+        'section': item.section,
+        'description': item.description,
+        'description_history': list(item.description_history or []),
+        'created_at': item.created_at.isoformat() if item.created_at else None,
+        'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+class MessageViewSet(viewsets.ModelViewSet):
+    queryset = Message.objects.none()
+    permission_classes = [IsAuthenticated]
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return MessageCreateSerializer
+        return MessageSerializer
+    
+    def get_queryset(self):
+        queryset = Message.objects.filter(chat_session__user=self.request.user).prefetch_related('attachments').order_by('timestamp')
+        chat_session_id = self.request.query_params.get('chat_session_id')
+        if chat_session_id:
+            queryset = queryset.filter(chat_session_id=chat_session_id)
+        return queryset
+    
+    def perform_create(self, serializer):
+        chat_session_id = self.request.data.get('chat_session_id')
+        if not chat_session_id:
+            return Response(
+                {'error': 'chat_session_id is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            user = self.request.user
+            
+            chat_session = ChatSession.objects.get(
+                id=chat_session_id,
+                user=user
+            )
+            serializer.save(chat_session=chat_session)
+        except ChatSession.DoesNotExist:
+            return Response(
+                {'error': 'Chat session not found or access denied'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+class ChatViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['post'])
+    def send_message(self, request):
+        try:
+            chat_session, character, user_message, generate_greeting = self._prepare_chat_turn(request)
+            result = generate_ai_response(
+                user_message.id if user_message else None,
+                character.id,
+                generate_greeting=generate_greeting,
+                chat_session_id=chat_session.id,
+            )
+
+            if not result.get('success'):
+                return Response(
+                    {'error': result.get('error', 'Failed to generate AI response')},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            ai_message = Message.objects.get(id=result['message_id'])
+            payload = {
+                'ai_message': _message_serializer(ai_message, request).data,
+                'chat_session_id': chat_session.id,
+            }
+            if user_message:
+                payload['user_message'] = _message_serializer(user_message, request).data
+            return Response(payload)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Character.DoesNotExist:
+            return Response({'error': 'Character not found'}, status=status.HTTP_404_NOT_FOUND)
+        except ChatSession.DoesNotExist:
+            return Response({'error': 'Chat session not found or access denied'}, status=status.HTTP_404_NOT_FOUND)
+        except ModelConfiguration.DoesNotExist:
+            return Response({'error': 'Model configuration not found or access denied'}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=False, methods=['post'])
+    def stream_message(self, request):
+        try:
+            chat_session, character, user_message, generate_greeting = self._prepare_chat_turn(request)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Character.DoesNotExist:
+            return Response({'error': 'Character not found'}, status=status.HTTP_404_NOT_FOUND)
+        except ChatSession.DoesNotExist:
+            return Response({'error': 'Chat session not found or access denied'}, status=status.HTTP_404_NOT_FOUND)
+        except ModelConfiguration.DoesNotExist:
+            return Response({'error': 'Model configuration not found or access denied'}, status=status.HTTP_404_NOT_FOUND)
+
+        def event_stream():
+            yield self._serialize_stream_event({
+                'type': 'session',
+                'chat_session_id': chat_session.id,
+                'user_message': _message_serializer(user_message, request).data if user_message else None,
+                'is_greeting': generate_greeting,
+            })
+
+            try:
+                for event in stream_ai_response(
+                    chat_session=chat_session,
+                    character=character,
+                    user_message=user_message,
+                    generate_greeting=generate_greeting,
+                ):
+                    yield self._serialize_stream_event(event)
+            except Exception as exc:
+                logger.exception("Streaming response failed for session %s", chat_session.id)
+                yield self._serialize_stream_event({
+                    'type': 'error',
+                    'error': str(exc),
+                })
+
+        return StreamingHttpResponse(event_stream(), content_type='application/x-ndjson')
+
+    def _prepare_chat_turn(self, request):
+        user = request.user
+        message_content = (request.data.get('message') or '').strip()
+        character_id = request.data.get('character_id')
+        chat_session_id = request.data.get('chat_session_id')
+        start_conversation = self._parse_bool(request.data.get('start_conversation', False))
+        attachments = list(request.FILES.getlist('attachments'))
+        if not attachments:
+            legacy_attachment = request.FILES.get('attachment')
+            if legacy_attachment:
+                attachments = [legacy_attachment]
+
+        if not character_id:
+            raise ValueError('character_id is required')
+
+        if not start_conversation and not message_content and not attachments:
+            raise ValueError('message or attachment is required')
+
+        attachment_payloads = []
+        for index, attachment in enumerate(attachments):
+            attachment_kind, attachment_mime_type = guess_attachment_kind(attachment)
+            validate_attachment_size(attachment, attachment_kind)
+            attachment_text_content = ''
+            if attachment_kind == AttachmentKind.TEXT:
+                attachment_text_content = extract_text_attachment_content(attachment)
+            attachment_payloads.append({
+                'file': attachment,
+                'attachment_name': attachment.name or '',
+                'attachment_kind': attachment_kind,
+                'attachment_mime_type': attachment_mime_type,
+                'attachment_text_content': attachment_text_content,
+                'sort_order': index,
+            })
+
+        character = Character.objects.get(id=character_id, created_by=user)
+        _get_required_model_config(user)
+
+        if chat_session_id:
+            chat_session = ChatSession.objects.get(
+                id=chat_session_id,
+                user=user,
+                character=character,
+            )
+        else:
+            chat_session = ChatSession.objects.create(
+                user=user,
+                character=character,
+                title=f"Chat with {character.name}",
+            )
+
+        has_existing_messages = chat_session.messages.exists()
+        if start_conversation and has_existing_messages:
+            raise ValueError('This conversation has already started')
+
+        generate_greeting = start_conversation or not has_existing_messages
+        user_message = None
+        if not generate_greeting:
+            user_message = Message.objects.create(
+                chat_session=chat_session,
+                role='user',
+                content=message_content,
+                character=character,
+            )
+            created_attachments = []
+            for payload in attachment_payloads:
+                created_attachments.append(
+                    MessageAttachment.objects.create(
+                        message=user_message,
+                        file=payload['file'],
+                        attachment_name=payload['attachment_name'],
+                        attachment_mime_type=payload['attachment_mime_type'],
+                        attachment_kind=payload['attachment_kind'],
+                        attachment_text_content=payload['attachment_text_content'],
+                        sort_order=payload['sort_order'],
+                    )
+                )
+
+            if created_attachments:
+                primary_attachment = created_attachments[0]
+                Message.objects.filter(pk=user_message.pk).update(
+                    attachment=primary_attachment.file.name,
+                    attachment_name=primary_attachment.attachment_name,
+                    attachment_mime_type=primary_attachment.attachment_mime_type,
+                    attachment_kind=primary_attachment.attachment_kind,
+                    attachment_text_content=primary_attachment.attachment_text_content,
+                )
+                user_message.refresh_from_db()
+            chat_session.save(update_fields=['updated_at'])
+
+        return chat_session, character, user_message, generate_greeting
+
+    def _parse_bool(self, value):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).lower() in {'1', 'true', 'yes', 'on'}
+
+    def _serialize_stream_event(self, payload):
+        return json.dumps(payload, ensure_ascii=False) + '\n'

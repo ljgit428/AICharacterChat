@@ -1,0 +1,24 @@
+# Ignore development notes folder
+dev_notes/
+
+# Ignore temporary cleanup script
+clean_comments.py
+
+# Local test artifacts and transient UI verification outputs
+tmp_Photos.sqlite
+tmp_ui_screenshots/
+frontend/logs/
+step*.png
+
+# One-off PowerShell diagnostics and cleanup scripts (defender, orphan chrome, IO scan)
+tmp_*.ps1
+
+# Throwaway browser-test scripts and their outputs
+frontend/scripts/
+frontend/test-results/
+
+# Throwaway source material dropped at the repo root for ad-hoc testing
+test/
+
+# Leftover from a manual login via curl/python during debugging
+backend/cookies.txt

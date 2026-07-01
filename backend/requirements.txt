@@ -1,0 +1,13 @@
+Django==5.2.5
+djangorestframework==3.16.1
+psycopg2-binary==2.9.10
+python-dotenv==1.1.1
+django-environ==0.12.0
+celery==5.5.3
+redis==6.4.0
+requests==2.32.3
+django-cors-headers==4.4.0
+google-generativeai==0.8.3
+pydantic==2.10.6
+strawberry-graphql-django==0.46.0
+strawberry-graphql==0.235.1
