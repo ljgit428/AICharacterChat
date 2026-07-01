@@ -18,8 +18,10 @@ import {
   Search,
   X,
   FolderTree,
-  PanelRightOpen,
   Database,
+  Brain,
+  Globe,
+  LogOut,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
@@ -27,9 +29,13 @@ import ChatInterface from '@/components/ChatInterface';
 import ModelApiSettingsPanel from '@/components/ModelApiSettingsPanel';
 import UserSettingsPanel from '@/components/UserSettingsPanel';
 import SoulPanel from '@/components/SoulPanel';
+import MemoryPanel from '@/components/MemoryPanel';
+import ResearchPanel from '@/components/ResearchPanel';
 import { useI18n } from '@/i18n/provider';
 import { clearChat } from '@/store/chatSlice';
-import { apiService } from '@/utils/api';
+import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
+
+type RightPanelKind = 'soul' | 'memory' | 'research';
 import { ChatSession, ModelConfig, UserProfile, WebSearchConfig } from '@/types';
 import { APP_NAME, APP_VERSION } from '@/constants';
 
@@ -48,7 +54,8 @@ function AIStudioLayoutContent() {
   const { setLocale, messages, formatDate, formatTime } = useI18n();
   const [currentView, setCurrentView] = useState<ViewState>('playground');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
+  const [rightPanelKind, setRightPanelKind] = useState<RightPanelKind>('soul');
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [isResizingRightPanel, setIsResizingRightPanel] = useState(false);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
@@ -66,6 +73,7 @@ function AIStudioLayoutContent() {
   const [webSearchConfigError, setWebSearchConfigError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
+  const [authTokenPresent, setAuthTokenPresent] = useState(false);
 
   const [historyPage, setHistoryPage] = useState(1);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
@@ -87,6 +95,12 @@ function AIStudioLayoutContent() {
       router.replace('/');
     }
   }, [autoSelectId, dispatch, router]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setAuthTokenPresent(Boolean(getAuthToken()));
+    }
+  }, []);
 
   const formatChatSessions = useCallback((sessions: ChatSession[]) => {
     return sessions.map((session) => {
@@ -268,6 +282,24 @@ function AIStudioLayoutContent() {
 
   const defaultModelConfigId = modelConfigs.find((config) => config.isDefault)?.id || null;
   const hasModelConfigs = modelConfigs.length > 0;
+
+  const isCharacterInPlayground = Boolean(selectedCharacterId) && currentView === 'playground';
+
+  const handleRightPanelIconClick = (kind: RightPanelKind) => {
+    if (isRightPanelOpen && rightPanelKind === kind) {
+      setIsRightPanelOpen(false);
+      return;
+    }
+    setRightPanelKind(kind);
+    setIsRightPanelOpen(true);
+  };
+
+  const handleLogout = () => {
+    removeAuthToken();
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+  };
 
   const openModelSettings = () => {
     setCurrentView('model_settings');
@@ -463,14 +495,16 @@ function AIStudioLayoutContent() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsRightPanelOpen((prev) => !prev)}
-                className="hidden rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900 lg:flex"
-                title="Toggle right panel"
-              >
-                <PanelRightOpen size={18} />
-              </button>
+              {authTokenPresent && (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="hidden rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900 lg:flex"
+                  title={messages.auth.logout}
+                >
+                  <LogOut size={18} />
+                </button>
+              )}
               <div className="rounded-full bg-white/80 px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">{APP_VERSION}</div>
             </div>
           </header>
@@ -496,26 +530,81 @@ function AIStudioLayoutContent() {
               <span className="mx-auto h-10 w-px bg-slate-300" />
             </button>
           )}
-          {selectedCharacterId && currentView === 'playground' ? (
-            <div className="h-full p-4">
-              <SoulPanel
-                characterId={selectedCharacterId}
-                refreshKey={soulRefreshKey}
-                isOpen={isRightPanelOpen}
-                onToggle={() => setIsRightPanelOpen((prev) => !prev)}
-                className="h-full"
-              />
-            </div>
-          ) : (
-            <div className="h-full p-4">
-              <WorkspaceRightPanel
-                isOpen={isRightPanelOpen}
-                onToggle={() => setIsRightPanelOpen((prev) => !prev)}
-                hasSelectedCharacter={Boolean(selectedCharacterId)}
-                currentView={currentView}
-              />
-            </div>
-          )}
+          {(() => {
+            if (!isCharacterInPlayground) {
+              return (
+                <div className="h-full p-4">
+                  <WorkspaceRightPanel
+                    isOpen={isRightPanelOpen}
+                    onToggle={() => setIsRightPanelOpen((prev) => !prev)}
+                    hasSelectedCharacter={Boolean(selectedCharacterId)}
+                    currentView={currentView}
+                  />
+                </div>
+              );
+            }
+
+            if (isRightPanelOpen) {
+              return (
+                <div className="h-full p-4">
+                  {rightPanelKind === 'soul' ? (
+                    <SoulPanel
+                      characterId={selectedCharacterId as string}
+                      refreshKey={soulRefreshKey}
+                      isOpen
+                      onToggle={() => setIsRightPanelOpen(false)}
+                      className="h-full"
+                    />
+                  ) : rightPanelKind === 'memory' ? (
+                    <MemoryPanel
+                      characterId={selectedCharacterId as string}
+                      chatSessionId={selectedSessionId}
+                      refreshKey={soulRefreshKey}
+                      onClose={() => setIsRightPanelOpen(false)}
+                    />
+                  ) : (
+                    <ResearchPanel onClose={() => setIsRightPanelOpen(false)} />
+                  )}
+                </div>
+              );
+            }
+
+            const soulActive = rightPanelKind === 'soul';
+            const memoryActive = rightPanelKind === 'memory';
+            const researchActive = rightPanelKind === 'research';
+            const launcherBaseClass = 'flex h-10 w-10 items-center justify-center rounded-2xl transition-colors';
+            const launcherActiveClass = 'bg-slate-900 text-white hover:bg-slate-800';
+            const launcherMutedClass = 'bg-white/70 text-slate-500 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900';
+
+            return (
+              <aside className="flex h-full w-full flex-shrink-0 flex-col items-center gap-3 rounded-[1.75rem] border border-slate-200/80 bg-white/75 px-2 py-3 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
+                <button
+                  type="button"
+                  onClick={() => handleRightPanelIconClick('soul')}
+                  className={`${launcherBaseClass} ${soulActive ? launcherActiveClass : launcherMutedClass}`}
+                  title={messages.chat.toggleSoulPanel}
+                >
+                  <FolderTree className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRightPanelIconClick('memory')}
+                  className={`${launcherBaseClass} ${memoryActive ? launcherActiveClass : launcherMutedClass}`}
+                  title={messages.chat.toggleMemoryPanel}
+                >
+                  <Brain className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRightPanelIconClick('research')}
+                  className={`${launcherBaseClass} ${researchActive ? launcherActiveClass : launcherMutedClass}`}
+                  title={messages.chat.toggleResearchPanel}
+                >
+                  <Globe className="h-5 w-5" />
+                </button>
+              </aside>
+            );
+          })()}
         </div>
       </div>
     </div>

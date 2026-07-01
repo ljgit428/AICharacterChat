@@ -5,13 +5,14 @@ import { useRouter } from "next/navigation";
 import { useI18n } from "@/i18n/provider";
 import { apiService } from "@/utils/api";
 import { MemorySnapshot } from "@/types";
-import { Database, Eye, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { Database, Eye, Loader2, RefreshCw, Sparkles, X } from "lucide-react";
 
 interface MemoryPanelProps {
   characterId: string;
   chatSessionId?: string | null;
   refreshKey?: string;
   onPrivateModeChanged?: (isPrivateMode: boolean) => void;
+  onClose?: () => void;
 }
 
 function safeError(value: unknown, fallback: string): string {
@@ -25,6 +26,7 @@ export default function MemoryPanel({
   chatSessionId,
   refreshKey,
   onPrivateModeChanged,
+  onClose,
 }: MemoryPanelProps) {
   const { messages: copy } = useI18n();
   const router = useRouter();
@@ -135,6 +137,16 @@ export default function MemoryPanel({
             >
               <Eye size={14} />
             </button>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-900"
+                title={copy.memory.closePanel}
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
         </div>
 

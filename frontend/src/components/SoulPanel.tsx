@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiService } from '@/utils/api';
 import { MemoryExplorerEntry, MemoryExplorerFile } from '@/types';
-import { ChevronLeft, FileCode2, FileImage, Folder, FolderTree, Link2, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { FileCode2, FileImage, Folder, FolderTree, Link2, RefreshCw, Trash2, Upload, X } from 'lucide-react';
 import { useI18n } from '@/i18n/provider';
 
 interface SoulPanelProps {
@@ -244,12 +244,6 @@ export default function SoulPanel({
         >
           <FolderTree className="h-5 w-5" />
         </button>
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
-          <Upload className="h-4 w-4" />
-        </div>
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
-          <FileCode2 className="h-4 w-4" />
-        </div>
       </aside>
     );
   }
@@ -281,7 +275,7 @@ export default function SoulPanel({
             className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-900"
             title={messages.chat.toggleSoulPanel}
           >
-            <ChevronLeft className={`h-4 w-4 transition-transform ${isMobile ? 'rotate-180' : ''}`} />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
