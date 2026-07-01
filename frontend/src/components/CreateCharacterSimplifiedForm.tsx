@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, gql } from '@apollo/client';
 import { UPLOAD_API_URL } from '@/constants';
 import { useI18n } from '@/i18n/provider';
+import AvatarCropper from '@/components/AvatarCropper';
 import {
   Upload,
   Sparkles,
@@ -456,6 +457,7 @@ export default function CreateCharacterSimplifiedForm({
   const [autoTargetName, setAutoTargetName] = useState('');
   const [systemPromptPreview, setSystemPromptPreview] = useState('');
   const [uploadingTarget, setUploadingTarget] = useState<'avatar' | 'background' | null>(null);
+  const [avatarCropSrc, setAvatarCropSrc] = useState<string | null>(null);
   const [aiFilledFields, setAiFilledFields] = useState<Set<AiDraftKey>>(new Set());
   const [aiEditedFields, setAiEditedFields] = useState<Set<AiDraftKey>>(new Set());
   const [preAiSnapshot, setPreAiSnapshot] = useState<Partial<FormState> | null>(null);
@@ -633,19 +635,39 @@ export default function CreateCharacterSimplifiedForm({
     }
   }, [copy.characterForm.uploadFailedAlert, uploadSingleFile]);
 
-  const handleFileInputChange = (
-    e: React.ChangeEvent<HTMLInputElement>,
-    target: 'avatar' | 'background'
-  ) => {
-    const files = Array.from(e.target.files || []);
-    if (!files.length) {
+  const handleAvatarFileSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) {
       return;
     }
+    if (!file.type.startsWith('image/')) {
+      alert(copy.avatarCropper.mustBeImage);
+      return;
+    }
+    // Revoke any previously held object URL to avoid leaking blobs if the
+    // user picks a new file while the cropper is already open.
+    setAvatarCropSrc((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous);
+      }
+      return URL.createObjectURL(file);
+    });
+  };
 
-    if (target === 'background') {
-      void processBackgroundFilesUpload(files);
-    } else if (files[0]) {
-      void processFileUpload(files[0], target);
+  const handleAvatarCropApply = async (blob: Blob) => {
+    const croppedFile = new File([blob], 'avatar.jpg', { type: 'image/jpeg' });
+    if (avatarCropSrc) {
+      URL.revokeObjectURL(avatarCropSrc);
+      setAvatarCropSrc(null);
+    }
+    await processFileUpload(croppedFile, 'avatar');
+  };
+
+  const handleAvatarCropCancel = () => {
+    if (avatarCropSrc) {
+      URL.revokeObjectURL(avatarCropSrc);
+      setAvatarCropSrc(null);
     }
   };
 
@@ -832,9 +854,17 @@ export default function CreateCharacterSimplifiedForm({
   const fieldHighlightClass = (key: AiDraftKey) =>
     isHighlighted(key) ? 'ring-2 ring-violet-300 transition-shadow' : '';
 
-  return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <div className="mb-8 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+  return (      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+        {avatarCropSrc && (
+          <AvatarCropper
+            imageSrc={avatarCropSrc}
+            copy={copy.avatarCropper}
+            shape="round"
+            onCancel={handleAvatarCropCancel}
+            onApply={handleAvatarCropApply}
+          />
+        )}
+        <div className="mb-8 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div className="flex items-center">
           {isEditMode && (
             <button
@@ -889,7 +919,7 @@ export default function CreateCharacterSimplifiedForm({
                   type="file"
                   className="hidden"
                   accept="image/*"
-                  onChange={(e) => handleFileInputChange(e, 'avatar')}
+                  onChange={handleAvatarFileSelected}
                 />
               </div>
 

@@ -7,6 +7,7 @@ import { apiService } from '@/utils/api';
 import { MEDIA_BASE_URL } from '@/constants';
 import { SUPPORTED_UI_LOCALES, type SupportedLocale } from '@/i18n/messages';
 import { useI18n } from '@/i18n/provider';
+import AvatarCropper from '@/components/AvatarCropper';
 import {
   AlertCircle,
   Clock3,
@@ -141,6 +142,7 @@ export default function UserSettingsPanel({
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [browserTimezone, setBrowserTimezone] = useState('');
+  const [avatarCropSrc, setAvatarCropSrc] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -167,15 +169,38 @@ export default function UserSettingsPanel({
 
   const handleAvatarUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
+    event.target.value = '';
     if (!file) {
       return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setError(messages.avatarCropper.mustBeImage);
+      return;
+    }
+
+    // Revoke any previously held object URL to avoid leaking blobs if the
+    // user picks a new file while the cropper is already open.
+    setAvatarCropSrc((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous);
+      }
+      return URL.createObjectURL(file);
+    });
+  };
+
+  const handleAvatarCropApply = async (blob: Blob) => {
+    const croppedFile = new File([blob], 'avatar.jpg', { type: 'image/jpeg' });
+    if (avatarCropSrc) {
+      URL.revokeObjectURL(avatarCropSrc);
+      setAvatarCropSrc(null);
     }
 
     setIsSaving(true);
     setError(null);
 
     try {
-      const response = await apiService.uploadImage(file);
+      const response = await apiService.uploadImage(croppedFile);
       if (response.error || !response.data?.uri) {
         throw new Error(response.error || messages.user.saveUserSettingsFailed);
       }
@@ -188,7 +213,13 @@ export default function UserSettingsPanel({
       setError(uploadError instanceof Error ? uploadError.message : messages.user.saveUserSettingsFailed);
     } finally {
       setIsSaving(false);
-      event.target.value = '';
+    }
+  };
+
+  const handleAvatarCropCancel = () => {
+    if (avatarCropSrc) {
+      URL.revokeObjectURL(avatarCropSrc);
+      setAvatarCropSrc(null);
     }
   };
 
@@ -231,6 +262,15 @@ export default function UserSettingsPanel({
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50">
+      {avatarCropSrc && (
+        <AvatarCropper
+          imageSrc={avatarCropSrc}
+          copy={messages.avatarCropper}
+          shape="round"
+          onCancel={handleAvatarCropCancel}
+          onApply={handleAvatarCropApply}
+        />
+      )}
       <div className="mx-auto max-w-6xl px-6 py-8 md:px-10">
         <div className="mb-8">
           <h2 className="text-2xl font-bold text-slate-900">{messages.user.title}</h2>

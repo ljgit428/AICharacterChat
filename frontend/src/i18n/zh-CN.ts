@@ -529,4 +529,13 @@ export const zhCNMessages = {
     selectTwoToMerge: "先选择两条同分区条目",
     charCount: (count: number) => `${count} / 200 字`,
   },
+  avatarCropper: {
+    title: "编辑头像",
+    hint: "拖动图片调整位置，拖动滑块或滚动鼠标缩放。",
+    zoomLabel: "缩放",
+    cancel: "取消",
+    apply: "应用",
+    invalidImage: "处理图片时出错，请重试。",
+    mustBeImage: "请选择图片文件。",
+  },
 } as const;

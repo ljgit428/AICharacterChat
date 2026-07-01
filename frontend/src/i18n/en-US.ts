@@ -540,4 +540,13 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     selectTwoToMerge: "Pick two entries in the same section first",
     charCount: (count: number) => `${count} / 200 chars`,
   },
+  avatarCropper: {
+    title: "Edit Avatar",
+    hint: "Drag to reposition, use the slider or scroll to zoom.",
+    zoomLabel: "Zoom",
+    cancel: "Cancel",
+    apply: "Apply",
+    invalidImage: "Failed to process the image. Please try again.",
+    mustBeImage: "Please select an image file.",
+  },
 };
