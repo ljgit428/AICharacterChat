@@ -47,7 +47,9 @@ export function getAttachmentAvailability(
   return result;
 }
 
-const AUDIO_FILE_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.webm'];
+// 与后端 guess_attachment_kind 对齐：.webm 是视频容器（后端经 mimetypes 判为 video/webm）
+const VIDEO_FILE_EXTENSIONS = ['.mp4', '.webm', '.mov', '.mkv', '.avi', '.m4v'];
+const AUDIO_FILE_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac'];
 
 export function classifyAttachmentFile(file: File): AttachmentKind | null {
   const mimeType = file.type.toLowerCase();
@@ -57,7 +59,10 @@ export function classifyAttachmentFile(file: File): AttachmentKind | null {
     return 'image';
   }
 
-  if (mimeType.startsWith('video/')) {
+  if (
+    mimeType.startsWith('video/') ||
+    VIDEO_FILE_EXTENSIONS.some((extension) => fileName.endsWith(extension))
+  ) {
     return 'video';
   }
 

@@ -41,9 +41,17 @@ def _get_owned_session(user, session_id):
 
 
 def _get_required_user_model_config(user):
-    model_config = ModelRoleAssignment.get_role_config(user, ModelRole.TEXT) or (
-        ModelConfiguration.objects.filter(user=user).order_by('id').first()
-    )
+    model_config = ModelRoleAssignment.get_role_config(user, ModelRole.TEXT)
+    if not model_config:
+        # 正常流程不会到这里（首个配置自动分配 text、PUT 禁止清空/跳过）；
+        # 触发即数据状态异常，回退并留日志。
+        model_config = ModelConfiguration.objects.filter(user=user).order_by('id').first()
+        if model_config:
+            logger.warning(
+                'User %s has model configs but no text role assignment; falling back to config %s',
+                user.id,
+                model_config.id,
+            )
     if not model_config:
         raise ValueError("Please configure your own model API before using this feature.")
 

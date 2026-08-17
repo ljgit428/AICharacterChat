@@ -41,6 +41,7 @@ from chat.soul import (
     read_memory_explorer_file,
 )
 from chat.tasks import (
+    MEDIA_ANALYSIS_MAX_BYTES,
     _build_memory_tool_specs,
     _build_provider_messages,
     _build_search_query,
@@ -48,7 +49,9 @@ from chat.tasks import (
     _build_system_prompt,
     _build_anthropic_request_messages,
     _convert_tools_to_anthropic,
+    _generate_anthropic_response,
     _generate_openai_compatible_response,
+    _get_or_upload_generativeai_file,
     build_research_context,
 )
 
@@ -1894,6 +1897,101 @@ class ChatAttachmentTests(ModelConfigTestMixin, TestCase):
         self.assertIn('A timelapse of a city at dusk.', video_content)
         self.assertEqual(video_message.attachment_kind, 'video')
 
+    @patch('chat.tasks._upload_generativeai_file')
+    @patch('chat.tasks.genai.get_file')
+    def test_cached_gemini_file_skips_reupload(self, mock_get_file, mock_upload):
+        message = Message.objects.create(
+            chat_session=self.session,
+            role='user',
+            content='Describe this image.',
+            character=self.character,
+        )
+        attachment = MessageAttachment.objects.create(
+            message=message,
+            file=SimpleUploadedFile('scene.png', b'png', content_type='image/png'),
+            attachment_name='scene.png',
+            attachment_mime_type='image/png',
+            attachment_kind='image',
+            gemini_file_name='files/cached-123',
+        )
+
+        result = _get_or_upload_generativeai_file(attachment, attachment.file.path, 'scene.png', 'key')
+
+        self.assertIs(result, mock_get_file.return_value)
+        mock_upload.assert_not_called()
+
+    @patch('chat.tasks._upload_generativeai_file')
+    @patch('chat.tasks.genai.get_file', side_effect=RuntimeError('file not found'))
+    def test_stale_gemini_file_cache_triggers_reupload(self, mock_get_file, mock_upload):
+        class UploadedFileStub:
+            name = 'files/fresh-456'
+
+        mock_upload.return_value = UploadedFileStub()
+
+        message = Message.objects.create(
+            chat_session=self.session,
+            role='user',
+            content='Describe this image.',
+            character=self.character,
+        )
+        attachment = MessageAttachment.objects.create(
+            message=message,
+            file=SimpleUploadedFile('scene.png', b'png', content_type='image/png'),
+            attachment_name='scene.png',
+            attachment_mime_type='image/png',
+            attachment_kind='image',
+            gemini_file_name='files/stale-1',
+        )
+
+        result = _get_or_upload_generativeai_file(attachment, attachment.file.path, 'scene.png', 'key')
+
+        self.assertIs(result, mock_upload.return_value)
+        mock_get_file.assert_called_once_with('files/stale-1')
+        attachment.refresh_from_db()
+        self.assertEqual(attachment.gemini_file_name, 'files/fresh-456')
+
+    @patch('chat.tasks._request_gemini_media_analysis', return_value='A street market at dusk.')
+    def test_gemini_video_slot_analyzes_files_over_inline_limit(self, mock_analysis):
+        ModelConfiguration.objects.create(
+            user=self.user,
+            name='Text Only',
+            provider='openai_compatible',
+            model_name='plain-text-model',
+            api_key='secret',
+        )
+        self.create_media_model_config(
+            ModelRole.VIDEO,
+            provider='gemini',
+            model_name='gemini-2.5-flash',
+            api_key='gemini-key',
+            base_url='',
+        )
+
+        Message.objects.create(
+            chat_session=self.session,
+            role='user',
+            content='Summarize this video.',
+            character=self.character,
+            attachment=SimpleUploadedFile(
+                'long.mp4',
+                b'x' * (MEDIA_ANALYSIS_MAX_BYTES + 1),
+                content_type='video/mp4',
+            ),
+            attachment_name='long.mp4',
+            attachment_mime_type='video/mp4',
+            attachment_kind='video',
+        )
+
+        _runtime_config, formatted_history, _ = _build_provider_messages(
+            chat_session=self.session,
+            character=self.character,
+            generate_greeting=False,
+            research_context=None,
+        )
+
+        mock_analysis.assert_called_once()
+        self.assertIn('A street market at dusk.', formatted_history[-1]['content'])
+
     @patch('chat.tasks._request_openai_media_analysis')
     def test_media_analysis_cache_prevents_repeat_calls(self, mock_analysis):
         mock_analysis.return_value = 'A red umbrella in the rain.'
@@ -2546,6 +2644,51 @@ class ModelRoleAssignmentApiTests(ModelConfigTestMixin, TestCase):
             ModelRoleAssignment.objects.filter(user=self.user, role=ModelRole.TEXT).exists()
         )
 
+    def test_put_rejects_media_roles_without_any_text_assignment(self):
+        config = ModelConfiguration.objects.create(
+            user=self.user,
+            name='Lonely Model',
+            provider='openai_compatible',
+            model_name='some-model',
+            api_key='key',
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'image': config.id}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('text model is required', response.json()['error'])
+        self.assertFalse(
+            ModelRoleAssignment.objects.filter(user=self.user, role=ModelRole.IMAGE).exists()
+        )
+
+    def test_first_created_config_auto_assigns_text_role(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            '/api/model-configs/',
+            data=json.dumps({
+                'name': 'First Config',
+                'provider': 'openai_compatible',
+                'model_name': 'gpt-4.1-mini',
+                'api_key': 'secret',
+                'base_url': 'https://example.com/v1',
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        config = ModelConfiguration.objects.get(user=self.user, name='First Config')
+        self.assertTrue(
+            ModelRoleAssignment.objects.filter(
+                user=self.user, role=ModelRole.TEXT, model_config=config
+            ).exists()
+        )
+
     def test_requires_authentication(self):
         response = self.client.get('/api/model-roles/')
         self.assertEqual(response.status_code, 401)
@@ -2564,12 +2707,16 @@ class ModelCatalogProbeTests(TestCase):
         self.user = User.objects.create_user(username='probe-owner', password='password123')
 
     def test_probe_requires_authentication(self):
-        response = self.client.get('/api/model-catalog/probe/')
+        response = self.client.post('/api/model-catalog/probe/')
         self.assertEqual(response.status_code, 401)
 
     def test_probe_rejects_unknown_provider(self):
         self.client.force_login(self.user)
-        response = self.client.get('/api/model-catalog/probe/', {'provider': 'unknown'})
+        response = self.client.post(
+            '/api/model-catalog/probe/',
+            data=json.dumps({'provider': 'unknown'}),
+            content_type='application/json',
+        )
         self.assertEqual(response.status_code, 400)
         self.assertIn('Unsupported provider', response.json()['error'])
 
@@ -2581,9 +2728,10 @@ class ModelCatalogProbeTests(TestCase):
         }
         self.client.force_login(self.user)
 
-        response = self.client.get(
+        response = self.client.post(
             '/api/model-catalog/probe/',
-            {'provider': 'openai_compatible', 'base_url': 'https://example.com/v1', 'api_key': 'secret'},
+            data=json.dumps({'provider': 'openai_compatible', 'base_url': 'https://example.com/v1', 'api_key': 'secret'}),
+            content_type='application/json',
         )
 
         self.assertEqual(response.status_code, 200)
@@ -2603,7 +2751,11 @@ class ModelCatalogProbeTests(TestCase):
         }
         self.client.force_login(self.user)
 
-        response = self.client.get('/api/model-catalog/probe/', {'provider': 'gemini', 'api_key': 'secret'})
+        response = self.client.post(
+            '/api/model-catalog/probe/',
+            data=json.dumps({'provider': 'gemini', 'api_key': 'secret'}),
+            content_type='application/json',
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['models'], ['gemini-2.0-flash'])
@@ -2611,7 +2763,11 @@ class ModelCatalogProbeTests(TestCase):
     @patch('chat.model_catalog.requests.get')
     def test_probe_gemini_requires_api_key(self, mock_get):
         self.client.force_login(self.user)
-        response = self.client.get('/api/model-catalog/probe/', {'provider': 'gemini'})
+        response = self.client.post(
+            '/api/model-catalog/probe/',
+            data=json.dumps({'provider': 'gemini'}),
+            content_type='application/json',
+        )
         self.assertEqual(response.status_code, 400)
         mock_get.assert_not_called()
 
@@ -2621,7 +2777,11 @@ class ModelCatalogProbeTests(TestCase):
         mock_get.return_value.json.return_value = {'data': [{'id': 'claude-sonnet-4-5'}]}
         self.client.force_login(self.user)
 
-        response = self.client.get('/api/model-catalog/probe/', {'provider': 'anthropic', 'api_key': 'secret'})
+        response = self.client.post(
+            '/api/model-catalog/probe/',
+            data=json.dumps({'provider': 'anthropic', 'api_key': 'secret'}),
+            content_type='application/json',
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['models'], ['claude-sonnet-4-5'])
@@ -2690,6 +2850,7 @@ class AnthropicMessageConversionTests(TestCase):
         self.assertEqual(messages[0]['content'], [
             {'type': 'text', 'text': 'look'},
             {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'QUJD'}},
+            {'type': 'text', 'text': '[Attached image skipped: image/tiff images are not supported by this provider]'},
         ])
 
     def test_tools_are_converted_to_anthropic_schema(self):
@@ -2700,3 +2861,84 @@ class AnthropicMessageConversionTests(TestCase):
         self.assertEqual(list_tool['name'], 'list_memory_files')
         self.assertIn('path_prefix', list_tool['input_schema']['properties'])
         self.assertNotIn('function', list_tool)
+
+    def test_tool_blocks_survive_round_trip(self):
+        tool_use = {'type': 'tool_use', 'id': 'toolu_1', 'name': 'list_memory_files', 'input': {'path_prefix': 'wiki'}}
+        tool_result = {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': '{"entries": []}'}
+
+        _system, messages = _build_anthropic_request_messages([
+            {'role': 'user', 'content': 'read memory'},
+            {'role': 'assistant', 'content': [tool_use]},
+            {'role': 'user', 'content': [tool_result]},
+        ])
+
+        self.assertEqual(messages[1]['content'], [tool_use])
+        self.assertEqual(messages[2]['content'], [tool_result])
+
+    def test_native_image_blocks_pass_through(self):
+        image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'QUJD'}}
+
+        _system, messages = _build_anthropic_request_messages([
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'ref'}, image_block]},
+        ])
+
+        self.assertEqual(messages[0]['content'], [{'type': 'text', 'text': 'ref'}, image_block])
+
+    def test_consecutive_same_role_messages_are_merged(self):
+        _system, messages = _build_anthropic_request_messages([
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': '[Character reference image analysis]'},
+            {'role': 'user', 'content': 'Hello'},
+        ])
+
+        self.assertEqual([message['role'] for message in messages], ['user'])
+        self.assertEqual(len(messages[0]['content']), 2)
+
+    def test_empty_content_messages_are_skipped(self):
+        _system, messages = _build_anthropic_request_messages([
+            {'role': 'user', 'content': ''},
+            {'role': 'assistant', 'content': 'Hi'},
+        ])
+
+        self.assertEqual(messages, [{'role': 'assistant', 'content': 'Hi'}])
+
+    @patch('chat.tasks._execute_local_memory_tool', return_value={'entries': []})
+    @patch('chat.tasks.requests.post')
+    def test_tool_loop_preserves_tool_use_pairing(self, mock_post, _mock_tool):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.side_effect = [
+            {'content': [
+                {'type': 'text', 'text': 'checking memory'},
+                {'type': 'tool_use', 'id': 'toolu_1', 'name': 'list_memory_files', 'input': {}},
+            ]},
+            {'content': [{'type': 'text', 'text': 'All clear.'}]},
+        ]
+
+        result = _generate_anthropic_response(
+            model_name='claude-sonnet-4-5',
+            api_key='secret',
+            messages=[{'role': 'user', 'content': 'hi'}],
+            base_url='',
+            tools=_build_memory_tool_specs(),
+            character=object(),
+        )
+
+        self.assertEqual(result, 'All clear.')
+        self.assertEqual(mock_post.call_count, 2)
+        final_messages = mock_post.call_args_list[1][1]['json']['messages']
+        self.assertTrue(any(
+            block.get('type') == 'tool_use' and block.get('id') == 'toolu_1'
+            for block in final_messages[-2]['content']
+        ))
+        self.assertTrue(any(
+            block.get('type') == 'tool_result' and block.get('tool_use_id') == 'toolu_1'
+            for block in final_messages[-1]['content']
+        ))
+        for message in final_messages:
+            blocks = message['content']
+            if isinstance(blocks, str):
+                self.assertTrue(blocks)
+                continue
+            for block in blocks:
+                if block.get('type') == 'text':
+                    self.assertTrue(block['text'])
