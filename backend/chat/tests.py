@@ -520,7 +520,7 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
         self, mock_generate_text,
     ):
         # A 5_000-char model response (e.g. a verbose prose reply) must
-        # be truncated in the error message so the AICharacterDraft
+        # be truncated in the error message so the PrisMateDraft
         # description does not blow up; the truncation marker must
         # point at the /tmp dump where the full text lives.
         self.create_model_config(name='Default Draft Model')

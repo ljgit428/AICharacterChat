@@ -7,7 +7,7 @@ from chat.models import Character, ChatSession, CharacterKnowledgeAsset
 
 
 @strawberry.type
-class AICharacterDraft:
+class PrisMateDraft:
     name: str
     description: str
     personality: str

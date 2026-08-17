@@ -78,7 +78,7 @@ This spec respects that history: one durable **per-character**
 memory anchor (no session-level summary fields), no patch lifecycle,
 but with **per-entry inline history** so reversibility still exists.
 
-### 1.4 What already exists in AICharacterChat
+### 1.4 What already exists in PrisMate
 
 - `Celery 5.5.3` on Redis is configured and `autodiscover_tasks`, but
   the chat flow calls `tasks.generate_ai_response(...)` and

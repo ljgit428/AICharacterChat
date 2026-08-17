@@ -9,7 +9,7 @@ import mimetypes
 import os
 from urllib.parse import urlparse, unquote
 
-from .types import CharacterType, ChatSessionType, CharacterInput, AICharacterDraft
+from .types import CharacterType, ChatSessionType, CharacterInput, PrisMateDraft
 from chat.attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
 from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, ModelRole, ModelRoleAssignment, UserProfile
 from chat.tasks import _extract_json_object, _generate_text
@@ -360,7 +360,7 @@ class Mutation:
         file_urls: Optional[List[str]] = None,
         text_context: Optional[str] = None,
         locale: Optional[str] = None,
-    ) -> AICharacterDraft:
+    ) -> PrisMateDraft:
         """
         Calls the user's default model configuration to analyze text and return a structured Character Draft.
         Handles local file reading for .txt/.md/.json files to support "Auto-Create" from text files.
@@ -409,7 +409,7 @@ class Mutation:
                     f"Raw model response preview: {preview or '(empty response)'}"
                 )
 
-            return AICharacterDraft(
+            return PrisMateDraft(
                 name=data.get("name", "Unknown"),
                 description=data.get("description", ""),
                 affiliation=data.get("affiliation", ""),
@@ -422,7 +422,7 @@ class Mutation:
 
         except Exception as e:
             logger.error(f"AI Generation Error: {e}")
-            return AICharacterDraft(
+            return PrisMateDraft(
                 name="Generation Failed",
                 description=f"Error generating draft: {str(e)}",
                 personality="", appearance="", affiliation="",
