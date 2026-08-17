@@ -674,7 +674,11 @@ export default function ModelApiSettingsPanel({
                     </div>
                     <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
                       <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">{messages.modelApi.webSearchProvider}</p>
-                      <p className="mt-2 text-sm font-medium text-slate-900">{webSearchConfig.provider}</p>
+                      <p className="mt-2 text-sm font-medium text-slate-900">
+                        {webSearchConfig.provider === 'tavily'
+                          ? messages.modelApi.webSearchProviderOptions.tavily
+                          : webSearchConfig.provider}
+                      </p>
                     </div>
                     <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
                       <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">{messages.modelApi.webSearchMaxResults}</p>
@@ -699,17 +703,6 @@ export default function ModelApiSettingsPanel({
                 </div>
 
                 <div className="space-y-4">
-                  <div>
-                    <label className="mb-1.5 block text-sm font-medium text-slate-700">{messages.modelApi.webSearchProvider}</label>
-                    <select
-                      value={webSearchFormState.provider}
-                      onChange={(e) => setWebSearchFormState((prev) => ({ ...prev, provider: e.target.value as 'tavily' }))}
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                    >
-                      <option value="tavily">{messages.modelApi.webSearchProviderOptions.tavily}</option>
-                    </select>
-                  </div>
-
                   <div>
                     <label className="mb-1.5 block text-sm font-medium text-slate-700">{messages.modelApi.webSearchApiKey}</label>
                     <input

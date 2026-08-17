@@ -12,7 +12,6 @@ import {
   AlertCircle,
   Clock3,
   Globe,
-  MapPinned,
   Save,
   Shield,
   Sparkles,
@@ -65,20 +64,6 @@ const DEFAULT_FORM_STATE: UserProfileFormState = {
   allowResearchProfileUpdates: false,
   blockedTopics: '',
 };
-
-function getPreferredLanguageCopy(locale: SupportedLocale) {
-  if (locale === 'en-US') {
-    return {
-      label: 'Preferred Language',
-      help: 'Used for the interface and as the default language for auto-generated prompts.',
-    };
-  }
-
-  return {
-    label: '偏好语言',
-    help: '用于界面语言，也会作为自动生成提示词时的默认语言。',
-  };
-}
 
 function getBrowserTimezone() {
   if (typeof window === 'undefined') {
@@ -137,7 +122,7 @@ export default function UserSettingsPanel({
   onRefresh,
   onOpenModelSettings,
 }: UserSettingsPanelProps) {
-  const { messages, setLocale, locale } = useI18n();
+  const { messages, setLocale } = useI18n();
   const [formState, setFormState] = useState<UserProfileFormState>(DEFAULT_FORM_STATE);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,7 +150,6 @@ export default function UserSettingsPanel({
 
   const timezonePreview = formatTimezonePreview(formState.timezone, formState.interfaceLanguage);
   const hasLocationHint = formState.shareLocation && Boolean(formState.locationLabel.trim());
-  const preferredLanguageCopy = getPreferredLanguageCopy(locale);
 
   const handleAvatarUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -422,7 +406,7 @@ export default function UserSettingsPanel({
                       </div>
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-slate-700">{preferredLanguageCopy.label}</label>
+                      <label className="mb-1.5 block text-sm font-medium text-slate-700">{messages.user.interfaceLanguage}</label>
                       <select
                         value={formState.interfaceLanguage}
                         onChange={(event) => setField('interfaceLanguage', event.target.value as SupportedLocale)}
@@ -432,7 +416,7 @@ export default function UserSettingsPanel({
                           <option key={language.value} value={language.value}>{language.nativeLabel} / {language.englishLabel}</option>
                         ))}
                       </select>
-                      <p className="mt-2 text-xs text-slate-500">{preferredLanguageCopy.help}</p>
+                      <p className="mt-2 text-xs text-slate-500">{messages.user.interfaceLanguageHelp}</p>
                     </div>
                   </div>
 
@@ -582,20 +566,6 @@ export default function UserSettingsPanel({
                     <span>{messages.user.allowResearchProfileUpdates}</span>
                   </label>
                   <p className="text-xs text-slate-500">{messages.user.allowResearchProfileUpdatesHelp}</p>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <div className="rounded-full bg-slate-100 p-2 text-slate-700">
-                    <MapPinned size={18} />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold text-slate-900">{messages.user.sessionInteractionTitle}</h3>
-                    <p className="mt-2 text-sm leading-6 text-slate-600">
-                      {messages.user.sessionInteractionDescription}
-                    </p>
-                  </div>
                 </div>
               </div>
 
