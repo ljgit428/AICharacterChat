@@ -11,7 +11,7 @@ from urllib.parse import urlparse, unquote
 
 from .types import CharacterType, ChatSessionType, CharacterInput, AICharacterDraft
 from chat.attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
-from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, UserProfile
+from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, ModelRole, ModelRoleAssignment, UserProfile
 from chat.tasks import _extract_json_object, _generate_text
 
 logger = logging.getLogger(__name__)
@@ -41,12 +41,14 @@ def _get_owned_session(user, session_id):
 
 
 def _get_required_user_model_config(user):
-    model_config = ModelConfiguration.get_default_for_user(user)
+    model_config = ModelRoleAssignment.get_role_config(user, ModelRole.TEXT) or (
+        ModelConfiguration.objects.filter(user=user).order_by('id').first()
+    )
     if not model_config:
         raise ValueError("Please configure your own model API before using this feature.")
 
-    # Gemini 路径仍必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
-    if not model_config.api_key and model_config.provider == 'gemini':
+    # Gemini/Anthropic 路径必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
+    if not model_config.api_key and model_config.provider in {'gemini', 'anthropic'}:
         raise ValueError("The default user model configuration is missing an API key.")
 
     return model_config

@@ -3,8 +3,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, RootState } from '@/types';
 import { useSelector } from 'react-redux';
-import { Expand, FileText, ImageIcon, Paperclip, Sparkles, Video, X } from 'lucide-react';
-import { AttachmentKind, AttachmentSupport, classifyAttachmentFile } from '@/utils/modelCapabilities';
+import { Expand, FileText, ImageIcon, Music, Paperclip, Sparkles, Video, X } from 'lucide-react';
+import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
 
 interface ImmersiveChatWindowProps {
@@ -13,6 +13,7 @@ interface ImmersiveChatWindowProps {
   isFirstMessage: boolean;
   currentUserLabel: string;
   attachmentSupport: AttachmentSupport;
+  localizedMediaMode?: (mode: MediaHandlingMode) => string;
 }
 
 export interface PendingAttachment {
@@ -80,6 +81,7 @@ export default function ImmersiveChatWindow({
   isFirstMessage,
   currentUserLabel,
   attachmentSupport,
+  localizedMediaMode,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -458,12 +460,17 @@ export default function ImmersiveChatWindow({
                 )}
                 {pendingAttachments.some((attachment) => attachment.kind === 'image') && (
                   <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
-                    {copy.immersiveChat.imageHandling(attachmentSupport.image)}
+                    {copy.immersiveChat.imageHandling(localizedMediaMode?.(attachmentSupport.image) || attachmentSupport.image)}
+                  </span>
+                )}
+                {pendingAttachments.some((attachment) => attachment.kind === 'audio') && (
+                  <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
+                    {copy.immersiveChat.audioHandling(localizedMediaMode?.(attachmentSupport.audio) || attachmentSupport.audio)}
                   </span>
                 )}
                 {pendingAttachments.some((attachment) => attachment.kind === 'video') && (
                   <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
-                    {copy.immersiveChat.videoHandling(attachmentSupport.video)}
+                    {copy.immersiveChat.videoHandling(localizedMediaMode?.(attachmentSupport.video) || attachmentSupport.video)}
                   </span>
                 )}
               </div>
@@ -475,7 +482,7 @@ export default function ImmersiveChatWindow({
               ref={attachmentInputRef}
               type="file"
               className="hidden"
-              accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,video/*"
+              accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,video/*"
               multiple
               onChange={handleAttachmentChange}
               disabled={isLoading || isFirstMessage}
@@ -624,6 +631,11 @@ function MessageAttachmentCard({
           controls
           preload="metadata"
         />
+      ) : kind === 'audio' && attachment.filePreviewUrl ? (
+        <div className="flex items-center gap-3 bg-slate-50 px-4 py-3">
+          <AttachmentIcon kind="audio" className="h-6 w-6 flex-shrink-0 text-slate-500" />
+          <audio className="w-full" src={attachment.filePreviewUrl} controls preload="metadata" />
+        </div>
       ) : (
         <div className="flex min-h-28 items-center justify-center bg-slate-50 text-slate-500">
           <AttachmentIcon kind={kind} className="h-8 w-8" />
@@ -792,6 +804,9 @@ function AttachmentIcon({
   }
   if (kind === 'video') {
     return <Video className={className} />;
+  }
+  if (kind === 'audio') {
+    return <Music className={className} />;
   }
   return <FileText className={className} />;
 }

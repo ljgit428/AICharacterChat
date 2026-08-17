@@ -36,7 +36,7 @@ import { clearChat } from '@/store/chatSlice';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
 type RightPanelKind = 'soul' | 'memory' | 'research';
-import { ChatSession, ModelConfig, UserProfile, WebSearchConfig } from '@/types';
+import { ChatSession, ModelConfig, ModelRoleAssignments, UserProfile, WebSearchConfig } from '@/types';
 import { APP_NAME, APP_VERSION } from '@/constants';
 
 type ViewState = 'home' | 'playground' | 'history_all' | 'create' | 'model_settings' | 'user_settings';
@@ -63,6 +63,8 @@ function AIStudioLayoutContent() {
   const [soulRefreshKey, setSoulRefreshKey] = useState('shell');
   const [recentChats, setRecentChats] = useState<ChatHistoryItem[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
+  const [modelRoles, setModelRoles] = useState<ModelRoleAssignments | null>(null);
+  const [loadingModelRoles, setLoadingModelRoles] = useState(true);
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const [loadingUserProfile, setLoadingUserProfile] = useState(true);
@@ -159,6 +161,25 @@ function AIStudioLayoutContent() {
     }
   }, [messages.modelApi.failedToLoadModelConfigurations]);
 
+  const fetchModelRoles = useCallback(async () => {
+    try {
+      setLoadingModelRoles(true);
+      const response = await apiService.getModelRoles();
+
+      if (response.error) {
+        setModelConfigError(response.error);
+        return;
+      }
+
+      setModelRoles(response.data || null);
+    } catch (err) {
+      console.error('Failed to fetch model role assignments:', err);
+      setModelConfigError(messages.modelApi.failedToLoadRoles);
+    } finally {
+      setLoadingModelRoles(false);
+    }
+  }, [messages.modelApi.failedToLoadRoles]);
+
   const fetchUserProfile = useCallback(async () => {
     try {
       setLoadingUserProfile(true);
@@ -202,9 +223,10 @@ function AIStudioLayoutContent() {
   useEffect(() => {
     fetchChatSessions();
     fetchModelConfigs();
+    fetchModelRoles();
     fetchUserProfile();
     fetchWebSearchConfig();
-  }, [fetchChatSessions, fetchModelConfigs, fetchUserProfile, fetchWebSearchConfig]);
+  }, [fetchChatSessions, fetchModelConfigs, fetchModelRoles, fetchUserProfile, fetchWebSearchConfig]);
 
   useEffect(() => {
     if (userProfile?.interfaceLanguage) {
@@ -280,8 +302,8 @@ function AIStudioLayoutContent() {
     }
   };
 
-  const defaultModelConfigId = modelConfigs.find((config) => config.isDefault)?.id || null;
-  const hasModelConfigs = modelConfigs.length > 0;
+  const defaultModelConfigId = modelRoles?.text?.id || modelConfigs[0]?.id || null;
+  const hasModelConfigs = Boolean(modelRoles?.text) || modelConfigs.length > 0;
 
   const isCharacterInPlayground = Boolean(selectedCharacterId) && currentView === 'playground';
 
@@ -605,6 +627,7 @@ function AIStudioLayoutContent() {
               characterId={selectedCharacterId}
               initialSessionId={selectedSessionId}
               modelConfigs={modelConfigs}
+              modelRoles={modelRoles}
               defaultModelConfigId={defaultModelConfigId}
               userProfile={userProfile}
               onBack={handleBackToGallery}
@@ -631,12 +654,15 @@ function AIStudioLayoutContent() {
         return (
           <ModelApiSettingsPanel
             modelConfigs={modelConfigs}
+            modelRoles={modelRoles}
             webSearchConfig={webSearchConfig}
             loading={loadingModelConfigs}
+            loadingRoles={loadingModelRoles}
             loadingWebSearchConfig={loadingWebSearchConfig}
             error={modelConfigError}
             webSearchError={webSearchConfigError}
             onRefresh={fetchModelConfigs}
+            onRefreshModelRoles={fetchModelRoles}
             onRefreshWebSearchConfig={fetchWebSearchConfig}
           />
         );
