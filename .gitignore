@@ -1,6 +1,9 @@
 # Ignore development notes folder
 dev_notes/
 
+# Code assistant scratch plans
+.zcode/
+
 # Ignore temporary cleanup script
 clean_comments.py
 

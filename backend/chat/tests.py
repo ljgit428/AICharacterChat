@@ -19,15 +19,19 @@ from chat.models import (
     Message,
     MessageAttachment,
     ModelConfiguration,
+    ModelRole,
+    ModelRoleAssignment,
     UserProfile,
     WebSearchConfiguration,
 )
 from chat.search import search_web
 from chat.attachments import (
+    MAX_AUDIO_ATTACHMENT_BYTES,
     MAX_IMAGE_ATTACHMENT_BYTES,
     MAX_TEXT_ATTACHMENT_BYTES,
     MAX_VIDEO_ATTACHMENT_BYTES,
     _format_size_limit,
+    guess_attachment_kind,
     validate_attachment_size,
 )
 from chat.soul import (
@@ -42,13 +46,57 @@ from chat.tasks import (
     _build_search_query,
     _build_stream_memory_prefetch,
     _build_system_prompt,
+    _build_anthropic_request_messages,
+    _convert_tools_to_anthropic,
     _generate_openai_compatible_response,
     build_research_context,
 )
 
 
+class ModelConfigTestMixin:
+    """模型配置 + 角色槽位的测试辅助，供多个 TestCase 复用（要求 self.user 存在）。"""
+
+    def create_model_config(self, user=None, **overrides):
+        owner = user or self.user
+        overrides.pop('is_default', None)
+        defaults = {
+            'name': 'Default User Model',
+            'provider': 'openai_compatible',
+            'model_name': 'gpt-4.1-mini',
+            'api_key': 'user-api-key',
+            'base_url': 'https://example.com/v1',
+        }
+        defaults.update(overrides)
+        config = ModelConfiguration.objects.create(user=owner, **defaults)
+        ModelRoleAssignment.objects.update_or_create(
+            user=owner,
+            role=ModelRole.TEXT,
+            defaults={'model_config': config},
+        )
+        return config
+
+    def create_media_model_config(self, role, user=None, **overrides):
+        owner = user or self.user
+        overrides.pop('is_default', None)
+        defaults = {
+            'name': f'{role.title()} Role Model',
+            'provider': 'openai_compatible',
+            'model_name': f'{role}-role-model',
+            'api_key': 'role-api-key',
+            'base_url': 'https://role.example.com/v1',
+        }
+        defaults.update(overrides)
+        config = ModelConfiguration.objects.create(user=owner, **defaults)
+        ModelRoleAssignment.objects.update_or_create(
+            user=owner,
+            role=role,
+            defaults={'model_config': config},
+        )
+        return config
+
+
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
-class AuthorizationRegressionTests(TestCase):
+class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username='owner', password='password123')
         self.other_user = User.objects.create_user(username='other', password='password123')
@@ -88,19 +136,6 @@ class AuthorizationRegressionTests(TestCase):
             character=self.other_character,
             title='Other Session',
         )
-
-    def create_model_config(self, user=None, **overrides):
-        owner = user or self.user
-        defaults = {
-            'name': 'Default User Model',
-            'provider': 'openai_compatible',
-            'model_name': 'gpt-4.1-mini',
-            'api_key': 'user-api-key',
-            'base_url': 'https://example.com/v1',
-            'is_default': True,
-        }
-        defaults.update(overrides)
-        return ModelConfiguration.objects.create(user=owner, **defaults)
 
     def create_web_search_config(self, user=None, **overrides):
         owner = user or self.user
@@ -1316,7 +1351,6 @@ class PromptMemoryTests(TestCase):
             model_name='gpt-4.1-mini',
             api_key='secret',
             base_url='https://example.com/v1',
-            is_default=True,
         )
 
         runtime_config, formatted_history, tools = _build_provider_messages(
@@ -1429,7 +1463,6 @@ class PromptMemoryTests(TestCase):
             model_name='gemini-2.0-flash',
             api_key='secret',
             base_url='',
-            is_default=True,
         )
         UserProfile.objects.update_or_create(
             user=self.user,
@@ -1528,7 +1561,7 @@ class PromptMemoryTests(TestCase):
 
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
-class ChatAttachmentTests(TestCase):
+class ChatAttachmentTests(ModelConfigTestMixin, TestCase):
     def setUp(self):
         self.media_root = tempfile.mkdtemp()
         self.override = override_settings(MEDIA_ROOT=self.media_root)
@@ -1555,7 +1588,6 @@ class ChatAttachmentTests(TestCase):
             model_name='gpt-4.1-mini',
             api_key='secret',
             base_url='https://example.com/v1',
-            is_default=True,
         )
         self.session = ChatSession.objects.create(
             user=self.user,
@@ -1763,7 +1795,6 @@ class ChatAttachmentTests(TestCase):
             provider='openai_compatible',
             model_name='plain-text-model',
             api_key='secret',
-            is_default=True,
         )
 
         image_message = Message.objects.create(
@@ -1792,16 +1823,17 @@ class ChatAttachmentTests(TestCase):
         self.assertIn('cannot directly inspect images', formatted_history[-1]['content'])
         self.assertEqual(image_message.attachment_kind, 'image')
 
-    def test_openai_compatible_qwen36_plus_uses_native_image_and_video_blocks(self):
+    @patch('chat.tasks._request_openai_media_analysis', return_value='A red umbrella in the rain.')
+    def test_media_role_slots_analyze_attachments_for_text_only_chat_model(self, mock_analysis):
         ModelConfiguration.objects.create(
             user=self.user,
-            name='Qwen 3.6 Plus',
+            name='Text Only',
             provider='openai_compatible',
-            model_name='qwen3.6-plus',
+            model_name='plain-text-model',
             api_key='secret',
-            base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-            is_default=True,
         )
+        self.create_media_model_config(ModelRole.IMAGE, name='Image Role', model_name='qwen3.6-vl-plus')
+        self.create_media_model_config(ModelRole.VIDEO, name='Video Role', model_name='qwen3.6-vl-plus')
 
         image_message = Message.objects.create(
             chat_session=self.session,
@@ -1826,11 +1858,11 @@ class ChatAttachmentTests(TestCase):
         )
 
         self.assertEqual(runtime_config['provider'], 'openai_compatible')
+        self.assertEqual(mock_analysis.call_count, 1)
         image_content = formatted_history[-1]['content']
-        self.assertIsInstance(image_content, list)
-        self.assertEqual(image_content[0]['type'], 'text')
-        self.assertEqual(image_content[1]['type'], 'image_url')
-        self.assertTrue(image_content[1]['image_url']['url'].startswith('data:image/png;base64,'))
+        self.assertIsInstance(image_content, str)
+        self.assertIn('[Media analysis by image model]', image_content)
+        self.assertIn('A red umbrella in the rain.', image_content)
         self.assertEqual(image_message.attachment_kind, 'image')
 
         video_message = Message.objects.create(
@@ -1848,6 +1880,7 @@ class ChatAttachmentTests(TestCase):
             attachment_kind='video',
         )
 
+        mock_analysis.return_value = 'A timelapse of a city at dusk.'
         _, formatted_history, _ = _build_provider_messages(
             chat_session=self.session,
             character=self.character,
@@ -1856,22 +1889,102 @@ class ChatAttachmentTests(TestCase):
         )
 
         video_content = formatted_history[-1]['content']
-        self.assertIsInstance(video_content, list)
-        self.assertEqual(video_content[0]['type'], 'text')
-        self.assertEqual(video_content[1]['type'], 'video_url')
-        self.assertTrue(video_content[1]['video_url']['url'].startswith('data:video/mp4;base64,'))
-        self.assertEqual(video_content[1]['fps'], 2.0)
+        self.assertIsInstance(video_content, str)
+        self.assertIn('[Media analysis by video model]', video_content)
+        self.assertIn('A timelapse of a city at dusk.', video_content)
         self.assertEqual(video_message.attachment_kind, 'video')
 
-    def test_openai_compatible_qwen_vl_ocr_stays_image_only(self):
+    @patch('chat.tasks._request_openai_media_analysis')
+    def test_media_analysis_cache_prevents_repeat_calls(self, mock_analysis):
+        mock_analysis.return_value = 'A red umbrella in the rain.'
         ModelConfiguration.objects.create(
             user=self.user,
-            name='Qwen OCR',
+            name='Text Only',
             provider='openai_compatible',
-            model_name='qwen-vl-ocr',
+            model_name='plain-text-model',
             api_key='secret',
-            base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-            is_default=True,
+        )
+        self.create_media_model_config(ModelRole.IMAGE, name='Image Role')
+
+        user_message = Message.objects.create(
+            chat_session=self.session,
+            role='user',
+            content='Describe this image.',
+            character=self.character,
+        )
+        MessageAttachment.objects.create(
+            message=user_message,
+            file=SimpleUploadedFile(
+                'scene.png',
+                b'\x89PNG\r\n\x1a\n',
+                content_type='image/png',
+            ),
+            attachment_name='scene.png',
+            attachment_mime_type='image/png',
+            attachment_kind='image',
+            sort_order=0,
+        )
+
+        for _ in range(2):
+            _build_provider_messages(
+                chat_session=self.session,
+                character=self.character,
+                generate_greeting=False,
+                research_context=None,
+            )
+
+        self.assertEqual(mock_analysis.call_count, 1)
+
+    @patch('chat.tasks._upload_generativeai_file')
+    def test_gemini_text_model_sends_native_media_without_slots(self, mock_upload):
+        mock_upload.side_effect = lambda path, display_name, api_key: {
+            'path': path,
+            'display_name': display_name,
+        }
+        self.create_model_config(
+            name='Gemini Text',
+            provider='gemini',
+            model_name='gemini-2.0-flash',
+            api_key='secret',
+            base_url='',
+        )
+
+        Message.objects.create(
+            chat_session=self.session,
+            role='user',
+            content='Describe this image.',
+            character=self.character,
+            attachment=SimpleUploadedFile(
+                'scene.png',
+                b'\x89PNG\r\n\x1a\n',
+                content_type='image/png',
+            ),
+            attachment_name='scene.png',
+            attachment_mime_type='image/png',
+            attachment_kind='image',
+        )
+
+        runtime_config, formatted_history, _ = _build_provider_messages(
+            chat_session=self.session,
+            character=self.character,
+            generate_greeting=False,
+            research_context=None,
+        )
+
+        self.assertEqual(runtime_config['provider'], 'gemini')
+        self.assertEqual(mock_upload.call_count, 1)
+        last_entry = formatted_history[-1]
+        self.assertEqual(last_entry['role'], 'user')
+        self.assertEqual(last_entry['parts'][0], 'Describe this image.')
+        self.assertEqual(last_entry['parts'][1], {'path': mock_upload.call_args[0][0], 'display_name': 'scene.png'})
+
+    def test_openai_compatible_text_only_model_limits_video_attachment_without_slot(self):
+        ModelConfiguration.objects.create(
+            user=self.user,
+            name='Text Only',
+            provider='openai_compatible',
+            model_name='plain-text-model',
+            api_key='secret',
         )
 
         video_message = Message.objects.create(
@@ -1966,7 +2079,7 @@ class AttachmentSizeValidationTests(TestCase):
 
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
-class CharacterBackgroundUploadTests(TestCase):
+class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
     def setUp(self):
         self.media_root = tempfile.mkdtemp()
         self.override = override_settings(MEDIA_ROOT=self.media_root)
@@ -2031,7 +2144,6 @@ class CharacterBackgroundUploadTests(TestCase):
             model_name='gpt-4.1-mini',
             api_key='user-api-key',
             base_url='https://example.com/v1',
-            is_default=True,
         )
         first_url = self._write_uploaded_text(
             'profile.txt',
@@ -2249,7 +2361,8 @@ class CharacterBackgroundUploadTests(TestCase):
         )
         self.assertIn('Stay with me.', background_doc['content'])
 
-    def test_provider_messages_include_character_reference_images_for_vision_models(self):
+    @patch('chat.tasks._request_openai_media_analysis', return_value='A young man with a silver pocket watch.')
+    def test_provider_messages_include_character_reference_images_via_image_role(self, mock_analysis):
         character = Character.objects.create(
             created_by=self.user,
             name='Vision Character',
@@ -2264,7 +2377,7 @@ class CharacterBackgroundUploadTests(TestCase):
             affiliation='Gallery',
             tags=['vision'],
         )
-        CharacterKnowledgeAsset.objects.create(
+        image_asset = CharacterKnowledgeAsset.objects.create(
             character=character,
             file=SimpleUploadedFile(
                 'portrait.png',
@@ -2291,13 +2404,13 @@ class CharacterBackgroundUploadTests(TestCase):
         )
         ModelConfiguration.objects.create(
             user=self.user,
-            name='Vision Default',
+            name='Text Only',
             provider='openai_compatible',
-            model_name='gpt-4o',
+            model_name='plain-text-model',
             api_key='secret',
-            base_url='https://example.com/v1',
-            is_default=True,
         )
+        self.create_media_model_config(ModelRole.IMAGE, name='Image Role')
+
         session = ChatSession.objects.create(
             user=self.user,
             character=character,
@@ -2312,8 +2425,278 @@ class CharacterBackgroundUploadTests(TestCase):
         )
 
         self.assertEqual(runtime_config['provider'], 'openai_compatible')
-        self.assertEqual(formatted_history[1]['role'], 'user')
-        self.assertIsInstance(formatted_history[1]['content'], list)
-        self.assertEqual(len(formatted_history[1]['content']), 1)
-        self.assertEqual(formatted_history[1]['content'][0]['type'], 'image_url')
-        self.assertTrue(formatted_history[1]['content'][0]['image_url']['url'].startswith('data:image/png;base64,'))
+        self.assertEqual(mock_analysis.call_count, 1)
+        reference_message = formatted_history[1]
+        self.assertEqual(reference_message['role'], 'user')
+        self.assertIsInstance(reference_message['content'], str)
+        self.assertIn('[Character reference image analysis by image model]', reference_message['content'])
+        self.assertIn('A young man with a silver pocket watch.', reference_message['content'])
+
+        image_asset.refresh_from_db()
+        self.assertEqual(image_asset.media_analysis, 'A young man with a silver pocket watch.')
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class ModelRoleAssignmentApiTests(ModelConfigTestMixin, TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='role-owner', password='password123')
+        self.other_user = User.objects.create_user(username='role-other', password='password123')
+
+    def test_list_returns_all_roles_with_none_defaults(self):
+        self.client.force_login(self.user)
+        response = self.client.get('/api/model-roles/')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload.keys()), {'text', 'image', 'audio', 'video'})
+        self.assertTrue(all(value is None for value in payload.values()))
+
+    def test_put_assigns_roles_and_allows_config_reuse(self):
+        config = self.create_model_config(name='Shared Model')
+        self.client.force_login(self.user)
+
+        response = self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'text': config.id, 'image': config.id, 'audio': None}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['text']['id'], config.id)
+        self.assertEqual(payload['image']['id'], config.id)
+        self.assertIsNone(payload['audio'])
+        self.assertIsNone(payload['video'])
+        self.assertEqual(
+            ModelRoleAssignment.objects.filter(user=self.user, model_config=config).count(),
+            2,
+        )
+
+    def test_put_rejects_empty_text_role(self):
+        config = self.create_model_config(name='Text Model')
+        self.client.force_login(self.user)
+
+        response = self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'text': None}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('text model is required', response.json()['error'])
+        self.assertTrue(
+            ModelRoleAssignment.objects.filter(user=self.user, role=ModelRole.TEXT, model_config=config).exists()
+        )
+
+    def test_put_rejects_other_users_config(self):
+        foreign_config = self.create_model_config(name='Foreign Model', user=self.other_user)
+        self.create_model_config(name='Own Model')
+        self.client.force_login(self.user)
+
+        response = self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'text': foreign_config.id}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_put_keeps_unmentioned_roles(self):
+        first = self.create_model_config(name='First')
+        self.client.force_login(self.user)
+        self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'text': first.id}),
+            content_type='application/json',
+        )
+        second = ModelConfiguration.objects.create(
+            user=self.user,
+            name='Second',
+            provider='openai_compatible',
+            model_name='other-model',
+            api_key='key',
+        )
+
+        response = self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'image': second.id}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['text']['id'], first.id)
+        self.assertEqual(payload['image']['id'], second.id)
+
+    def test_delete_refuses_text_role_config_and_clears_media_role(self):
+        text_config = self.create_model_config(name='Text Guard')
+        media_config = self.create_media_model_config(ModelRole.IMAGE, name='Image Guard')
+        self.client.force_login(self.user)
+
+        refused = self.client.delete(f'/api/model-configs/{text_config.id}/')
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn('text role', refused.json()['error'])
+
+        allowed = self.client.delete(f'/api/model-configs/{media_config.id}/')
+        self.assertEqual(allowed.status_code, 204)
+        self.assertFalse(
+            ModelRoleAssignment.objects.filter(user=self.user, role=ModelRole.IMAGE).exists()
+        )
+        self.assertTrue(
+            ModelRoleAssignment.objects.filter(user=self.user, role=ModelRole.TEXT).exists()
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get('/api/model-roles/')
+        self.assertEqual(response.status_code, 401)
+
+        put = self.client.put(
+            '/api/model-roles/',
+            data=json.dumps({'text': 1}),
+            content_type='application/json',
+        )
+        self.assertEqual(put.status_code, 401)
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class ModelCatalogProbeTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='probe-owner', password='password123')
+
+    def test_probe_requires_authentication(self):
+        response = self.client.get('/api/model-catalog/probe/')
+        self.assertEqual(response.status_code, 401)
+
+    def test_probe_rejects_unknown_provider(self):
+        self.client.force_login(self.user)
+        response = self.client.get('/api/model-catalog/probe/', {'provider': 'unknown'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Unsupported provider', response.json()['error'])
+
+    @patch('chat.model_catalog.requests.get')
+    def test_probe_openai_compatible_lists_models(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            'data': [{'id': 'model-b'}, {'id': 'model-a'}, {'id': 'model-a'}],
+        }
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            '/api/model-catalog/probe/',
+            {'provider': 'openai_compatible', 'base_url': 'https://example.com/v1', 'api_key': 'secret'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['models'], ['model-a', 'model-b'])
+        request_url = mock_get.call_args[0][0]
+        self.assertEqual(request_url, 'https://example.com/v1/models')
+        self.assertEqual(mock_get.call_args[1]['headers']['Authorization'], 'Bearer secret')
+
+    @patch('chat.model_catalog.requests.get')
+    def test_probe_gemini_filters_generate_content_models(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            'models': [
+                {'name': 'models/gemini-2.0-flash', 'supportedGenerationMethods': ['generateContent']},
+                {'name': 'models/text-embedding-004', 'supportedGenerationMethods': ['embedContent']},
+            ],
+        }
+        self.client.force_login(self.user)
+
+        response = self.client.get('/api/model-catalog/probe/', {'provider': 'gemini', 'api_key': 'secret'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['models'], ['gemini-2.0-flash'])
+
+    @patch('chat.model_catalog.requests.get')
+    def test_probe_gemini_requires_api_key(self, mock_get):
+        self.client.force_login(self.user)
+        response = self.client.get('/api/model-catalog/probe/', {'provider': 'gemini'})
+        self.assertEqual(response.status_code, 400)
+        mock_get.assert_not_called()
+
+    @patch('chat.model_catalog.requests.get')
+    def test_probe_anthropic_uses_api_key_header(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {'data': [{'id': 'claude-sonnet-4-5'}]}
+        self.client.force_login(self.user)
+
+        response = self.client.get('/api/model-catalog/probe/', {'provider': 'anthropic', 'api_key': 'secret'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['models'], ['claude-sonnet-4-5'])
+        request_url = mock_get.call_args[0][0]
+        self.assertEqual(request_url, 'https://api.anthropic.com/v1/models')
+        self.assertEqual(mock_get.call_args[1]['headers']['x-api-key'], 'secret')
+
+
+class AudioAttachmentRecognitionTests(TestCase):
+    def test_guess_kind_recognizes_audio_by_mime_and_extension(self):
+        mp3 = SimpleUploadedFile('voice.mp3', b'ID3', content_type='audio/mpeg')
+        self.assertEqual(guess_attachment_kind(mp3), (AttachmentKind.AUDIO, 'audio/mpeg'))
+
+        wav_by_extension = SimpleUploadedFile(
+            'voice.wav', b'RIFF', content_type='application/octet-stream'
+        )
+        kind, mime = guess_attachment_kind(wav_by_extension)
+        self.assertEqual(kind, AttachmentKind.AUDIO)
+        self.assertTrue(mime.startswith('audio/'))
+
+        ogg = SimpleUploadedFile('voice.ogg', b'OggS', content_type='audio/ogg')
+        self.assertEqual(guess_attachment_kind(ogg)[0], AttachmentKind.AUDIO)
+
+    def test_audio_attachment_size_limit(self):
+        oversized = SimpleUploadedFile(
+            'voice.mp3', b'x' * (MAX_AUDIO_ATTACHMENT_BYTES + 1), content_type='audio/mpeg'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_attachment_size(oversized, AttachmentKind.AUDIO)
+        self.assertIn('20 MB', str(ctx.exception))
+
+        within = SimpleUploadedFile('voice.mp3', b'x' * 1024, content_type='audio/mpeg')
+        validate_attachment_size(within, AttachmentKind.AUDIO)
+
+
+class AnthropicMessageConversionTests(TestCase):
+    def test_system_messages_are_extracted(self):
+        system, messages = _build_anthropic_request_messages([
+            {'role': 'system', 'content': 'You are Mira.'},
+            {'role': 'user', 'content': 'Hello'},
+            {'role': 'assistant', 'content': 'Hi!'},
+            {'role': 'user', 'content': 'Bye'},
+        ])
+
+        self.assertEqual(system, 'You are Mira.')
+        self.assertEqual(
+            messages,
+            [
+                {'role': 'user', 'content': 'Hello'},
+                {'role': 'assistant', 'content': 'Hi!'},
+                {'role': 'user', 'content': 'Bye'},
+            ],
+        )
+
+    def test_image_url_blocks_are_converted_to_base64_sources(self):
+        data_url = 'data:image/png;base64,QUJD'
+        system, messages = _build_anthropic_request_messages([
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': [
+                {'type': 'text', 'text': 'look'},
+                {'type': 'image_url', 'image_url': {'url': data_url}},
+                {'type': 'image_url', 'image_url': {'url': 'data:image/tiff;base64,AAA'}},
+            ]},
+        ])
+
+        self.assertEqual(messages[0]['content'], [
+            {'type': 'text', 'text': 'look'},
+            {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'QUJD'}},
+        ])
+
+    def test_tools_are_converted_to_anthropic_schema(self):
+        converted = _convert_tools_to_anthropic(_build_memory_tool_specs())
+
+        self.assertEqual(len(converted), 2)
+        list_tool = converted[0]
+        self.assertEqual(list_tool['name'], 'list_memory_files')
+        self.assertIn('path_prefix', list_tool['input_schema']['properties'])
+        self.assertNotIn('function', list_tool)

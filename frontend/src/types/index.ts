@@ -107,8 +107,11 @@ export interface Character {
   };
 }
 
-export type ModelProvider = 'gemini' | 'openai_compatible';
+export type ModelProvider = 'gemini' | 'openai_compatible' | 'anthropic';
 export type WebSearchProvider = 'tavily';
+
+/** 模型角色槽位：text 必填，image/audio/video 可空（空=该类附件不做 AI 解读） */
+export type ModelRoleKey = 'text' | 'image' | 'audio' | 'video';
 
 export interface ModelConfig {
   id: string;
@@ -117,10 +120,11 @@ export interface ModelConfig {
   modelName: string;
   apiKey: string;
   baseUrl?: string;
-  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
 }
+
+export type ModelRoleAssignments = Record<ModelRoleKey, ModelConfig | null>;
 
 export interface WebSearchConfig {
   id?: string;

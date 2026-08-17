@@ -6,6 +6,8 @@ from .views import (
     MessageViewSet,
     ChatViewSet,
     ModelConfigurationViewSet,
+    ModelRoleAssignmentView,
+    ModelCatalogViewSet,
     UserProfileViewSet,
     WebSearchConfigurationViewSet,
 )
@@ -18,6 +20,7 @@ from .graphql.schema import schema
 router = DefaultRouter()
 router.register(r'characters', CharacterViewSet)
 router.register(r'model-configs', ModelConfigurationViewSet, basename='model-config')
+router.register(r'model-catalog', ModelCatalogViewSet, basename='model-catalog')
 router.register(r'user-profile', UserProfileViewSet, basename='user-profile')
 router.register(r'web-search-config', WebSearchConfigurationViewSet, basename='web-search-config')
 router.register(r'sessions', ChatSessionViewSet)
@@ -26,6 +29,7 @@ router.register(r'chat', ChatViewSet, basename='chat')
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('model-roles/', ModelRoleAssignmentView.as_view(), name='model-roles'),
     path('auth/login/', login, name='login'),
     path('auth/register/', register, name='register'),
     path('auth/logout/', logout, name='logout'),

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { RootState, Message, ChatSession, ModelConfig, MessageAttachment, UserProfile } from '@/types';
+import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, removeMessage, updateChatSession } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
@@ -9,7 +9,7 @@ import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
-import { AttachmentKind, getAttachmentSupport } from '@/utils/modelCapabilities';
+import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
 import { FolderTree, Brain, Globe } from 'lucide-react';
 import { useI18n } from '@/i18n/provider';
 
@@ -17,6 +17,7 @@ interface ChatInterfaceProps {
   characterId?: string;
   initialSessionId?: string | null;
   modelConfigs: ModelConfig[];
+  modelRoles?: ModelRoleAssignments | null;
   defaultModelConfigId?: string | null;
   userProfile?: UserProfile | null;
   onBack?: () => void;
@@ -85,6 +86,7 @@ export default function ChatInterface({
   characterId,
   initialSessionId,
   modelConfigs,
+  modelRoles,
   defaultModelConfigId,
   onSessionUpdate,
   onSoulRefreshKeyChange,
@@ -371,10 +373,16 @@ export default function ChatInterface({
   };
 
   const activeModelConfig =
-    modelConfigs.find((config) => config.isDefault) ||
+    modelRoles?.text ||
     modelConfigs.find((config) => config.id === defaultModelConfigId) ||
     null;
-  const attachmentSupport = getAttachmentSupport(activeModelConfig);
+  const attachmentSupport = getAttachmentAvailability(modelRoles, activeModelConfig);
+  const localizedMediaMode = (mode: 'analyzed' | 'native' | 'unavailable') =>
+    ({
+      analyzed: copy.modelApi.attachmentModes.analyzed,
+      native: copy.modelApi.attachmentModes.native,
+      unavailable: copy.modelApi.attachmentModes.unavailable,
+    }[mode]);
   const latestResearchMessage = [...messages].reverse().find(
     (message) => message.role === 'assistant' && message.researchPayload
   ) || null;
@@ -446,6 +454,7 @@ export default function ChatInterface({
           isFirstMessage={!hasStartedConversation}
           currentUserLabel={copy.chat.you}
           attachmentSupport={attachmentSupport}
+          localizedMediaMode={localizedMediaMode}
         />
       </div>
 
