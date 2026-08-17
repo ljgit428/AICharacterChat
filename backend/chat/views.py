@@ -238,7 +238,15 @@ class ModelConfigurationViewSet(viewsets.ModelViewSet):
         return ModelConfiguration.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        model_config = serializer.save(user=self.request.user)
+        # 首个配置自动接管 text 槽位：避免「有配置但无 text 分配」的状态
+        # （该状态下聊天会静默回退到 id 最小的配置，可能选错模型）。
+        if not ModelRoleAssignment.objects.filter(user=self.request.user, role=ModelRole.TEXT).exists():
+            ModelRoleAssignment.objects.get_or_create(
+                user=self.request.user,
+                role=ModelRole.TEXT,
+                defaults={'model_config': model_config},
+            )
 
     def perform_update(self, serializer):
         serializer.save(user=self.request.user)
@@ -298,6 +306,16 @@ class ModelRoleAssignmentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # payload 未提及 text 时，必须已存在 text 分配；否则会留下
+        # 「有配置但无 text」的静默错误状态（聊天回退到任意第一个配置）。
+        if ModelRole.TEXT not in requested and not ModelRoleAssignment.objects.filter(
+            user=request.user, role=ModelRole.TEXT
+        ).exists():
+            return Response(
+                {'error': 'A text model is required. Assign a text model before configuring other roles.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         config_ids = {value for value in requested.values() if value}
         configs = {
             str(config.id): config
@@ -328,11 +346,13 @@ class ModelRoleAssignmentView(APIView):
 class ModelCatalogViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
-    @action(detail=False, methods=['get'])
+    # POST 而非 GET：api_key 放 body，避免泄漏进 access log / 浏览器历史
+    @action(detail=False, methods=['post'])
     def probe(self, request):
-        provider = (request.query_params.get('provider') or '').strip()
-        base_url = (request.query_params.get('base_url') or '').strip()
-        api_key = (request.query_params.get('api_key') or '').strip()
+        payload = request.data if isinstance(request.data, dict) else {}
+        provider = str(payload.get('provider') or '').strip()
+        base_url = str(payload.get('base_url') or '').strip()
+        api_key = str(payload.get('api_key') or '').strip()
 
         try:
             models = probe_provider_models(provider, base_url=base_url, api_key=api_key)

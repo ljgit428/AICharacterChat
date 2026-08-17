@@ -1106,10 +1106,14 @@ class ApiService {
     baseUrl?: string;
     apiKey?: string;
   }): Promise<ApiResponse<{ models: string[] }>> {
-    const search = new URLSearchParams({ provider: params.provider });
-    if (params.baseUrl) search.set('base_url', params.baseUrl);
-    if (params.apiKey) search.set('api_key', params.apiKey);
-    return this.request(`/model-catalog/probe/?${search.toString()}`);
+    return this.request<{ models: string[] }>('/model-catalog/probe/', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: params.provider,
+        base_url: params.baseUrl || '',
+        api_key: params.apiKey || '',
+      }),
+    });
   }
 
   async listSoulFiles(characterId: string, pathPrefix = '', recursive = true): Promise<ApiResponse<MemoryExplorerEntry[]>> {
