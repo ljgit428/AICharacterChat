@@ -1,4 +1,4 @@
-# AI Character Chat
+# PrisMate
 
 Role-playing chat app with custom AI personas, per-user API keys, persistent
 long-term memory, and a soul/persona system that lets characters grow over time.
@@ -27,7 +27,7 @@ python manage.py migrate
 
 # Run API + worker (separate terminals)
 python manage.py runserver
-python -m celery -A ai_character_chat worker --loglevel=info -c 1
+python -m celery -A prismate worker --loglevel=info -c 1
 
 # Frontend
 cd ../frontend
@@ -60,7 +60,7 @@ See `backend/chat/urls.py` for the full route map.
 
 ```
 backend/
-  ai_character_chat/   # Django project (settings, celery, urls)
+  prismate/            # Django project (settings, celery, urls)
   chat/                # models, views, serializers, graphql, tasks, soul, memory
 frontend/src/
   app/                 # Next.js routes (/, /create-character, /edit-character/[id], /memory)

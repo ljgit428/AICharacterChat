@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Character Chat",
+  title: "PrisMate",
   description: "Role-playing chat application with AI characters",
 };
 

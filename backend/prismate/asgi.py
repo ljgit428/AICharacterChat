@@ -1,5 +1,5 @@
 """
-ASGI config for ai_character_chat project.
+ASGI config for prismate project.
 
 It exposes the ASGI callable as a module-level variable named ``application``.
 
@@ -11,6 +11,6 @@ import os
 
 from django.core.asgi import get_asgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'ai_character_chat.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'prismate.settings')
 
 application = get_asgi_application()

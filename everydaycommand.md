@@ -1,6 +1,6 @@
 # Everyday Commands
 
-> Everyday command reference for the AI Character Chat stack.
+> Everyday command reference for the PrisMate stack.
 > Stack: Django 5.2 + Celery (backend) · PostgreSQL · Redis · Next.js (frontend).
 > Virtual env on this machine is **`backend\venv_stable`** (not `venv`).
 
@@ -59,10 +59,10 @@ docker-compose up -d redis
 cd backend
 source venv_stable/Scripts/activate        # PowerShell: .\venv_stable\Scripts\Activate.ps1
 python manage.py runserver                 # API → http://127.0.0.1:8000
-celery -A ai_character_chat worker --loglevel=info
+celery -A prismate worker --loglevel=info
 
 cd backend
-python -m celery -A ai_character_chat worker --loglevel=info
+python -m celery -A prismate worker --loglevel=info
 
 # Terminal 3 — Next.js dev server
 cd frontend
@@ -107,7 +107,7 @@ docker-compose stop redis
 
 | Symptom | Fix |
 |---|---|
-| `celery : 无法将"celery"项识别为 cmdlet…` (PowerShell) | Activate venv: `.\venv_stable\Scripts\Activate.ps1`. Or use `python -m celery -A ai_character_chat worker --loglevel=info` to bypass the PATH/exit-script entirely. |
+| `celery : 无法将"celery"项识别为 cmdlet…` (PowerShell) | Activate venv: `.\venv_stable\Scripts\Activate.ps1`. Or use `python -m celery -A prismate worker --loglevel=info` to bypass the PATH/exit-script entirely. |
 | `Activate.ps1 is not digitally signed` | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` once. |
 | `psycopg2.OperationalError ... could not connect to server` | Start PostgreSQL; double-check `DATABASE_HOST`/`PORT` in `backend/.env`. |
 | `字段 chat_chatsession.<xxx> 不存在` / `column ... does not exist` | Run `python manage.py migrate`. |
