@@ -24,6 +24,133 @@ type ReferenceFile = {
   type: string;
 };
 
+type PendingReferenceFile = {
+  file: File;
+  displayName: string;
+};
+
+type ReferenceFileSkipSummary = {
+  unsupported: number;
+  oversized: number;
+  overCap: number;
+};
+
+// Mirrors the backend limits in chat/attachments.py (MAX_TEXT_ATTACHMENT_BYTES /
+// MAX_IMAGE_ATTACHMENT_BYTES) so oversized files are skipped before upload instead
+// of failing the whole character save later.
+const MAX_TEXT_UPLOAD_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_BATCH_REFERENCE_FILES = 250;
+const SUPPORTED_REFERENCE_TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.jsonl'];
+const SKIPPED_REFERENCE_FILE_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
+
+function formatReferencePath(value: string) {
+  return value.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function isHiddenReferenceFileName(name: string) {
+  const lower = name.toLowerCase();
+  return lower.startsWith('.') || SKIPPED_REFERENCE_FILE_NAMES.has(lower);
+}
+
+function isSupportedReferenceFile(file: File) {
+  if (isHiddenReferenceFileName(file.name)) {
+    return false;
+  }
+  if (file.type.startsWith('image/')) {
+    return true;
+  }
+  const lower = file.name.toLowerCase();
+  return SUPPORTED_REFERENCE_TEXT_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+function isOversizedReferenceFile(file: File) {
+  return file.size > (file.type.startsWith('image/') ? MAX_IMAGE_UPLOAD_BYTES : MAX_TEXT_UPLOAD_BYTES);
+}
+
+function comparePendingReferenceFiles(a: PendingReferenceFile, b: PendingReferenceFile) {
+  // Natural numeric collation keeps script IDs in story order (31010 < 32010 < 84300100300)
+  // and makes drop/pick order deterministic across browsers regardless of FS listing order.
+  return a.displayName.localeCompare(b.displayName, undefined, { numeric: true });
+}
+
+function collectPendingReferenceFiles(candidates: PendingReferenceFile[]) {
+  const accepted: PendingReferenceFile[] = [];
+  const summary: ReferenceFileSkipSummary = { unsupported: 0, oversized: 0, overCap: 0 };
+
+  for (const candidate of [...candidates].sort(comparePendingReferenceFiles)) {
+    if (!isSupportedReferenceFile(candidate.file)) {
+      summary.unsupported += 1;
+      continue;
+    }
+    if (isOversizedReferenceFile(candidate.file)) {
+      summary.oversized += 1;
+      continue;
+    }
+    if (accepted.length >= MAX_BATCH_REFERENCE_FILES) {
+      summary.overCap += 1;
+      continue;
+    }
+    accepted.push(candidate);
+  }
+
+  return { accepted, summary };
+}
+
+async function collectReferenceFilesFromEntry(
+  entry: FileSystemEntry,
+  parentPath: string,
+  collected: PendingReferenceFile[],
+) {
+  const entryPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+
+  if (entry.isFile) {
+    const fileEntry = entry as FileSystemFileEntry;
+    const file = await new Promise<File | null>((resolve) => {
+      fileEntry.file((value: File) => resolve(value), () => resolve(null));
+    });
+    if (file) {
+      collected.push({ file, displayName: entryPath });
+    }
+    return;
+  }
+
+  if (!entry.isDirectory) {
+    return;
+  }
+
+  const reader = (entry as FileSystemDirectoryEntry).createReader();
+  const children: FileSystemEntry[] = [];
+  // readEntries returns at most 100 entries per call; keep reading until it is empty.
+  for (;;) {
+    const batch = await new Promise<FileSystemEntry[]>((resolve) => {
+      reader.readEntries((values: FileSystemEntry[]) => resolve(values), () => resolve([]));
+    });
+    if (!batch.length) {
+      break;
+    }
+    children.push(...batch);
+  }
+
+  await Promise.all(children.map((child) => collectReferenceFilesFromEntry(child, entryPath, collected)));
+}
+
+async function collectFilesFromDataTransfer(dataTransfer: DataTransfer): Promise<PendingReferenceFile[]> {
+  // DataTransfer items are only valid synchronously inside the event handler, so
+  // snapshot the directory entries before any await, then traverse them async.
+  const entries = Array.from(dataTransfer.items || [])
+    .map((item) => (typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null))
+    .filter((entry): entry is FileSystemEntry => entry !== null);
+
+  if (!entries.length) {
+    return Array.from(dataTransfer.files || []).map((file) => ({ file, displayName: file.name }));
+  }
+
+  const collected: PendingReferenceFile[] = [];
+  await Promise.all(entries.map((entry) => collectReferenceFilesFromEntry(entry, '', collected)));
+  return collected;
+}
+
 type PromptPreviewLocale = 'zh-CN' | 'en-US';
 
 type FormState = {
@@ -217,7 +344,7 @@ interface ReferenceAndAiPanelProps {
   autoInputText: string;
   onAutoTargetNameChange: (value: string) => void;
   onAutoInputTextChange: (value: string) => void;
-  onFilesAdded: (files: File[]) => void;
+  onFilesAdded: (files: PendingReferenceFile[]) => void;
   onRemoveFile: (url: string) => void;
   onGenerate: () => void;
   onUndo: () => void;
@@ -242,20 +369,68 @@ function ReferenceAndAiPanel({
   copy,
 }: ReferenceAndAiPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
+  const [skipNotice, setSkipNotice] = useState<string | null>(null);
+
+  const attachFolderInputRef = (element: HTMLInputElement | null) => {
+    folderInputRef.current = element;
+    if (element) {
+      element.setAttribute('webkitdirectory', '');
+      element.setAttribute('directory', '');
+    }
+  };
 
   const hasTextSource = textReferenceCount > 0 || autoInputText.trim().length > 0;
   const canGenerate = hasTextSource && !isUploading && !isGenerating;
 
+  const submitPendingFiles = useCallback(
+    (candidates: PendingReferenceFile[]) => {
+      const { accepted, summary } = collectPendingReferenceFiles(candidates);
+      const noticeParts: string[] = [];
+      if (summary.unsupported) {
+        noticeParts.push(copy.skippedUnsupportedFiles(summary.unsupported));
+      }
+      if (summary.oversized) {
+        noticeParts.push(copy.skippedOversizedFiles(summary.oversized));
+      }
+      if (summary.overCap) {
+        noticeParts.push(copy.skippedOverCapFiles(summary.overCap, MAX_BATCH_REFERENCE_FILES));
+      }
+      setSkipNotice(noticeParts.length ? noticeParts.join(' ') : null);
+      if (accepted.length) {
+        onFilesAdded(accepted);
+      }
+    },
+    [copy, onFilesAdded],
+  );
+
   const handleUploadClick = () => {
     fileInputRef.current?.click();
+  };
+
+  const handleFolderClick = () => {
+    folderInputRef.current?.click();
   };
 
   const handleUploadChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = Array.from(event.target.files || []);
     event.target.value = '';
     if (fileList.length) {
-      onFilesAdded(fileList);
+      submitPendingFiles(fileList.map((file) => ({ file, displayName: file.name })));
+    }
+  };
+
+  const handleFolderChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (fileList.length) {
+      submitPendingFiles(
+        fileList.map((file) => ({
+          file,
+          displayName: formatReferencePath(file.webkitRelativePath || file.name),
+        })),
+      );
     }
   };
 
@@ -277,12 +452,9 @@ function ReferenceAndAiPanel({
       event.stopPropagation();
       setIsBackgroundDragging(false);
 
-      const fileList = Array.from(event.dataTransfer.files || []);
-      if (fileList.length) {
-        onFilesAdded(fileList);
-      }
+      void collectFilesFromDataTransfer(event.dataTransfer).then(submitPendingFiles);
     },
-    [onFilesAdded],
+    [submitPendingFiles],
   );
 
   const dropzoneCopy = useMemo(() => {
@@ -345,6 +517,13 @@ function ReferenceAndAiPanel({
           multiple
           onChange={handleUploadChange}
         />
+        <input
+          ref={attachFolderInputRef}
+          type="file"
+          className="hidden"
+          multiple
+          onChange={handleFolderChange}
+        />
         {isUploading ? (
           <div className="flex flex-col items-center text-amber-700">
             <Loader2 className="mb-1 animate-spin" size={24} />
@@ -358,6 +537,22 @@ function ReferenceAndAiPanel({
           </>
         )}
       </div>
+
+      <div className="mt-2 flex justify-center">
+        <button
+          type="button"
+          onClick={handleFolderClick}
+          className="text-[11px] font-medium text-amber-700 underline-offset-2 transition-colors hover:text-amber-800 hover:underline"
+        >
+          {copy.selectFolder}
+        </button>
+      </div>
+
+      {skipNotice && (
+        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] leading-4 text-amber-800">
+          {skipNotice}
+        </p>
+      )}
 
       {files.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -572,9 +767,9 @@ export default function CreateCharacterSimplifiedForm({
     }
   };
 
-  const uploadSingleFile = useCallback(async (file: File) => {
+  const uploadSingleFile = useCallback(async (item: PendingReferenceFile) => {
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', item.file);
 
     const res = await fetch(UPLOAD_API_URL, { method: 'POST', body: formData });
     if (!res.ok) {
@@ -584,16 +779,16 @@ export default function CreateCharacterSimplifiedForm({
     const uploadData = await res.json();
     return {
       uploadedUrl: uploadData.url || uploadData.uri,
-      uploadedName: uploadData.display_name || uploadData.name || file.name,
-      uploadedType: file.type.startsWith('image/') ? 'image' : 'text',
-      file,
+      uploadedName: item.displayName || uploadData.display_name || uploadData.name || item.file.name,
+      uploadedType: item.file.type.startsWith('image/') ? 'image' : 'text',
+      file: item.file,
     };
   }, [copy.characterForm.uploadFailed]);
 
   const processFileUpload = useCallback(async (file: File, target: 'avatar' | 'background') => {
     setUploadingTarget(target);
     try {
-      const uploaded = await uploadSingleFile(file);
+      const uploaded = await uploadSingleFile({ file, displayName: file.name });
 
       if (target === 'background') {
         setBackgroundFiles((prev) => [
@@ -611,29 +806,37 @@ export default function CreateCharacterSimplifiedForm({
     }
   }, [copy.characterForm.uploadFailedAlert, uploadSingleFile]);
 
-  const processBackgroundFilesUpload = useCallback(async (files: File[]) => {
-    if (!files.length) {
+  const processBackgroundFilesUpload = useCallback(async (items: PendingReferenceFile[]) => {
+    if (!items.length) {
       return;
     }
 
     setUploadingTarget('background');
     try {
-      const uploadedFiles = await Promise.all(files.map((file) => uploadSingleFile(file)));
-      setBackgroundFiles((prev) => [
-        ...prev,
-        ...uploadedFiles.map((uploaded) => ({
-          name: uploaded.uploadedName,
-          url: uploaded.uploadedUrl,
-          type: uploaded.uploadedType,
-        })),
-      ]);
-    } catch (error) {
-      console.error(error);
-      alert(copy.characterForm.uploadFailedAlert);
+      const results = await Promise.allSettled(items.map((item) => uploadSingleFile(item)));
+      const uploadedFiles = results
+        .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof uploadSingleFile>>> => result.status === 'fulfilled')
+        .map((result) => result.value);
+
+      if (uploadedFiles.length) {
+        setBackgroundFiles((prev) => [
+          ...prev,
+          ...uploadedFiles.map((uploaded) => ({
+            name: uploaded.uploadedName,
+            url: uploaded.uploadedUrl,
+            type: uploaded.uploadedType,
+          })),
+        ]);
+      }
+
+      const failedCount = items.length - uploadedFiles.length;
+      if (failedCount) {
+        alert(copy.characterForm.uploadSomeFailed(failedCount));
+      }
     } finally {
       setUploadingTarget(null);
     }
-  }, [copy.characterForm.uploadFailedAlert, uploadSingleFile]);
+  }, [copy.characterForm, uploadSingleFile]);
 
   const handleAvatarFileSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

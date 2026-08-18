@@ -35,6 +35,7 @@ from chat.attachments import (
     validate_attachment_size,
 )
 from chat.soul import (
+    build_character_prompt_context,
     build_character_system_prompt_preview,
     build_character_setup_markdown,
     list_memory_explorer_path,
@@ -1182,6 +1183,45 @@ class PromptMemoryTests(TestCase):
         self.assertNotIn('[CHARACTER BACKSTORY]', prompt)
         self.assertNotIn('[EXAMPLE DIALOGUE]', prompt)
         self.assertIn('[USER UPLOADS]', prompt)
+
+    def test_uploaded_background_text_stays_within_prompt_budget(self):
+        for index, letter in enumerate(['a', 'b', 'c']):
+            CharacterKnowledgeAsset.objects.create(
+                character=self.character,
+                file=SimpleUploadedFile(
+                    f'lore-{letter}.txt',
+                    letter.encode(),
+                    content_type='text/plain',
+                ),
+                attachment_name=f'lore-{letter}.txt',
+                attachment_mime_type='text/plain',
+                attachment_kind='text',
+                attachment_text_content=letter.upper() * 25000,
+                sort_order=index,
+            )
+
+        background = build_character_prompt_context(self.character)['uploaded_background']
+
+        self.assertIn('## lore-a.txt', background)
+        self.assertIn('## lore-b.txt', background)
+        self.assertNotIn('## lore-c.txt', background)
+        self.assertIn('1 more uploaded file(s) exist but were omitted', background)
+
+    def test_uploaded_background_text_keeps_first_asset_even_when_over_budget(self):
+        CharacterKnowledgeAsset.objects.create(
+            character=self.character,
+            file=SimpleUploadedFile('huge-lore.txt', b'x', content_type='text/plain'),
+            attachment_name='huge-lore.txt',
+            attachment_mime_type='text/plain',
+            attachment_kind='text',
+            attachment_text_content='X' * 80000,
+            sort_order=0,
+        )
+
+        background = build_character_prompt_context(self.character)['uploaded_background']
+
+        self.assertIn('## huge-lore.txt', background)
+        self.assertNotIn('omitted', background)
 
     def test_character_setup_preview_uses_simplified_chinese_when_profile_prefers_it(self):
         UserProfile.objects.update_or_create(
