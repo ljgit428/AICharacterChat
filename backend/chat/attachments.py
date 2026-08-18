@@ -29,8 +29,20 @@ TEXT_FILE_EXTENSIONS = {
     ".sql",
 }
 
+AUDIO_FILE_EXTENSIONS = {
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".oga",
+    ".m4a",
+    ".aac",
+    ".flac",
+    ".webm",
+}
+
 MAX_TEXT_ATTACHMENT_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_AUDIO_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_VIDEO_ATTACHMENT_BYTES = 100 * 1024 * 1024
 MAX_TEXT_ATTACHMENT_CHARS = 16000
 
@@ -58,12 +70,14 @@ def guess_attachment_kind(file_obj):
         return AttachmentKind.IMAGE, mime_type
     if mime_type.startswith("video/"):
         return AttachmentKind.VIDEO, mime_type
+    if mime_type.startswith("audio/") or extension in AUDIO_FILE_EXTENSIONS:
+        return AttachmentKind.AUDIO, mime_type if mime_type.startswith("audio/") else (mimetypes.guess_type(file_name)[0] or "audio/mpeg")
     if mime_type.startswith("text/") or extension in TEXT_FILE_EXTENSIONS:
         return AttachmentKind.TEXT, mime_type
     if mime_type in {"application/json", "application/xml"}:
         return AttachmentKind.TEXT, mime_type
 
-    raise ValueError("Only text files, images, and videos are supported")
+    raise ValueError("Only text files, images, audio, and videos are supported")
 
 
 def validate_attachment_size(file_obj, attachment_kind):
@@ -71,6 +85,7 @@ def validate_attachment_size(file_obj, attachment_kind):
     limits = {
         AttachmentKind.TEXT: MAX_TEXT_ATTACHMENT_BYTES,
         AttachmentKind.IMAGE: MAX_IMAGE_ATTACHMENT_BYTES,
+        AttachmentKind.AUDIO: MAX_AUDIO_ATTACHMENT_BYTES,
         AttachmentKind.VIDEO: MAX_VIDEO_ATTACHMENT_BYTES,
     }
     max_size = limits.get(attachment_kind)
@@ -78,6 +93,7 @@ def validate_attachment_size(file_obj, attachment_kind):
         label = {
             AttachmentKind.TEXT: "Text files",
             AttachmentKind.IMAGE: "Images",
+            AttachmentKind.AUDIO: "Audio files",
             AttachmentKind.VIDEO: "Videos",
         }.get(attachment_kind, "Files")
         raise ValueError(f"{label} larger than {_format_size_limit(max_size)} are not supported")
@@ -117,6 +133,12 @@ class LegacyMessageAttachmentProxy:
 
 
 def get_message_attachments(message):
+    # 同一 message 对象上记忆化，保证发送管线内多次取附件拿到同一批实例
+    # （media_analysis 等运行期属性才能跨调用保留），也避免重复查询。
+    cached = getattr(message, "_cached_attachments", None)
+    if cached is not None:
+        return cached
+
     related_manager = getattr(message, "attachments", None)
     if related_manager is not None:
         prefetched = getattr(message, "_prefetched_objects_cache", {})
@@ -125,13 +147,15 @@ def get_message_attachments(message):
         else:
             attachments = list(related_manager.all())
         if attachments:
+            message._cached_attachments = attachments
             return attachments
 
     legacy_file = getattr(message, "attachment", None)
     if not legacy_file:
+        message._cached_attachments = []
         return []
 
-    return [
+    attachments = [
         LegacyMessageAttachmentProxy(
             file=legacy_file,
             attachment_name=getattr(message, "attachment_name", "") or "",
@@ -140,6 +164,8 @@ def get_message_attachments(message):
             attachment_text_content=getattr(message, "attachment_text_content", "") or "",
         )
     ]
+    message._cached_attachments = attachments
+    return attachments
 
 
 def get_primary_message_attachment(message):
@@ -164,5 +190,10 @@ def describe_attachment_for_prompt(attachment, allow_text_body=False):
             )
         return f"[Attached text file: {attachment_name}]"
 
-    media_label = "image" if attachment_kind == AttachmentKind.IMAGE else "video"
+    media_labels = {
+        AttachmentKind.IMAGE: "image",
+        AttachmentKind.AUDIO: "audio",
+        AttachmentKind.VIDEO: "video",
+    }
+    media_label = media_labels.get(attachment_kind, "media")
     return f"[Attached {media_label}: {attachment_name} ({mime_type})]"

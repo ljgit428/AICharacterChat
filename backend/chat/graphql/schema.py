@@ -9,9 +9,9 @@ import mimetypes
 import os
 from urllib.parse import urlparse, unquote
 
-from .types import CharacterType, ChatSessionType, CharacterInput, AICharacterDraft
+from .types import CharacterType, ChatSessionType, CharacterInput, PrisMateDraft
 from chat.attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
-from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, UserProfile
+from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, ModelRole, ModelRoleAssignment, UserProfile
 from chat.tasks import _extract_json_object, _generate_text
 
 logger = logging.getLogger(__name__)
@@ -41,12 +41,22 @@ def _get_owned_session(user, session_id):
 
 
 def _get_required_user_model_config(user):
-    model_config = ModelConfiguration.get_default_for_user(user)
+    model_config = ModelRoleAssignment.get_role_config(user, ModelRole.TEXT)
+    if not model_config:
+        # 正常流程不会到这里（首个配置自动分配 text、PUT 禁止清空/跳过）；
+        # 触发即数据状态异常，回退并留日志。
+        model_config = ModelConfiguration.objects.filter(user=user).order_by('id').first()
+        if model_config:
+            logger.warning(
+                'User %s has model configs but no text role assignment; falling back to config %s',
+                user.id,
+                model_config.id,
+            )
     if not model_config:
         raise ValueError("Please configure your own model API before using this feature.")
 
-    # Gemini 路径仍必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
-    if not model_config.api_key and model_config.provider == 'gemini':
+    # Gemini/Anthropic 路径必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
+    if not model_config.api_key and model_config.provider in {'gemini', 'anthropic'}:
         raise ValueError("The default user model configuration is missing an API key.")
 
     return model_config
@@ -358,7 +368,7 @@ class Mutation:
         file_urls: Optional[List[str]] = None,
         text_context: Optional[str] = None,
         locale: Optional[str] = None,
-    ) -> AICharacterDraft:
+    ) -> PrisMateDraft:
         """
         Calls the user's default model configuration to analyze text and return a structured Character Draft.
         Handles local file reading for .txt/.md/.json files to support "Auto-Create" from text files.
@@ -407,7 +417,7 @@ class Mutation:
                     f"Raw model response preview: {preview or '(empty response)'}"
                 )
 
-            return AICharacterDraft(
+            return PrisMateDraft(
                 name=data.get("name", "Unknown"),
                 description=data.get("description", ""),
                 affiliation=data.get("affiliation", ""),
@@ -420,7 +430,7 @@ class Mutation:
 
         except Exception as e:
             logger.error(f"AI Generation Error: {e}")
-            return AICharacterDraft(
+            return PrisMateDraft(
                 name="Generation Failed",
                 description=f"Error generating draft: {str(e)}",
                 personality="", appearance="", affiliation="",
@@ -516,7 +526,7 @@ class Mutation:
         return await create_session_sync()
 
     @strawberry.mutation
-    async def update_chat_session(self, id: strawberry.ID, input: ChatSessionInput) -> ChatSessionType:
+    async def update_chat_session(self, info, id: strawberry.ID, input: ChatSessionInput) -> ChatSessionType:
         @sync_to_async
         def update_session_sync():
             user = _get_authenticated_user(info)
@@ -532,17 +542,17 @@ class Query:
     def characters(self, info) -> List[CharacterType]:
         user = _get_authenticated_user(info)
         return Character.objects.filter(created_by=user)
-    
+
     @strawberry.django.field
     def character(self, info, id: strawberry.ID) -> CharacterType:
         user = _get_authenticated_user(info)
         return _get_owned_character(user, id)
-        
+
     @strawberry.django.field
     def chat_sessions(self, info) -> List[ChatSessionType]:
         user = _get_authenticated_user(info)
         return ChatSession.objects.filter(user=user).order_by('-updated_at')
-    
+
     @strawberry.django.field
     def chat_session(self, info, id: strawberry.ID) -> ChatSessionType:
         user = _get_authenticated_user(info)

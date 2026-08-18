@@ -1,5 +1,5 @@
 from django.core.validators import MaxLengthValidator
-from django.db import models, transaction
+from django.db import models
 from django.contrib.auth.models import User
 
 LONG_TERM_MEMORY_DESC_LIMIT = 200
@@ -19,6 +19,14 @@ def get_default_disabled_states():
 class ModelProvider(models.TextChoices):
     GEMINI = "gemini", "Gemini"
     OPENAI_COMPATIBLE = "openai_compatible", "OpenAI Compatible"
+    ANTHROPIC = "anthropic", "Anthropic"
+
+
+class ModelRole(models.TextChoices):
+    TEXT = "text", "Text chat"
+    IMAGE = "image", "Image understanding"
+    AUDIO = "audio", "Audio understanding"
+    VIDEO = "video", "Video understanding"
 
 
 class WebSearchProvider(models.TextChoices):
@@ -28,6 +36,7 @@ class WebSearchProvider(models.TextChoices):
 class AttachmentKind(models.TextChoices):
     TEXT = "text", "Text"
     IMAGE = "image", "Image"
+    AUDIO = "audio", "Audio"
     VIDEO = "video", "Video"
 
 
@@ -56,40 +65,45 @@ class ModelConfiguration(models.Model):
     model_name = models.CharField(max_length=255)
     api_key = models.CharField(max_length=500, blank=True)
     base_url = models.URLField(max_length=500, blank=True, default="")
-    is_default = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-is_default", "name", "id"]
+        ordering = ["name", "id"]
         constraints = [
             models.UniqueConstraint(fields=["user", "name"], name="unique_model_configuration_name_per_user"),
         ]
 
-    def save(self, *args, **kwargs):
-        with transaction.atomic():
-            has_other_configs = ModelConfiguration.objects.filter(user=self.user).exclude(pk=self.pk).exists()
-            if not has_other_configs:
-                self.is_default = True
-            elif not self.is_default:
-                has_another_default = ModelConfiguration.objects.filter(
-                    user=self.user,
-                    is_default=True,
-                ).exclude(pk=self.pk).exists()
-                if not has_another_default:
-                    self.is_default = True
-
-            super().save(*args, **kwargs)
-
-            if self.is_default:
-                ModelConfiguration.objects.filter(user=self.user).exclude(pk=self.pk).update(is_default=False)
-
     def __str__(self):
         return f"{self.name} ({self.model_name})"
 
+
+class ModelRoleAssignment(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="model_role_assignments")
+    role = models.CharField(max_length=16, choices=ModelRole.choices)
+    model_config = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE, related_name="role_assignments")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["role"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "role"], name="unique_model_role_assignment_per_user"),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.role} -> {self.model_config_id}"
+
     @classmethod
-    def get_default_for_user(cls, user):
-        return cls.objects.filter(user=user, is_default=True).first() or cls.objects.filter(user=user).first()
+    def get_role_config(cls, user, role):
+        assignment = cls.objects.select_related("model_config").filter(user=user, role=role).first()
+        return assignment.model_config if assignment else None
+
+    @classmethod
+    def get_role_configs(cls, user):
+        """Return {role: ModelConfiguration} for all assigned roles."""
+        assignments = cls.objects.select_related("model_config").filter(user=user)
+        return {assignment.role: assignment.model_config for assignment in assignments}
 
 
 class UserProfile(models.Model):
@@ -205,6 +219,8 @@ class CharacterKnowledgeAsset(models.Model):
     attachment_mime_type = models.CharField(max_length=100, blank=True, default="")
     attachment_kind = models.CharField(max_length=16, choices=AttachmentKind.choices, blank=True, default="")
     attachment_text_content = models.TextField(blank=True, default="")
+    media_analysis = models.TextField(blank=True, default="")
+    gemini_file_name = models.TextField(blank=True, default="")
     sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -265,6 +281,8 @@ class MessageAttachment(models.Model):
     attachment_mime_type = models.CharField(max_length=100, blank=True, default="")
     attachment_kind = models.CharField(max_length=16, choices=AttachmentKind.choices, blank=True, default="")
     attachment_text_content = models.TextField(blank=True, default="")
+    media_analysis = models.TextField(blank=True, default="")
+    gemini_file_name = models.TextField(blank=True, default="")
     sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

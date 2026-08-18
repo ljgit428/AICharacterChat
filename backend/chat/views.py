@@ -6,6 +6,7 @@ from django.http import StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -16,16 +17,17 @@ from .models import (
     AttachmentKind,
     Character,
     CharacterKnowledgeAsset,
-    CharacterMemoryItem,
     ChatSession,
-    MemoryAuditLog,
     MemoryAuditSource,
     Message,
     MessageAttachment,
     ModelConfiguration,
+    ModelRole,
+    ModelRoleAssignment,
     UserProfile,
     WebSearchConfiguration,
 )
+from .model_catalog import probe_provider_models
 from .search import search_web
 from .serializers import (
     CharacterSerializer,
@@ -72,18 +74,20 @@ def _get_required_model_config(user, model_config_id=None):
     if model_config_id not in [None, "", "null"]:
         model_config = ModelConfiguration.objects.get(id=model_config_id, user=user)
     else:
-        model_config = ModelConfiguration.get_default_for_user(user)
+        model_config = ModelRoleAssignment.get_role_config(user, ModelRole.TEXT) or (
+            ModelConfiguration.objects.filter(user=user).order_by('id').first()
+        )
 
     if not model_config:
         raise ValueError('Please configure your own model API in Project Settings before starting a chat.')
 
-    # Gemini 路径仍必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
-    if not model_config.api_key and model_config.provider == 'gemini':
+    # Gemini/Anthropic 必须显式 api_key；openai_compatible 允许本地反代网关自鉴权，所以这里放过。
+    if not model_config.api_key and model_config.provider in {'gemini', 'anthropic'}:
         raise ValueError('The selected model configuration is missing an API key.')
 
     return model_config
 class CharacterViewSet(viewsets.ModelViewSet):
-    queryset = Character.objects.all() 
+    queryset = Character.objects.all()
     serializer_class = CharacterSerializer
     permission_classes = [IsAuthenticated]
 
@@ -234,21 +238,134 @@ class ModelConfigurationViewSet(viewsets.ModelViewSet):
         return ModelConfiguration.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        model_config = serializer.save(user=self.request.user)
+        # 首个配置自动接管 text 槽位：避免「有配置但无 text 分配」的状态
+        # （该状态下聊天会静默回退到 id 最小的配置，可能选错模型）。
+        if not ModelRoleAssignment.objects.filter(user=self.request.user, role=ModelRole.TEXT).exists():
+            ModelRoleAssignment.objects.get_or_create(
+                user=self.request.user,
+                role=ModelRole.TEXT,
+                defaults={'model_config': model_config},
+            )
 
     def perform_update(self, serializer):
         serializer.save(user=self.request.user)
 
-    def perform_destroy(self, instance):
-        user = instance.user
-        was_default = instance.is_default
-        instance.delete()
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if ModelRoleAssignment.objects.filter(model_config=instance, role=ModelRole.TEXT).exists():
+            return Response(
+                {'error': 'This model is assigned to the text role. Switch the text model before deleting it.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # 媒体槽位（图片/音频/视频）引用随 CASCADE 自动清空。
+        return super().destroy(request, *args, **kwargs)
 
-        if was_default:
-            replacement = ModelConfiguration.objects.filter(user=user).first()
-            if replacement and not replacement.is_default:
-                replacement.is_default = True
-                replacement.save(update_fields=['is_default'])
+
+class ModelRoleAssignmentView(APIView):
+    """四角色槽位（text/image/audio/video）的读取与更新。
+
+    PUT 语义：payload 中出现的角色会被设置（显式 null 表示清空），
+    未出现的角色保持现状；text 角色必须始终指向一个有效配置。
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _serialize_assignments(self, user):
+        data = {role: None for role, _label in ModelRole.choices}
+        assignments = (
+            ModelRoleAssignment.objects.filter(user=user)
+            .select_related('model_config')
+        )
+        for assignment in assignments:
+            data[assignment.role] = ModelConfigurationSerializer(
+                assignment.model_config,
+                context={'request': self.request},
+            ).data
+        return data
+
+    def get(self, request):
+        return Response(self._serialize_assignments(request.user))
+
+    def put(self, request):
+        payload = request.data if isinstance(request.data, dict) else {}
+
+        requested = {}
+        for role, _label in ModelRole.choices:
+            if role not in payload:
+                continue
+            value = payload.get(role)
+            requested[role] = None if value in [None, '', 'null'] else str(value)
+
+        if not requested:
+            return Response({'error': 'No role assignments provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if ModelRole.TEXT in requested and requested[ModelRole.TEXT] is None:
+            return Response(
+                {'error': 'A text model is required and cannot be empty'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # payload 未提及 text 时，必须已存在 text 分配；否则会留下
+        # 「有配置但无 text」的静默错误状态（聊天回退到任意第一个配置）。
+        if ModelRole.TEXT not in requested and not ModelRoleAssignment.objects.filter(
+            user=request.user, role=ModelRole.TEXT
+        ).exists():
+            return Response(
+                {'error': 'A text model is required. Assign a text model before configuring other roles.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        config_ids = {value for value in requested.values() if value}
+        configs = {
+            str(config.id): config
+            for config in ModelConfiguration.objects.filter(user=request.user, id__in=config_ids)
+        }
+        for role, value in requested.items():
+            if value and value not in configs:
+                return Response(
+                    {'error': f'Model configuration not found or access denied for role "{role}"'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        from django.db import transaction
+
+        with transaction.atomic():
+            for role, value in requested.items():
+                ModelRoleAssignment.objects.filter(user=request.user, role=role).delete()
+                if value:
+                    ModelRoleAssignment.objects.create(
+                        user=request.user,
+                        role=role,
+                        model_config=configs[value],
+                    )
+
+        return Response(self._serialize_assignments(request.user))
+
+
+class ModelCatalogViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    # POST 而非 GET：api_key 放 body，避免泄漏进 access log / 浏览器历史
+    @action(detail=False, methods=['post'])
+    def probe(self, request):
+        payload = request.data if isinstance(request.data, dict) else {}
+        provider = str(payload.get('provider') or '').strip()
+        base_url = str(payload.get('base_url') or '').strip()
+        api_key = str(payload.get('api_key') or '').strip()
+
+        try:
+            models = probe_provider_models(provider, base_url=base_url, api_key=api_key)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('Model probe failed for provider=%s base_url=%s: %s', provider, base_url, exc)
+            return Response(
+                {'error': 'Failed to fetch the model list. Check the provider, base URL, and API key, or enter the model name manually.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({'models': models})
 
 
 class UserProfileViewSet(viewsets.ViewSet):
@@ -305,20 +422,20 @@ class WebSearchConfigurationViewSet(viewsets.ViewSet):
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
-    queryset = ChatSession.objects.none() 
+    queryset = ChatSession.objects.none()
     permission_classes = [IsAuthenticated]
-    
+
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return ChatSessionWriteSerializer
         return ChatSessionSerializer
-    
+
     def get_queryset(self):
         queryset = ChatSession.objects.filter(user=self.request.user).select_related('character').prefetch_related('messages__attachments')
         character_id = self.request.query_params.get('character_id')
         if character_id:
             queryset = queryset.filter(character_id=character_id)
-        
+
         return queryset.order_by('-updated_at')
 
     def perform_create(self, serializer):
@@ -471,30 +588,30 @@ def _serialise_memory_item(item):
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.none()
     permission_classes = [IsAuthenticated]
-    
+
     def get_serializer_class(self):
         if self.action == 'create':
             return MessageCreateSerializer
         return MessageSerializer
-    
+
     def get_queryset(self):
         queryset = Message.objects.filter(chat_session__user=self.request.user).prefetch_related('attachments').order_by('timestamp')
         chat_session_id = self.request.query_params.get('chat_session_id')
         if chat_session_id:
             queryset = queryset.filter(chat_session_id=chat_session_id)
         return queryset
-    
+
     def perform_create(self, serializer):
         chat_session_id = self.request.data.get('chat_session_id')
         if not chat_session_id:
             return Response(
-                {'error': 'chat_session_id is required'}, 
+                {'error': 'chat_session_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             user = self.request.user
-            
+
             chat_session = ChatSession.objects.get(
                 id=chat_session_id,
                 user=user
@@ -502,7 +619,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             serializer.save(chat_session=chat_session)
         except ChatSession.DoesNotExist:
             return Response(
-                {'error': 'Chat session not found or access denied'}, 
+                {'error': 'Chat session not found or access denied'},
                 status=status.HTTP_404_NOT_FOUND
             )
 

@@ -12,12 +12,24 @@ import google.generativeai as genai
 import requests
 from celery import shared_task
 
-from django.db import transaction
-
-from .attachments import describe_attachment_for_prompt, get_message_attachments
+from .attachments import (
+    MAX_VIDEO_ATTACHMENT_BYTES,
+    describe_attachment_for_prompt,
+    get_message_attachments,
+)
 from .memory.manager import MemoryManager
 from .memory.prompts import build_memory_extraction_prompt, get_memory_crud_tool_specs
-from .models import AttachmentKind, Character, CharacterMemoryItem, ChatSession, Message, ModelConfiguration, UserProfile
+from .models import (
+    AttachmentKind,
+    Character,
+    CharacterMemoryItem,
+    ChatSession,
+    Message,
+    ModelConfiguration,
+    ModelRole,
+    ModelRoleAssignment,
+    UserProfile,
+)
 from .search import search_web
 from .soul import (
     build_character_prompt_context,
@@ -28,30 +40,31 @@ from .soul import (
 
 logger = logging.getLogger(__name__)
 
-OPENAI_IMAGE_VIDEO_MODEL_FAMILIES = (
-    'qwen3.6-plus',
-    'qwen3.5-plus',
-    'qwen3.5-flash',
-    'qwen3-vl',
-    'qwen2.5-vl',
-    'qwen-vl-max',
-    'qwen-vl-plus',
-)
+ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com'
+ANTHROPIC_API_VERSION = '2023-06-01'
+ANTHROPIC_COMPLETION_MAX_TOKENS = 8192
+ANTHROPIC_MEDIA_ANALYSIS_MAX_TOKENS = 1024
+MEDIA_ANALYSIS_MAX_BYTES = 20 * 1024 * 1024
+ANTHROPIC_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+MEDIA_ANALYSIS_PROMPT_MAX_CHARS = 2000
 
-OPENAI_IMAGE_ONLY_MODEL_FAMILIES = (
-    'gpt-4o',
-    'gpt-4.1',
-    'o4-mini',
-    'o3',
-    'qwen-vl-ocr',
-)
-
-OPENAI_IMAGE_ONLY_MODEL_HINTS = (
-    'vision',
-    'llava',
-    'minicpm-v',
-    'internvl',
-)
+MEDIA_ANALYSIS_PROMPTS = {
+    AttachmentKind.IMAGE: (
+        'You are an image analysis assistant. Describe this image objectively: '
+        'main subjects, setting, visible text, and important details. '
+        'Do not guess beyond what is visible. Keep the description within 200 words.'
+    ),
+    AttachmentKind.AUDIO: (
+        'You are an audio understanding assistant. First transcribe any speech in this audio, '
+        'keeping the original language. Then briefly note non-speech sounds (music, ambient noise) '
+        'if clearly present. Be concise and factual; do not invent content.'
+    ),
+    AttachmentKind.VIDEO: (
+        'You are a video analysis assistant. Describe what happens in this video: '
+        'main subjects, actions, setting, on-screen text, and any audible speech if available. '
+        'Be concise and factual; do not invent content.'
+    ),
+}
 
 OPENAI_VIDEO_FRAME_FPS = 2.0
 CHARACTER_REFERENCE_IMAGE_LIMIT = 4
@@ -147,17 +160,62 @@ YESTERDAY_QUERY_KEYWORDS = (
 )
 
 
-def _get_runtime_model_config(chat_session):
-    model_config = ModelConfiguration.get_default_for_user(chat_session.user)
-    if not model_config:
-        raise ValueError('No user model configuration is available for this chat session')
-
+def _model_config_to_runtime(model_config):
     return {
         'provider': model_config.provider,
         'model_name': model_config.model_name,
         'api_key': model_config.api_key,
         'base_url': model_config.base_url,
     }
+
+
+def _get_runtime_model_config(chat_session):
+    model_config = ModelRoleAssignment.get_role_config(chat_session.user, ModelRole.TEXT)
+    if not model_config:
+        # 正常流程不会到这里（首个配置自动分配 text、PUT 禁止清空/跳过）；
+        # 触发即数据状态异常（如 admin 批量删除绕过 destroy 保护），回退并留日志。
+        model_config = ModelConfiguration.objects.filter(user=chat_session.user).order_by('id').first()
+        if model_config:
+            logger.warning(
+                'User %s has model configs but no text role assignment; falling back to config %s',
+                chat_session.user_id,
+                model_config.id,
+            )
+    if not model_config:
+        raise ValueError('No user model configuration is available for this chat session')
+
+    return _model_config_to_runtime(model_config)
+
+
+def _get_role_configs(user):
+    """按角色返回 {role: runtime_config}，未分配的角色不出现。"""
+    assignments = ModelRoleAssignment.get_role_configs(user)
+    return {role: _model_config_to_runtime(config) for role, config in assignments.items()}
+
+
+# 媒体路由（替代历史遗留的模型名能力正则）：
+# - analyze: 对应角色槽位已配置 -> 槽位模型分析媒体，产出文本注入对话
+# - native:  槽位为空但文本模型提供商原生支持该媒体 -> 直接发送
+# - unsupported: 均不满足 -> 保留附件，提示用户配置槽位
+MEDIA_KIND_ROLE = {
+    AttachmentKind.IMAGE: ModelRole.IMAGE,
+    AttachmentKind.AUDIO: ModelRole.AUDIO,
+    AttachmentKind.VIDEO: ModelRole.VIDEO,
+}
+
+NATIVE_MEDIA_PROVIDERS = {
+    'gemini': {AttachmentKind.IMAGE, AttachmentKind.AUDIO, AttachmentKind.VIDEO},
+    'anthropic': {AttachmentKind.IMAGE},
+}
+
+
+def _route_media_kind(attachment_kind, role_configs, text_config):
+    role = MEDIA_KIND_ROLE.get(attachment_kind)
+    if role and role_configs.get(role):
+        return 'analyze'
+    if attachment_kind in NATIVE_MEDIA_PROVIDERS.get(text_config['provider'], set()):
+        return 'native'
+    return 'unsupported'
 
 
 def _build_openai_endpoint(base_url):
@@ -167,47 +225,8 @@ def _build_openai_endpoint(base_url):
     return f"{normalized_base_url}/chat/completions"
 
 
-def _normalize_model_name(value):
-    return (value or '').strip().lower()
-
-
-def _matches_model_family(model_name, families):
-    normalized = _normalize_model_name(model_name)
-    return any(
-        normalized == family or normalized.startswith(f'{family}-')
-        for family in families
-    )
-
-
-def _get_model_capabilities(runtime_config):
-    provider = runtime_config['provider']
-    model_name = runtime_config['model_name']
-
-    capabilities = {
-        'text': True,
-        'image': False,
-        'video': False,
-    }
-
-    if provider == 'gemini':
-        capabilities['image'] = True
-        capabilities['video'] = True
-    elif provider == 'openai_compatible':
-        normalized_model_name = _normalize_model_name(model_name)
-        if _matches_model_family(normalized_model_name, OPENAI_IMAGE_VIDEO_MODEL_FAMILIES):
-            capabilities['image'] = True
-            capabilities['video'] = True
-        elif (
-            _matches_model_family(normalized_model_name, OPENAI_IMAGE_ONLY_MODEL_FAMILIES)
-            or any(hint in normalized_model_name for hint in OPENAI_IMAGE_ONLY_MODEL_HINTS)
-        ):
-            capabilities['image'] = True
-
-    return capabilities
-
-
 def _supports_memory_tool_mode(runtime_config):
-    return runtime_config['provider'] == 'openai_compatible'
+    return runtime_config['provider'] in {'openai_compatible', 'anthropic'}
 
 
 def _build_memory_tool_specs():
@@ -350,7 +369,242 @@ def _upload_generativeai_file(path, display_name, api_key):
     return uploaded_file
 
 
-def _build_attachment_prompt_text(message, capabilities, include_text_body=True, include_native_media_summary=True):
+def _get_or_upload_generativeai_file(cache_holder, path, display_name, api_key):
+    """优先复用已上传的 Gemini Files 资源（48 小时有效），失效或未上传时重传。
+
+    文件名缓存在 cache_holder.gemini_file_name（DB 字段；legacy 代理无 save
+    时仅本轮内存生效）。get_file 是一次轻量元数据请求，远廉于重复上传+轮询。
+    """
+    cached_name = (getattr(cache_holder, 'gemini_file_name', '') or '').strip() if cache_holder else ''
+    if cached_name:
+        try:
+            genai.configure(api_key=api_key)
+            return genai.get_file(cached_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.info('Cached Gemini file %s unavailable, re-uploading: %s', cached_name, exc)
+
+    uploaded = _upload_generativeai_file(path, display_name, api_key)
+    uploaded_name = getattr(uploaded, 'name', '')
+    if cache_holder is not None and isinstance(uploaded_name, str) and uploaded_name:
+        try:
+            cache_holder.gemini_file_name = uploaded_name
+            cache_holder.save(update_fields=['gemini_file_name', 'updated_at'])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('Failed to cache Gemini file name for %s: %s', path, exc)
+    return uploaded
+
+
+def _read_media_base64(path):
+    with open(path, 'rb') as file_handle:
+        return base64.b64encode(file_handle.read()).decode('ascii')
+
+
+def _audio_format_from_name(path, mime_type):
+    """input_audio 的 format 字段：优先用扩展名，退回从 mime 推断。"""
+    extension = os.path.splitext(path)[1].lower().lstrip('.')
+    if extension:
+        return extension
+    subtype = (mime_type or '').split('/')[-1].split(';')[0]
+    return subtype or 'mp3'
+
+
+def _request_openai_media_analysis(role_config, path, mime_type, attachment_kind, prompt):
+    content_blocks = [{'type': 'text', 'text': prompt}]
+    media_b64 = _read_media_base64(path)
+
+    if attachment_kind == AttachmentKind.IMAGE:
+        content_blocks.append({
+            'type': 'image_url',
+            'image_url': {'url': f"data:{mime_type or 'image/png'};base64,{media_b64}"},
+        })
+    elif attachment_kind == AttachmentKind.AUDIO:
+        content_blocks.append({
+            'type': 'input_audio',
+            'input_audio': {
+                'data': media_b64,
+                'format': _audio_format_from_name(path, mime_type),
+            },
+        })
+    elif attachment_kind == AttachmentKind.VIDEO:
+        content_blocks.append({
+            'type': 'video_url',
+            'video_url': {'url': f"data:{mime_type or 'video/mp4'};base64,{media_b64}"},
+            'fps': OPENAI_VIDEO_FRAME_FPS,
+        })
+    else:
+        raise ValueError(f'Unsupported media kind for analysis: {attachment_kind}')
+
+    headers = {'Content-Type': 'application/json'}
+    if role_config['api_key']:
+        headers['Authorization'] = f"Bearer {role_config['api_key']}"
+
+    response = requests.post(
+        _build_openai_endpoint(role_config.get('base_url', '')),
+        headers=headers,
+        json={
+            'model': role_config['model_name'],
+            'messages': [{'role': 'user', 'content': content_blocks}],
+            'max_tokens': 1024,
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    return _extract_openai_content(response.json())
+
+
+def _request_gemini_media_analysis(role_config, path, mime_type, attachment_kind, prompt, display_name='', cache_holder=None):
+    if not role_config['api_key']:
+        raise ValueError('API key is required for the selected model configuration')
+
+    genai.configure(api_key=role_config['api_key'])
+    model = genai.GenerativeModel(role_config['model_name'])
+
+    if os.path.getsize(path) <= MEDIA_ANALYSIS_MAX_BYTES:
+        media_part = {
+            'mime_type': mime_type or 'application/octet-stream',
+            'data': _read_media_base64(path),
+        }
+    else:
+        media_part = _get_or_upload_generativeai_file(
+            cache_holder,
+            path,
+            display_name,
+            role_config['api_key'],
+        )
+
+    response = model.generate_content([prompt, media_part])
+    text = (getattr(response, 'text', '') or '').strip()
+    if not text:
+        raise ValueError('Gemini returned an empty media analysis')
+    return text
+
+
+def _request_anthropic_media_analysis(role_config, path, mime_type, attachment_kind, prompt):
+    if attachment_kind != AttachmentKind.IMAGE:
+        raise ValueError('Anthropic only supports image media analysis')
+
+    media_type = mime_type or 'image/png'
+    if media_type not in {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}:
+        raise ValueError(f'Anthropic does not accept image type: {media_type}')
+
+    response = requests.post(
+        f"{_build_anthropic_base_url(role_config.get('base_url', ''))}/v1/messages",
+        headers={
+            'Content-Type': 'application/json',
+            'x-api-key': role_config['api_key'],
+            'anthropic-version': ANTHROPIC_API_VERSION,
+        },
+        json={
+            'model': role_config['model_name'],
+            'max_tokens': ANTHROPIC_MEDIA_ANALYSIS_MAX_TOKENS,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': prompt},
+                    {
+                        'type': 'image',
+                        'source': {
+                            'type': 'base64',
+                            'media_type': media_type,
+                            'data': _read_media_base64(path),
+                        },
+                    },
+                ],
+            }],
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    return _extract_anthropic_text(response.json())
+
+
+def _get_media_analysis_size_limit(provider):
+    """槽位分析前的体积预检上限：
+
+    - gemini：超过 inline 上限（20MB）会自动改走 Files API，用附件类型
+      上限（视频 100MB）兜底；
+    - anthropic：图片 base64 官方上限 5MB，超过必被 400 拒绝，提前跳过；
+    - openai_compatible：base64 data URL / input_audio，维持 20MB。
+    """
+    if provider == 'gemini':
+        return MAX_VIDEO_ATTACHMENT_BYTES
+    if provider == 'anthropic':
+        return ANTHROPIC_IMAGE_MAX_BYTES
+    return MEDIA_ANALYSIS_MAX_BYTES
+
+
+def _analyze_media_via_role(attachment, role_config):
+    """用角色槽位模型分析媒体附件，结果缓存在 media_analysis 上避免重复调用。
+
+    返回分析文本；失败返回 None（调用方降级为诚实提示）。
+    """
+    cached = (getattr(attachment, 'media_analysis', '') or '').strip()
+    if cached:
+        return cached
+
+    attachment_kind = getattr(attachment, 'attachment_kind', '') or ''
+    prompt = MEDIA_ANALYSIS_PROMPTS.get(attachment_kind)
+    file_obj = getattr(attachment, 'file', None)
+    if not prompt or not file_obj:
+        return None
+
+    path = file_obj.path
+    mime_type = getattr(attachment, 'attachment_mime_type', '') or ''
+    provider = role_config['provider']
+    if os.path.getsize(path) > _get_media_analysis_size_limit(provider):
+        logger.warning('Media analysis skipped, file too large: %s', path)
+        return None
+
+    try:
+        if provider == 'gemini':
+            analysis = _request_gemini_media_analysis(
+                role_config, path, mime_type, attachment_kind, prompt,
+                display_name=getattr(attachment, 'attachment_name', '') or os.path.basename(file_obj.name),
+                cache_holder=attachment,
+            )
+        elif provider == 'openai_compatible':
+            analysis = _request_openai_media_analysis(role_config, path, mime_type, attachment_kind, prompt)
+        elif provider == 'anthropic':
+            analysis = _request_anthropic_media_analysis(role_config, path, mime_type, attachment_kind, prompt)
+        else:
+            raise ValueError(f"Unsupported analysis provider: {provider}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Media analysis failed for %s: %s', path, exc)
+        return None
+
+    analysis = analysis.strip()[:MEDIA_ANALYSIS_PROMPT_MAX_CHARS]
+    if not analysis:
+        return None
+
+    # 缓存失败（如 legacy 附件代理无 save）不应丢弃已成功的分析结果。
+    attachment.media_analysis = analysis
+    try:
+        attachment.save(update_fields=['media_analysis', 'updated_at'])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Failed to cache media analysis for %s: %s', path, exc)
+    return analysis
+
+
+MEDIA_LIMITATION_NOTES = {
+    AttachmentKind.IMAGE: (
+        "The current model cannot directly inspect images and no image model slot is configured. "
+        "Acknowledge the limitation briefly, then ask the user to describe what matters in the image "
+        "or configure an image model in AI settings."
+    ),
+    AttachmentKind.AUDIO: (
+        "The current model cannot directly listen to audio and no audio model slot is configured. "
+        "Acknowledge the limitation briefly, then ask the user to describe or transcribe the audio "
+        "or configure an audio model in AI settings."
+    ),
+    AttachmentKind.VIDEO: (
+        "The current model cannot directly inspect videos and no video model slot is configured. "
+        "Acknowledge the limitation briefly, then ask the user for key frames, a summary, "
+        "or configure a video model in AI settings."
+    ),
+}
+
+
+def _build_attachment_prompt_text(message, role_configs, text_config, include_text_body=True, include_native_media_summary=True):
     parts = []
 
     for attachment in get_message_attachments(message):
@@ -359,33 +613,34 @@ def _build_attachment_prompt_text(message, capabilities, include_text_body=True,
             continue
 
         attachment_kind = getattr(attachment, 'attachment_kind', '') or ''
-        if attachment_kind == AttachmentKind.IMAGE and not capabilities.get('image'):
-            parts.append(
-                f"{attachment_summary}\n"
-                "The current model cannot directly inspect images. Acknowledge the limitation briefly, "
-                "then ask the user to describe what matters in the image or switch to an image-capable model."
-            )
+        if attachment_kind not in MEDIA_KIND_ROLE:
+            parts.append(attachment_summary)
             continue
 
-        if attachment_kind == AttachmentKind.VIDEO and not capabilities.get('video'):
-            parts.append(
-                f"{attachment_summary}\n"
-                "The current model cannot directly inspect videos. Acknowledge the limitation briefly, "
-                "then ask the user for key frames, a summary, or a vision/video-capable model."
-            )
+        route = _route_media_kind(attachment_kind, role_configs, text_config)
+        if route == 'analyze':
+            analysis = (getattr(attachment, 'media_analysis', '') or '').strip()
+            if analysis:
+                parts.append(f"{attachment_summary}\n[Media analysis by {attachment_kind} model]\n{analysis}")
+            else:
+                parts.append(
+                    f"{attachment_summary}\n"
+                    "The dedicated media model failed to analyze this attachment. "
+                    "Do not invent its content; tell the user the analysis is unavailable right now."
+                )
             continue
 
-        if attachment_kind in {AttachmentKind.IMAGE, AttachmentKind.VIDEO} and capabilities.get(attachment_kind):
+        if route == 'native':
             if include_native_media_summary:
                 parts.append(f"{attachment_summary}\nAnalyze the attached media directly before replying.")
             continue
 
-        parts.append(attachment_summary)
+        parts.append(f"{attachment_summary}\n{MEDIA_LIMITATION_NOTES[attachment_kind]}")
 
     return '\n\n'.join(parts).strip()
 
 
-def _build_message_text_content(message, capabilities, include_text_body=True, include_native_media_summary=True):
+def _build_message_text_content(message, role_configs, text_config, include_text_body=True, include_native_media_summary=True):
     parts = []
     content = (getattr(message, 'content', '') or '').strip()
     if content:
@@ -393,7 +648,8 @@ def _build_message_text_content(message, capabilities, include_text_body=True, i
 
     attachment_text = _build_attachment_prompt_text(
         message,
-        capabilities=capabilities,
+        role_configs=role_configs,
+        text_config=text_config,
         include_text_body=include_text_body,
         include_native_media_summary=include_native_media_summary,
     )
@@ -403,31 +659,55 @@ def _build_message_text_content(message, capabilities, include_text_body=True, i
     return '\n\n'.join(parts).strip()
 
 
-def _build_openai_compatible_multimodal_content(message, capabilities):
+def _get_native_media_attachments(message, role_configs, text_config):
+    return [
+        attachment
+        for attachment in get_message_attachments(message)
+        if _route_media_kind(
+            getattr(attachment, 'attachment_kind', '') or '',
+            role_configs,
+            text_config,
+        ) == 'native'
+    ]
+
+
+def _build_openai_compatible_multimodal_content(message, role_configs, text_config):
     content_blocks = []
     text_content = _build_message_text_content(
         message,
-        capabilities=capabilities,
+        role_configs=role_configs,
+        text_config=text_config,
         include_text_body=False,
         include_native_media_summary=False,
     )
     if text_content:
         content_blocks.append({'type': 'text', 'text': text_content})
 
-    for attachment in get_message_attachments(message):
+    for attachment in _get_native_media_attachments(message, role_configs, text_config):
         attachment_kind = getattr(attachment, 'attachment_kind', '') or ''
         file_obj = getattr(attachment, 'file', None)
         if not file_obj:
             continue
 
-        if attachment_kind == AttachmentKind.IMAGE and capabilities.get('image'):
+        if attachment_kind == AttachmentKind.IMAGE:
             content_blocks.append({
                 'type': 'image_url',
                 'image_url': {
                     'url': _build_data_url(file_obj.path, getattr(attachment, 'attachment_mime_type', '')),
                 },
             })
-        elif attachment_kind == AttachmentKind.VIDEO and capabilities.get('video'):
+        elif attachment_kind == AttachmentKind.AUDIO:
+            content_blocks.append({
+                'type': 'input_audio',
+                'input_audio': {
+                    'data': _read_media_base64(file_obj.path),
+                    'format': _audio_format_from_name(
+                        file_obj.path,
+                        getattr(attachment, 'attachment_mime_type', ''),
+                    ),
+                },
+            })
+        elif attachment_kind == AttachmentKind.VIDEO:
             content_blocks.append({
                 'type': 'video_url',
                 'video_url': {
@@ -445,7 +725,7 @@ def _get_character_reference_image_assets(character):
     )
 
 
-def _build_character_reference_message(character, runtime_config, capabilities, prompt_context, use_memory_tools=False):
+def _build_character_reference_message(character, runtime_config, role_configs, prompt_context, use_memory_tools=False):
     reference_sections = [] if use_memory_tools else [
         prompt_context.get("uploaded_index", ""),
         prompt_context.get("uploaded_background", ""),
@@ -458,7 +738,28 @@ def _build_character_reference_message(character, runtime_config, capabilities, 
     ).strip()
 
     image_assets = _get_character_reference_image_assets(character)
-    if not image_assets or not capabilities.get('image'):
+    if not image_assets:
+        return None
+
+    route = _route_media_kind(AttachmentKind.IMAGE, role_configs, runtime_config)
+
+    if route == 'analyze':
+        # 参考图经图片槽位 lazily 分析一次并缓存，文本模型只看描述文本。
+        image_role_config = role_configs[MEDIA_KIND_ROLE[AttachmentKind.IMAGE]]
+        descriptions = []
+        for asset in image_assets:
+            analysis = _analyze_media_via_role(asset, image_role_config)
+            if analysis:
+                descriptions.append(f"- {asset.attachment_name or os.path.basename(asset.file.name)}: {analysis}")
+        if not descriptions:
+            return None
+        image_context = "[Character reference image analysis by image model]\n" + "\n".join(descriptions)
+        return {
+            'role': 'user',
+            'content': '\n\n'.join(part for part in [reference_text, image_context] if part),
+        }
+
+    if route != 'native':
         return None
 
     if runtime_config['provider'] == 'gemini':
@@ -467,7 +768,8 @@ def _build_character_reference_message(character, runtime_config, capabilities, 
             parts.append(reference_text)
         for asset in image_assets:
             parts.append(
-                _upload_generativeai_file(
+                _get_or_upload_generativeai_file(
+                    asset,
                     asset.file.path,
                     asset.attachment_name or os.path.basename(asset.file.name),
                     runtime_config['api_key'],
@@ -485,33 +787,48 @@ def _build_character_reference_message(character, runtime_config, capabilities, 
                 'image_url': {
                     'url': _build_data_url(asset.file.path, asset.attachment_mime_type),
                 },
-        })
+            })
         return {'role': 'user', 'content': content}
+
+    if runtime_config['provider'] == 'anthropic':
+        content = []
+        if reference_text:
+            content.append({'type': 'text', 'text': reference_text})
+        skipped_assets = []
+        for asset in image_assets:
+            media_type = asset.attachment_mime_type or 'image/png'
+            if media_type not in ANTHROPIC_SUPPORTED_IMAGE_MIME:
+                skipped_assets.append(asset.attachment_name or os.path.basename(asset.file.name))
+                continue
+            content.append({
+                'type': 'image',
+                'source': {
+                    'type': 'base64',
+                    'media_type': media_type,
+                    'data': _read_media_base64(asset.file.path),
+                },
+            })
+        if skipped_assets:
+            content.append({
+                'type': 'text',
+                'text': f"[Reference images skipped (unsupported image type): {', '.join(skipped_assets)}]",
+            })
+        return {'role': 'user', 'content': content} if content else None
 
     return None
 
 
-def _build_provider_message_entry(message, runtime_config, capabilities):
+def _build_provider_message_entry(message, runtime_config, role_configs):
     role = 'assistant' if message.role == 'assistant' else 'user'
     provider = runtime_config['provider']
-    attachments = get_message_attachments(message)
-    native_media_attachments = [
-        attachment
-        for attachment in attachments
-        if (
-            getattr(attachment, 'attachment_kind', '') == AttachmentKind.IMAGE
-            and capabilities.get('image')
-        ) or (
-            getattr(attachment, 'attachment_kind', '') == AttachmentKind.VIDEO
-            and capabilities.get('video')
-        )
-    ]
+    native_media_attachments = _get_native_media_attachments(message, role_configs, runtime_config)
 
     if provider == 'gemini':
         parts = []
         text_content = _build_message_text_content(
             message,
-            capabilities=capabilities,
+            role_configs=role_configs,
+            text_config=runtime_config,
             include_text_body=True,
             include_native_media_summary=False,
         )
@@ -519,7 +836,8 @@ def _build_provider_message_entry(message, runtime_config, capabilities):
             parts.append(text_content)
         for attachment in native_media_attachments:
             parts.append(
-                _upload_generativeai_file(
+                _get_or_upload_generativeai_file(
+                    attachment,
                     attachment.file.path,
                     getattr(attachment, 'attachment_name', '') or os.path.basename(attachment.file.name),
                     runtime_config['api_key'],
@@ -530,17 +848,18 @@ def _build_provider_message_entry(message, runtime_config, capabilities):
             'parts': parts or [''],
         }
 
-    if provider == 'openai_compatible' and native_media_attachments:
+    if provider in {'openai_compatible', 'anthropic'} and native_media_attachments:
         return {
             'role': role,
-            'content': _build_openai_compatible_multimodal_content(message, capabilities),
+            'content': _build_openai_compatible_multimodal_content(message, role_configs, runtime_config),
         }
 
     return {
         'role': role,
         'content': _build_message_text_content(
             message,
-            capabilities=capabilities,
+            role_configs=role_configs,
+            text_config=runtime_config,
             include_text_body=True,
         ),
     }
@@ -724,6 +1043,248 @@ def _iter_buffered_chunks(text, chunk_size=160):
         yield normalized[start_index:start_index + chunk_size]
 
 
+# ---------------------------------------------------------------------------
+# Anthropic（Claude 官方直连）
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_SUPPORTED_IMAGE_MIME = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
+
+
+def _build_anthropic_base_url(base_url):
+    normalized = (base_url or ANTHROPIC_DEFAULT_BASE_URL).rstrip('/')
+    if normalized.endswith('/v1'):
+        normalized = normalized[:-3]
+    return normalized
+
+
+def _anthropic_headers(api_key):
+    return {
+        'Content-Type': 'application/json',
+        'x-api-key': api_key,
+        'anthropic-version': ANTHROPIC_API_VERSION,
+    }
+
+
+def _extract_anthropic_text(response_json):
+    parts = []
+    for block in response_json.get('content') or []:
+        if block.get('type') == 'text':
+            parts.append(block.get('text', ''))
+    text = ''.join(parts).strip()
+    if not text:
+        raise ValueError('Anthropic API returned no text content')
+    return text
+
+
+def _convert_openai_content_blocks_to_anthropic(content):
+    # tool_use / tool_result / image 是 Anthropic 原生块（工具循环回放或参考图
+    # 直发），必须原样透传：丢弃 tool_use 会使配对的 tool_result 被 API 拒绝，
+    # 丢弃 image 会让原生直发的参考图静默消失。
+    if isinstance(content, str):
+        return content if content else []
+    if not isinstance(content, list):
+        return [{'type': 'text', 'text': str(content)}]
+
+    blocks = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        block_type = item.get('type')
+        if block_type == 'text':
+            text = (item.get('text') or '').strip()
+            if text:
+                blocks.append({'type': 'text', 'text': text})
+        elif block_type in ('tool_use', 'tool_result', 'image'):
+            blocks.append(item)
+        elif block_type == 'image_url':
+            data_url = (item.get('image_url') or {}).get('url', '')
+            header, _, encoded = data_url.partition(',')
+            media_type = header.partition(';')[0].removeprefix('data:')
+            if media_type not in ANTHROPIC_SUPPORTED_IMAGE_MIME or not encoded:
+                # 不静默丢图：给出占位说明，模型才能向用户解释图片缺席的原因
+                blocks.append({
+                    'type': 'text',
+                    'text': f'[Attached image skipped: {media_type or "unknown"} images are not supported by this provider]',
+                })
+                continue
+            blocks.append({
+                'type': 'image',
+                'source': {'type': 'base64', 'media_type': media_type, 'data': encoded},
+            })
+
+    return blocks
+
+
+def _build_anthropic_request_messages(messages):
+    system_parts = []
+    request_messages = []
+
+    for message in messages:
+        role = message.get('role')
+        content = message.get('content')
+        if role == 'system':
+            text = content if isinstance(content, str) else _extract_text_from_content(content)
+            if text:
+                system_parts.append(text)
+            continue
+
+        converted = _convert_openai_content_blocks_to_anthropic(content)
+        if not converted:
+            # 空 text 块会被 Anthropic 拒绝（"text content blocks must be
+            # non-empty"），转换后为空的消息直接跳过。
+            continue
+
+        message_role = 'user' if role != 'assistant' else 'assistant'
+        if request_messages and request_messages[-1]['role'] == message_role:
+            # Anthropic 要求 user/assistant 交替：连续同角色消息（如角色参考
+            # 消息紧跟首条用户消息）合并为一条多块消息。
+            previous_blocks = request_messages[-1]['content']
+            if isinstance(previous_blocks, str):
+                request_messages[-1]['content'] = [{'type': 'text', 'text': previous_blocks}]
+            if isinstance(converted, str):
+                converted = [{'type': 'text', 'text': converted}]
+            request_messages[-1]['content'].extend(converted)
+        else:
+            request_messages.append({'role': message_role, 'content': converted})
+
+    if not request_messages:
+        request_messages = [{'role': 'user', 'content': [{'type': 'text', 'text': ' '}]}]
+
+    system = '\n\n'.join(part for part in system_parts if part)
+    return (system or None), request_messages
+
+
+def _convert_tools_to_anthropic(tools):
+    converted = []
+    for tool in tools or []:
+        function_payload = tool.get('function') or {}
+        converted.append({
+            'name': function_payload.get('name', ''),
+            'description': function_payload.get('description', ''),
+            'input_schema': function_payload.get('parameters') or {'type': 'object', 'properties': {}},
+        })
+    return converted
+
+
+def _request_anthropic_completion(*, model_name, api_key, messages, base_url, tools=None, max_tokens=None):
+    if not api_key:
+        raise ValueError('API key is required for the selected model configuration')
+
+    system, request_messages = _build_anthropic_request_messages(messages)
+    response = requests.post(
+        f"{_build_anthropic_base_url(base_url)}/v1/messages",
+        headers=_anthropic_headers(api_key),
+        json={
+            'model': model_name,
+            'max_tokens': max_tokens or ANTHROPIC_COMPLETION_MAX_TOKENS,
+            **({'system': system} if system else {}),
+            'messages': request_messages,
+            **({'tools': _convert_tools_to_anthropic(tools)} if tools else {}),
+        },
+        timeout=90,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=None, character=None):
+    if not tools:
+        return _extract_anthropic_text(
+            _request_anthropic_completion(
+                model_name=model_name,
+                api_key=api_key,
+                messages=messages,
+                base_url=base_url,
+            )
+        )
+
+    system, request_messages = _build_anthropic_request_messages(messages)
+    anthropic_tools = _convert_tools_to_anthropic(tools)
+
+    for _ in range(OPENAI_LOCAL_TOOL_CALL_LIMIT):
+        response_json = _request_anthropic_completion(
+            model_name=model_name,
+            api_key=api_key,
+            messages=([{'role': 'system', 'content': system}] if system else [])
+            + [{'role': entry['role'], 'content': entry['content']} for entry in request_messages],
+            base_url=base_url,
+            tools=anthropic_tools,
+        )
+        content_blocks = response_json.get('content') or []
+        tool_use_blocks = [block for block in content_blocks if block.get('type') == 'tool_use']
+
+        request_messages = request_messages + [{'role': 'assistant', 'content': content_blocks}]
+
+        if not tool_use_blocks:
+            text = _extract_anthropic_text(response_json)
+            if text:
+                return text
+            raise ValueError('Anthropic API returned an empty response after tool execution')
+
+        if character is None:
+            raise ValueError('Local tool execution requires a character context')
+
+        tool_result_blocks = []
+        for block in tool_use_blocks:
+            tool_result = _execute_local_memory_tool(
+                character,
+                tool_name=block.get('name', ''),
+                raw_arguments=json.dumps(block.get('input') or {}, ensure_ascii=False),
+            )
+            tool_result_blocks.append({
+                'type': 'tool_result',
+                'tool_use_id': block.get('id', ''),
+                'content': json.dumps(tool_result, ensure_ascii=False),
+            })
+        request_messages = request_messages + [{'role': 'user', 'content': tool_result_blocks}]
+
+    raise ValueError('Anthropic API exceeded the local memory tool call limit')
+
+
+def _stream_anthropic_response(model_name, api_key, messages, base_url):
+    if not api_key:
+        raise ValueError('API key is required for the selected model configuration')
+
+    system, request_messages = _build_anthropic_request_messages(messages)
+    with requests.post(
+        f"{_build_anthropic_base_url(base_url)}/v1/messages",
+        headers=_anthropic_headers(api_key),
+        json={
+            'model': model_name,
+            'max_tokens': ANTHROPIC_COMPLETION_MAX_TOKENS,
+            'stream': True,
+            **({'system': system} if system else {}),
+            'messages': request_messages,
+        },
+        stream=True,
+        timeout=90,
+    ) as response:
+        response.raise_for_status()
+
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+
+            line = raw_line.strip()
+            if not line.startswith('data:'):
+                continue
+
+            payload = line[5:].strip()
+            if not payload or payload == '[DONE]':
+                continue
+
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            if event.get('type') != 'content_block_delta':
+                continue
+            delta = event.get('delta') or {}
+            if delta.get('type') == 'text_delta' and delta.get('text'):
+                yield delta['text']
+
+
 def _stream_gemini_response(model_name, api_key, prompt_or_messages, tools=None):
     if not api_key:
         raise ValueError('API key is required for the selected model configuration')
@@ -769,6 +1330,28 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, character=
         )
         return
 
+    if provider == 'anthropic':
+        if not isinstance(prompt_or_messages, list):
+            prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
+        if tools:
+            buffered_text = _generate_anthropic_response(
+                model_name=model_name,
+                api_key=api_key,
+                messages=prompt_or_messages,
+                base_url=runtime_config.get('base_url', ''),
+                tools=tools,
+                character=character,
+            )
+            yield from _iter_buffered_chunks(buffered_text)
+            return
+        yield from _stream_anthropic_response(
+            model_name=model_name,
+            api_key=api_key,
+            messages=prompt_or_messages,
+            base_url=runtime_config.get('base_url', ''),
+        )
+        return
+
     raise ValueError(f"Unsupported model provider: {provider}")
 
 
@@ -790,6 +1373,18 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, character=Non
         if not isinstance(prompt_or_messages, list):
             prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
         return _generate_openai_compatible_response(
+            model_name=model_name,
+            api_key=api_key,
+            messages=prompt_or_messages,
+            base_url=runtime_config.get('base_url', ''),
+            tools=tools,
+            character=character,
+        )
+
+    if provider == 'anthropic':
+        if not isinstance(prompt_or_messages, list):
+            prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
+        return _generate_anthropic_response(
             model_name=model_name,
             api_key=api_key,
             messages=prompt_or_messages,
@@ -950,7 +1545,8 @@ def _is_legacy_bootstrap_message(message):
 def _build_user_turn_summary(message, include_text_body=False):
     summary = _build_message_text_content(
         message,
-        capabilities={'text': True, 'image': False, 'video': False},
+        role_configs={},
+        text_config={'provider': 'openai_compatible'},
         include_text_body=include_text_body,
     )
     return summary or '[User sent an attachment]'
@@ -1248,6 +1844,30 @@ def _get_tools(chat_session, runtime_config, allow_memory_tools=True):
     return []
 
 
+def _analyze_latest_user_media(visible_history, role_configs, text_config):
+    """发送前对最新一条用户消息的媒体附件跑槽位分析（结果缓存在附件上）。
+
+    历史消息只读缓存，不重新调用，避免每轮重复付费。
+    """
+    latest_user_message = next(
+        (
+            item
+            for item in reversed(visible_history)
+            if isinstance(item, Message) and item.role == 'user'
+        ),
+        None,
+    )
+    if latest_user_message is None:
+        return
+
+    for attachment in get_message_attachments(latest_user_message):
+        attachment_kind = getattr(attachment, 'attachment_kind', '') or ''
+        role = MEDIA_KIND_ROLE.get(attachment_kind)
+        if not role or _route_media_kind(attachment_kind, role_configs, text_config) != 'analyze':
+            continue
+        _analyze_media_via_role(attachment, role_configs[role])
+
+
 def _build_provider_messages(
     chat_session,
     character,
@@ -1257,7 +1877,7 @@ def _build_provider_messages(
     retrieved_memory='',
 ):
     runtime_config = _get_runtime_model_config(chat_session)
-    capabilities = _get_model_capabilities(runtime_config)
+    role_configs = _get_role_configs(chat_session.user)
     use_memory_tools = allow_memory_tools and _supports_memory_tool_mode(runtime_config)
     tools = _get_tools(chat_session, runtime_config, allow_memory_tools=allow_memory_tools)
     system_prompt = _build_system_prompt(
@@ -1272,10 +1892,11 @@ def _build_provider_messages(
         if formatted_research:
             system_prompt = f"{system_prompt}\n\n[LIVE WEB RESEARCH]\n{formatted_research}"
     visible_history = _get_visible_history_messages(chat_session)
+    _analyze_latest_user_media(visible_history, role_configs, runtime_config)
     character_reference_message = _build_character_reference_message(
         character,
         runtime_config,
-        capabilities,
+        role_configs,
         prompt_context,
         use_memory_tools=use_memory_tools,
     )
@@ -1295,7 +1916,7 @@ def _build_provider_messages(
             formatted_history.append(character_reference_message)
         for message in visible_history:
             if isinstance(message, Message):
-                formatted_history.append(_build_provider_message_entry(message, runtime_config, capabilities))
+                formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
                 continue
             formatted_history.append({'role': 'user', 'parts': [message['content']]})
         return runtime_config, formatted_history, tools
@@ -1305,7 +1926,7 @@ def _build_provider_messages(
         formatted_history.append(character_reference_message)
     for message in visible_history:
         if isinstance(message, Message):
-            formatted_history.append(_build_provider_message_entry(message, runtime_config, capabilities))
+            formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
             continue
         formatted_history.append({'role': 'user', 'content': message['content']})
     return runtime_config, formatted_history, tools

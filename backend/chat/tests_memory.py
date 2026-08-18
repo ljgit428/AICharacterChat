@@ -53,7 +53,7 @@ class CharacterMemoryModelTests(TestCase):
         )
 
     def test_create_item_persists_row_and_writes_audit_log(self):
-        from chat.models import CharacterMemoryItem, MemoryAuditAction, MemoryAuditLog, MemoryAuditSource
+        from chat.models import MemoryAuditAction, MemoryAuditLog, MemoryAuditSource
         from chat.memory.manager import MemoryManager
 
         manager = MemoryManager(self.character)
@@ -118,7 +118,7 @@ class CharacterMemoryModelTests(TestCase):
         self.assertEqual(update_row.after_description, 'Uses Clojure at work.')
 
     def test_merge_items_combines_history_and_deletes_secondary(self):
-        from chat.models import CharacterMemoryItem, MemoryAuditAction
+        from chat.models import CharacterMemoryItem
         from chat.memory.manager import MemoryManager
 
         manager = MemoryManager(self.character)
@@ -143,7 +143,7 @@ class CharacterMemoryModelTests(TestCase):
         self.assertEqual(actions, ['create', 'create', 'merge'])
 
     def test_delete_item_writes_audit_log_preserving_before_description(self):
-        from chat.models import MemoryAuditAction, CharacterMemoryItem
+        from chat.models import CharacterMemoryItem, MemoryAuditAction
         from chat.memory.manager import MemoryManager
 
         manager = MemoryManager(self.character)

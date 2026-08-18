@@ -5,7 +5,7 @@ const runtimeProtocol = typeof window !== "undefined" ? window.location.protocol
 const configuredApiBaseUrl = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
 const useDirectLocalBackend = LOCAL_HOSTS.has(runtimeHostname) && configuredApiBaseUrl === DEFAULT_API_BASE_URL;
 
-export const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || "AI Character Studio";
+export const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || "PrisMate";
 export const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "dev";
 export const API_BASE_URL = useDirectLocalBackend
   ? `${runtimeProtocol}//${runtimeHostname}:8000/api`

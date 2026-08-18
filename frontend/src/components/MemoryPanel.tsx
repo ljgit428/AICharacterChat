@@ -1,17 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { useI18n } from "@/i18n/provider";
 import { apiService } from "@/utils/api";
 import { MemorySnapshot } from "@/types";
-import { Database, Eye, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { Database, Loader2, RefreshCw, Sparkles, X } from "lucide-react";
 
 interface MemoryPanelProps {
   characterId: string;
   chatSessionId?: string | null;
   refreshKey?: string;
   onPrivateModeChanged?: (isPrivateMode: boolean) => void;
+  onClose?: () => void;
 }
 
 function safeError(value: unknown, fallback: string): string {
@@ -25,9 +25,9 @@ export default function MemoryPanel({
   chatSessionId,
   refreshKey,
   onPrivateModeChanged,
+  onClose,
 }: MemoryPanelProps) {
   const { messages: copy } = useI18n();
-  const router = useRouter();
   const [snapshot, setSnapshot] = useState<MemorySnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -122,19 +122,21 @@ export default function MemoryPanel({
               type="button"
               onClick={() => setReloadNonce((prev) => prev + 1)}
               disabled={loading}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
               title={copy.memory.refresh}
             >
-              {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             </button>
-            <button
-              type="button"
-              onClick={() => router.push(`/memory?character_id=${encodeURIComponent(characterId)}`)}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-2xl bg-violet-500 text-white transition-colors hover:bg-violet-600"
-              title={copy.memory.longTermMemoryNarrative}
-            >
-              <Eye size={14} />
-            </button>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200"
+                title={copy.memory.closePanel}
+              >
+                <X size={16} />
+              </button>
+            )}
           </div>
         </div>
 

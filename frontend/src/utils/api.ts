@@ -4,7 +4,7 @@ interface ApiResponse<T> {
 }
 
 import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, UserProfile } from '@/types';
-import { ModelConfig, ModelProvider, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
+import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
 
@@ -48,7 +48,6 @@ interface ApiModelConfig {
   model_name: string;
   api_key: string;
   base_url?: string;
-  is_default: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -336,7 +335,6 @@ function normalizeModelConfig(apiData: ApiModelConfig): ModelConfig {
     modelName: apiData.model_name,
     apiKey: apiData.api_key,
     baseUrl: apiData.base_url || '',
-    isDefault: apiData.is_default,
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
   };
@@ -1069,6 +1067,52 @@ class ApiService {
   async deleteModelConfig(id: string): Promise<ApiResponse<void>> {
     return this.request(`/model-configs/${id}`, {
       method: 'DELETE',
+    });
+  }
+
+  async getModelRoles(): Promise<ApiResponse<ModelRoleAssignments>> {
+    const response = await this.request<Record<string, ApiModelConfig | null>>('/model-roles/');
+    if (response.data) {
+      const roles = { text: null, image: null, audio: null, video: null } as ModelRoleAssignments;
+      (Object.keys(roles) as ModelRoleKey[]).forEach((role) => {
+        const value = response.data?.[role];
+        roles[role] = value ? normalizeModelConfig(value) : null;
+      });
+      return { data: roles };
+    }
+    return { data: undefined };
+  }
+
+  async updateModelRoles(
+    assignments: Partial<Record<ModelRoleKey, string | null>>
+  ): Promise<ApiResponse<ModelRoleAssignments>> {
+    const response = await this.request<Record<string, ApiModelConfig | null>>('/model-roles/', {
+      method: 'PUT',
+      body: JSON.stringify(assignments),
+    });
+    if (response.data) {
+      const roles = { text: null, image: null, audio: null, video: null } as ModelRoleAssignments;
+      (Object.keys(roles) as ModelRoleKey[]).forEach((role) => {
+        const value = response.data?.[role];
+        roles[role] = value ? normalizeModelConfig(value) : null;
+      });
+      return { data: roles };
+    }
+    return { data: undefined };
+  }
+
+  async probeProviderModels(params: {
+    provider: ModelProvider;
+    baseUrl?: string;
+    apiKey?: string;
+  }): Promise<ApiResponse<{ models: string[] }>> {
+    return this.request<{ models: string[] }>('/model-catalog/probe/', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: params.provider,
+        base_url: params.baseUrl || '',
+        api_key: params.apiKey || '',
+      }),
     });
   }
 

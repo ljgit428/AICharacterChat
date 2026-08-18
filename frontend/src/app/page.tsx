@@ -18,8 +18,10 @@ import {
   Search,
   X,
   FolderTree,
-  PanelRightOpen,
   Database,
+  Brain,
+  Globe,
+  LogOut,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
@@ -27,10 +29,14 @@ import ChatInterface from '@/components/ChatInterface';
 import ModelApiSettingsPanel from '@/components/ModelApiSettingsPanel';
 import UserSettingsPanel from '@/components/UserSettingsPanel';
 import SoulPanel from '@/components/SoulPanel';
+import MemoryPanel from '@/components/MemoryPanel';
+import ResearchPanel from '@/components/ResearchPanel';
 import { useI18n } from '@/i18n/provider';
 import { clearChat } from '@/store/chatSlice';
-import { apiService } from '@/utils/api';
-import { ChatSession, ModelConfig, UserProfile, WebSearchConfig } from '@/types';
+import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
+
+type RightPanelKind = 'soul' | 'memory' | 'research';
+import { ChatSession, ModelConfig, ModelRoleAssignments, UserProfile, WebSearchConfig } from '@/types';
 import { APP_NAME, APP_VERSION } from '@/constants';
 
 type ViewState = 'home' | 'playground' | 'history_all' | 'create' | 'model_settings' | 'user_settings';
@@ -48,7 +54,8 @@ function AIStudioLayoutContent() {
   const { setLocale, messages, formatDate, formatTime } = useI18n();
   const [currentView, setCurrentView] = useState<ViewState>('playground');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
+  const [rightPanelKind, setRightPanelKind] = useState<RightPanelKind>('soul');
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [isResizingRightPanel, setIsResizingRightPanel] = useState(false);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
@@ -56,6 +63,8 @@ function AIStudioLayoutContent() {
   const [soulRefreshKey, setSoulRefreshKey] = useState('shell');
   const [recentChats, setRecentChats] = useState<ChatHistoryItem[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
+  const [modelRoles, setModelRoles] = useState<ModelRoleAssignments | null>(null);
+  const [loadingModelRoles, setLoadingModelRoles] = useState(true);
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const [loadingUserProfile, setLoadingUserProfile] = useState(true);
@@ -66,6 +75,7 @@ function AIStudioLayoutContent() {
   const [webSearchConfigError, setWebSearchConfigError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
+  const [authTokenPresent, setAuthTokenPresent] = useState(false);
 
   const [historyPage, setHistoryPage] = useState(1);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
@@ -87,6 +97,12 @@ function AIStudioLayoutContent() {
       router.replace('/');
     }
   }, [autoSelectId, dispatch, router]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setAuthTokenPresent(Boolean(getAuthToken()));
+    }
+  }, []);
 
   const formatChatSessions = useCallback((sessions: ChatSession[]) => {
     return sessions.map((session) => {
@@ -145,6 +161,25 @@ function AIStudioLayoutContent() {
     }
   }, [messages.modelApi.failedToLoadModelConfigurations]);
 
+  const fetchModelRoles = useCallback(async () => {
+    try {
+      setLoadingModelRoles(true);
+      const response = await apiService.getModelRoles();
+
+      if (response.error) {
+        setModelConfigError(response.error);
+        return;
+      }
+
+      setModelRoles(response.data || null);
+    } catch (err) {
+      console.error('Failed to fetch model role assignments:', err);
+      setModelConfigError(messages.modelApi.failedToLoadRoles);
+    } finally {
+      setLoadingModelRoles(false);
+    }
+  }, [messages.modelApi.failedToLoadRoles]);
+
   const fetchUserProfile = useCallback(async () => {
     try {
       setLoadingUserProfile(true);
@@ -188,9 +223,10 @@ function AIStudioLayoutContent() {
   useEffect(() => {
     fetchChatSessions();
     fetchModelConfigs();
+    fetchModelRoles();
     fetchUserProfile();
     fetchWebSearchConfig();
-  }, [fetchChatSessions, fetchModelConfigs, fetchUserProfile, fetchWebSearchConfig]);
+  }, [fetchChatSessions, fetchModelConfigs, fetchModelRoles, fetchUserProfile, fetchWebSearchConfig]);
 
   useEffect(() => {
     if (userProfile?.interfaceLanguage) {
@@ -266,8 +302,26 @@ function AIStudioLayoutContent() {
     }
   };
 
-  const defaultModelConfigId = modelConfigs.find((config) => config.isDefault)?.id || null;
-  const hasModelConfigs = modelConfigs.length > 0;
+  const defaultModelConfigId = modelRoles?.text?.id || modelConfigs[0]?.id || null;
+  const hasModelConfigs = Boolean(modelRoles?.text) || modelConfigs.length > 0;
+
+  const isCharacterInPlayground = Boolean(selectedCharacterId) && currentView === 'playground';
+
+  const handleRightPanelIconClick = (kind: RightPanelKind) => {
+    if (isRightPanelOpen && rightPanelKind === kind) {
+      setIsRightPanelOpen(false);
+      return;
+    }
+    setRightPanelKind(kind);
+    setIsRightPanelOpen(true);
+  };
+
+  const handleLogout = () => {
+    removeAuthToken();
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+  };
 
   const openModelSettings = () => {
     setCurrentView('model_settings');
@@ -327,7 +381,6 @@ function AIStudioLayoutContent() {
             <div className="mb-2 flex items-center justify-between px-1">
               <div>
                 <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.sessions}</p>
-                <p className="mt-1 text-sm font-medium text-slate-700">{messages.shell.returnToRecentScenes}</p>
               </div>
             </div>
             <div className="mb-1">
@@ -463,14 +516,16 @@ function AIStudioLayoutContent() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsRightPanelOpen((prev) => !prev)}
-                className="hidden rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900 lg:flex"
-                title="Toggle right panel"
-              >
-                <PanelRightOpen size={18} />
-              </button>
+              {authTokenPresent && (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="hidden rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900 lg:flex"
+                  title={messages.auth.logout}
+                >
+                  <LogOut size={18} />
+                </button>
+              )}
               <div className="rounded-full bg-white/80 px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">{APP_VERSION}</div>
             </div>
           </header>
@@ -479,44 +534,86 @@ function AIStudioLayoutContent() {
           </div>
         </main>
 
-        <div
-          className="relative hidden h-full flex-shrink-0 border-l border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(244,247,250,0.92))] lg:block"
-          style={{ width: isRightPanelOpen ? `${rightPanelWidth}px` : '76px' }}
-        >
-          {isRightPanelOpen && (
-            <button
-              type="button"
-              onMouseDown={(event) => {
-                event.preventDefault();
-                setIsResizingRightPanel(true);
-              }}
-              className="absolute left-0 top-1/2 z-10 hidden h-24 w-3 -translate-x-1/2 -translate-y-1/2 cursor-col-resize rounded-full border border-slate-200/80 bg-white/95 text-slate-400 shadow-sm transition-colors hover:bg-white hover:text-slate-700 xl:flex"
-              title="Resize right panel"
-            >
-              <span className="mx-auto h-10 w-px bg-slate-300" />
-            </button>
-          )}
-          {selectedCharacterId && currentView === 'playground' ? (
-            <div className="h-full p-4">
-              <SoulPanel
-                characterId={selectedCharacterId}
-                refreshKey={soulRefreshKey}
-                isOpen={isRightPanelOpen}
-                onToggle={() => setIsRightPanelOpen((prev) => !prev)}
-                className="h-full"
-              />
-            </div>
-          ) : (
-            <div className="h-full p-4">
-              <WorkspaceRightPanel
-                isOpen={isRightPanelOpen}
-                onToggle={() => setIsRightPanelOpen((prev) => !prev)}
-                hasSelectedCharacter={Boolean(selectedCharacterId)}
-                currentView={currentView}
-              />
-            </div>
-          )}
-        </div>
+        {isCharacterInPlayground && (
+          <div
+            className="relative hidden h-full flex-shrink-0 border-l border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(244,247,250,0.92))] lg:block"
+            style={{ width: isRightPanelOpen ? `${rightPanelWidth}px` : '76px' }}
+          >
+            {isRightPanelOpen && (
+              <button
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  setIsResizingRightPanel(true);
+                }}
+                className="absolute left-0 top-1/2 z-10 hidden h-24 w-3 -translate-x-1/2 -translate-y-1/2 cursor-col-resize rounded-full border border-slate-200/80 bg-white/95 text-slate-400 shadow-sm transition-colors hover:bg-white hover:text-slate-700 xl:flex"
+                title="Resize right panel"
+              >
+                <span className="mx-auto h-10 w-px bg-slate-300" />
+              </button>
+            )}
+            {isRightPanelOpen ? (
+              <div className="h-full p-4">
+                {rightPanelKind === 'soul' ? (
+                  <SoulPanel
+                    characterId={selectedCharacterId as string}
+                    refreshKey={soulRefreshKey}
+                    isOpen
+                    onToggle={() => setIsRightPanelOpen(false)}
+                    className="h-full"
+                  />
+                ) : rightPanelKind === 'memory' ? (
+                  <MemoryPanel
+                    characterId={selectedCharacterId as string}
+                    chatSessionId={selectedSessionId}
+                    refreshKey={soulRefreshKey}
+                    onClose={() => setIsRightPanelOpen(false)}
+                  />
+                ) : (
+                  <ResearchPanel onClose={() => setIsRightPanelOpen(false)} />
+                )}
+              </div>
+            ) : (
+              (() => {
+                const soulActive = rightPanelKind === 'soul';
+                const memoryActive = rightPanelKind === 'memory';
+                const researchActive = rightPanelKind === 'research';
+                const launcherBaseClass = 'flex h-10 w-10 items-center justify-center rounded-2xl transition-colors';
+                const launcherActiveClass = 'bg-slate-900 text-white hover:bg-slate-800';
+                const launcherMutedClass = 'bg-white/70 text-slate-500 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900';
+
+                return (
+                  <aside className="flex h-full w-full flex-shrink-0 flex-col items-center gap-3 rounded-[1.75rem] border border-slate-200/80 bg-white/75 px-2 py-3 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
+                    <button
+                      type="button"
+                      onClick={() => handleRightPanelIconClick('soul')}
+                      className={`${launcherBaseClass} ${soulActive ? launcherActiveClass : launcherMutedClass}`}
+                      title={messages.chat.toggleSoulPanel}
+                    >
+                      <FolderTree className="h-5 w-5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRightPanelIconClick('memory')}
+                      className={`${launcherBaseClass} ${memoryActive ? launcherActiveClass : launcherMutedClass}`}
+                      title={messages.chat.toggleMemoryPanel}
+                    >
+                      <Brain className="h-5 w-5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRightPanelIconClick('research')}
+                      className={`${launcherBaseClass} ${researchActive ? launcherActiveClass : launcherMutedClass}`}
+                      title={messages.chat.toggleResearchPanel}
+                    >
+                      <Globe className="h-5 w-5" />
+                    </button>
+                  </aside>
+                );
+              })()
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -530,6 +627,7 @@ function AIStudioLayoutContent() {
               characterId={selectedCharacterId}
               initialSessionId={selectedSessionId}
               modelConfigs={modelConfigs}
+              modelRoles={modelRoles}
               defaultModelConfigId={defaultModelConfigId}
               userProfile={userProfile}
               onBack={handleBackToGallery}
@@ -556,12 +654,15 @@ function AIStudioLayoutContent() {
         return (
           <ModelApiSettingsPanel
             modelConfigs={modelConfigs}
+            modelRoles={modelRoles}
             webSearchConfig={webSearchConfig}
             loading={loadingModelConfigs}
+            loadingRoles={loadingModelRoles}
             loadingWebSearchConfig={loadingWebSearchConfig}
             error={modelConfigError}
             webSearchError={webSearchConfigError}
             onRefresh={fetchModelConfigs}
+            onRefreshModelRoles={fetchModelRoles}
             onRefreshWebSearchConfig={fetchWebSearchConfig}
           />
         );
@@ -857,95 +958,6 @@ function NavItem({
         </span>
       )}
     </button>
-  );
-}
-
-function WorkspaceRightPanel({
-  isOpen,
-  onToggle,
-  hasSelectedCharacter,
-  currentView,
-}: {
-  isOpen: boolean;
-  onToggle: () => void;
-  hasSelectedCharacter: boolean;
-  currentView: ViewState;
-}) {
-  const { locale } = useI18n();
-  const copy = locale === 'zh-CN'
-    ? {
-        title: '记忆面板',
-        subtitle: '右侧区域会持续保留。选择角色后，这里会显示该角色的记忆文件与参考文件管理。',
-        emptyTitle: hasSelectedCharacter ? '当前视图未显示角色记忆' : '先选择一个角色',
-        emptyBody: hasSelectedCharacter
-          ? '切回工作区聊天视图后，这里会切换为对应角色的记忆面板。'
-          : currentView === 'home'
-            ? '从首页进入工作区并选择角色后，右侧会加载该角色的记忆树。'
-            : '在工作区中选择一个角色后，右侧会显示可收缩的记忆面板。',
-        pinned: '右侧常驻',
-        collapsed: '展开面板',
-      }
-    : {
-        title: 'Memory Panel',
-        subtitle: 'This area now stays pinned on the right. After you select a character, it will show that character’s memory tree and reference file controls.',
-        emptyTitle: hasSelectedCharacter ? 'Memory is not shown in this view' : 'Select a character first',
-        emptyBody: hasSelectedCharacter
-          ? 'Switch back to the chat workspace and this area will become the active character memory panel.'
-          : currentView === 'home'
-            ? 'Open the workspace and choose a character to load the memory tree here.'
-            : 'Choose a character in the workspace and this right-side panel will become the collapsible memory view.',
-        pinned: 'Pinned right side',
-        collapsed: 'Expand panel',
-      };
-
-  if (!isOpen) {
-    return (
-      <aside className="flex h-full w-full flex-col items-center gap-3 rounded-[1.75rem] border border-slate-200/80 bg-white/75 px-2 py-3 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
-        <button
-          type="button"
-          onClick={onToggle}
-          className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white transition-colors hover:bg-slate-800"
-          title={copy.collapsed}
-        >
-          <FolderTree className="h-5 w-5" />
-        </button>
-      </aside>
-    );
-  }
-
-  return (
-    <aside className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-[1.75rem] border border-slate-200/80 bg-white/90 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur">
-      <div className="border-b border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.95),rgba(255,255,255,0.92))] px-4 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-slate-900">{copy.title}</h3>
-            <p className="mt-1 text-xs leading-5 text-slate-500">{copy.subtitle}</p>
-          </div>
-          <button
-            type="button"
-            onClick={onToggle}
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-900"
-            title={copy.collapsed}
-          >
-            <ChevronRight className="h-4 w-4 rotate-180" />
-          </button>
-        </div>
-      </div>
-
-      <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-        <div className="w-full rounded-[1.75rem] border border-dashed border-slate-200 bg-[linear-gradient(180deg,#f8fbff_0%,#f5f7fb_100%)] p-6 text-center">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-[1.25rem] bg-white text-sky-700 shadow-sm ring-1 ring-slate-200">
-            <FolderTree className="h-8 w-8" />
-          </div>
-          <div className="mt-5 inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs text-emerald-700">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" />
-            <span>{copy.pinned}</span>
-          </div>
-          <h4 className="mt-5 text-lg font-semibold text-slate-900">{copy.emptyTitle}</h4>
-          <p className="mt-2 text-sm leading-7 text-slate-500">{copy.emptyBody}</p>
-        </div>
-      </div>
-    </aside>
   );
 }
 

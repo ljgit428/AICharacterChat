@@ -7,11 +7,11 @@ import { apiService } from '@/utils/api';
 import { MEDIA_BASE_URL } from '@/constants';
 import { SUPPORTED_UI_LOCALES, type SupportedLocale } from '@/i18n/messages';
 import { useI18n } from '@/i18n/provider';
+import AvatarCropper from '@/components/AvatarCropper';
 import {
   AlertCircle,
   Clock3,
   Globe,
-  MapPinned,
   Save,
   Shield,
   Sparkles,
@@ -64,20 +64,6 @@ const DEFAULT_FORM_STATE: UserProfileFormState = {
   allowResearchProfileUpdates: false,
   blockedTopics: '',
 };
-
-function getPreferredLanguageCopy(locale: SupportedLocale) {
-  if (locale === 'en-US') {
-    return {
-      label: 'Preferred Language',
-      help: 'Used for the interface and as the default language for auto-generated prompts.',
-    };
-  }
-
-  return {
-    label: '偏好语言',
-    help: '用于界面语言，也会作为自动生成提示词时的默认语言。',
-  };
-}
 
 function getBrowserTimezone() {
   if (typeof window === 'undefined') {
@@ -136,11 +122,12 @@ export default function UserSettingsPanel({
   onRefresh,
   onOpenModelSettings,
 }: UserSettingsPanelProps) {
-  const { messages, setLocale, locale } = useI18n();
+  const { messages, setLocale } = useI18n();
   const [formState, setFormState] = useState<UserProfileFormState>(DEFAULT_FORM_STATE);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [browserTimezone, setBrowserTimezone] = useState('');
+  const [avatarCropSrc, setAvatarCropSrc] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -163,19 +150,41 @@ export default function UserSettingsPanel({
 
   const timezonePreview = formatTimezonePreview(formState.timezone, formState.interfaceLanguage);
   const hasLocationHint = formState.shareLocation && Boolean(formState.locationLabel.trim());
-  const preferredLanguageCopy = getPreferredLanguageCopy(locale);
 
   const handleAvatarUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
+    event.target.value = '';
     if (!file) {
       return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setError(messages.avatarCropper.mustBeImage);
+      return;
+    }
+
+    // Revoke any previously held object URL to avoid leaking blobs if the
+    // user picks a new file while the cropper is already open.
+    setAvatarCropSrc((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous);
+      }
+      return URL.createObjectURL(file);
+    });
+  };
+
+  const handleAvatarCropApply = async (blob: Blob) => {
+    const croppedFile = new File([blob], 'avatar.jpg', { type: 'image/jpeg' });
+    if (avatarCropSrc) {
+      URL.revokeObjectURL(avatarCropSrc);
+      setAvatarCropSrc(null);
     }
 
     setIsSaving(true);
     setError(null);
 
     try {
-      const response = await apiService.uploadImage(file);
+      const response = await apiService.uploadImage(croppedFile);
       if (response.error || !response.data?.uri) {
         throw new Error(response.error || messages.user.saveUserSettingsFailed);
       }
@@ -188,7 +197,13 @@ export default function UserSettingsPanel({
       setError(uploadError instanceof Error ? uploadError.message : messages.user.saveUserSettingsFailed);
     } finally {
       setIsSaving(false);
-      event.target.value = '';
+    }
+  };
+
+  const handleAvatarCropCancel = () => {
+    if (avatarCropSrc) {
+      URL.revokeObjectURL(avatarCropSrc);
+      setAvatarCropSrc(null);
     }
   };
 
@@ -231,6 +246,15 @@ export default function UserSettingsPanel({
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50">
+      {avatarCropSrc && (
+        <AvatarCropper
+          imageSrc={avatarCropSrc}
+          copy={messages.avatarCropper}
+          shape="round"
+          onCancel={handleAvatarCropCancel}
+          onApply={handleAvatarCropApply}
+        />
+      )}
       <div className="mx-auto max-w-6xl px-6 py-8 md:px-10">
         <div className="mb-8">
           <h2 className="text-2xl font-bold text-slate-900">{messages.user.title}</h2>
@@ -382,7 +406,7 @@ export default function UserSettingsPanel({
                       </div>
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-slate-700">{preferredLanguageCopy.label}</label>
+                      <label className="mb-1.5 block text-sm font-medium text-slate-700">{messages.user.interfaceLanguage}</label>
                       <select
                         value={formState.interfaceLanguage}
                         onChange={(event) => setField('interfaceLanguage', event.target.value as SupportedLocale)}
@@ -392,7 +416,7 @@ export default function UserSettingsPanel({
                           <option key={language.value} value={language.value}>{language.nativeLabel} / {language.englishLabel}</option>
                         ))}
                       </select>
-                      <p className="mt-2 text-xs text-slate-500">{preferredLanguageCopy.help}</p>
+                      <p className="mt-2 text-xs text-slate-500">{messages.user.interfaceLanguageHelp}</p>
                     </div>
                   </div>
 
@@ -542,20 +566,6 @@ export default function UserSettingsPanel({
                     <span>{messages.user.allowResearchProfileUpdates}</span>
                   </label>
                   <p className="text-xs text-slate-500">{messages.user.allowResearchProfileUpdatesHelp}</p>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <div className="rounded-full bg-slate-100 p-2 text-slate-700">
-                    <MapPinned size={18} />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold text-slate-900">{messages.user.sessionInteractionTitle}</h3>
-                    <p className="mt-2 text-sm leading-6 text-slate-600">
-                      {messages.user.sessionInteractionDescription}
-                    </p>
-                  </div>
                 </div>
               </div>
 

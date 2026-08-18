@@ -139,7 +139,7 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
         model = ModelConfiguration
         fields = [
             'id', 'name', 'provider', 'model_name', 'api_key', 'base_url',
-            'is_default', 'created_at', 'updated_at'
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
 

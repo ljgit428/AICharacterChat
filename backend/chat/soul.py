@@ -2,7 +2,7 @@ import os
 
 from django.db import DatabaseError
 
-from .models import AttachmentKind, CharacterMemoryItem, UserProfile
+from .models import AttachmentKind, UserProfile
 
 
 MEMORY_LAYER_DESCRIPTIONS = {
@@ -12,6 +12,11 @@ MEMORY_LAYER_DESCRIPTIONS = {
 }
 
 WIKI_MEMORY_PATH = "wiki/memory.md"
+
+# Folder uploads can attach dozens of text assets; without a total cap the
+# "Uploaded Background Text" block would inline every asset (up to 16k chars each)
+# into the system prompt on every turn. Order-sensitive: earlier sort_order wins.
+UPLOADED_BACKGROUND_TOTAL_CHAR_LIMIT = 60000
 
 
 def bootstrap_soul_documents(character):
@@ -255,19 +260,28 @@ def _render_uploaded_index(character):
 def _render_uploaded_background_text(character):
     assets = _get_character_knowledge_assets(character)
     sections = []
+    used_chars = 0
+    omitted_sections = 0
     for asset in assets:
         if _get_asset_kind(asset) != AttachmentKind.TEXT:
             continue
 
         file_name = _get_asset_name(asset)
         suffix = os.path.splitext(file_name.lower())[1]
-        if suffix not in {".txt", ".md", ".markdown", ".json"}:
+        if suffix not in {".txt", ".md", ".markdown", ".json", ".jsonl"}:
             continue
 
         content = _read_text_content(_get_asset_path(asset), _get_asset_inline_text(asset))
         if not content:
             continue
-        sections.append(f"## {file_name}\n{content}")
+
+        section = f"## {file_name}\n{content}"
+        if sections and used_chars + len(section) > UPLOADED_BACKGROUND_TOTAL_CHAR_LIMIT:
+            omitted_sections += 1
+            continue
+
+        sections.append(section)
+        used_chars += len(section)
 
     if not sections:
         return "# Uploaded Background Text\nNo uploaded background text yet."
@@ -276,6 +290,11 @@ def _render_uploaded_background_text(character):
         "# Uploaded Background Text",
         "Treat these as user-provided source material for voice, backstory, and reference details.",
         *sections,
+        *(
+            [f"[{omitted_sections} more uploaded file(s) exist but were omitted to stay within the prompt budget]"]
+            if omitted_sections
+            else []
+        ),
     ])
 
 
