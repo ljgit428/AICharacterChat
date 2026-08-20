@@ -2004,6 +2004,36 @@ def _build_provider_messages(
     return runtime_config, formatted_history, tools
 
 
+def _prepare_generation(chat_session, character, generate_greeting=False, research_context=None):
+    """Shared generation configuration for the streaming and non-streaming paths.
+
+    The memory strategy is decided exactly once here and used by both paths so
+    they never drift apart: providers that support local tools get the memory
+    tooling mode, everyone else falls back to a compact prefetch injected into
+    the prompt (``_build_stream_memory_prefetch`` is used by both paths even
+    though its name predates that). Returns ``(runtime_config,
+    formatted_history, tools)``.
+    """
+    runtime_config = _get_runtime_model_config(chat_session)
+    use_memory_tools = _supports_memory_tool_mode(runtime_config)
+    retrieved_memory = ''
+    if not use_memory_tools:
+        retrieved_memory = _build_stream_memory_prefetch(
+            character,
+            chat_session,
+            generate_greeting=generate_greeting,
+        )
+    runtime_config, formatted_history, tools = _build_provider_messages(
+        chat_session=chat_session,
+        character=character,
+        generate_greeting=generate_greeting,
+        research_context=research_context,
+        allow_memory_tools=use_memory_tools,
+        retrieved_memory=retrieved_memory,
+    )
+    return runtime_config, formatted_history, tools
+
+
 # ---------------------------------------------------------------------------
 # Long-term memory pipeline (per-turn, SonettoHere parity)
 # ---------------------------------------------------------------------------
@@ -2383,7 +2413,7 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
         if chat_session is None:
             raise ValueError('Chat session not found for response generation')
         research_context = build_research_context(chat_session, user_message=user_message)
-        runtime_config, formatted_history, tools = _build_provider_messages(
+        runtime_config, formatted_history, tools = _prepare_generation(
             chat_session=chat_session,
             character=character,
             generate_greeting=generate_greeting,
@@ -2434,25 +2464,14 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
 
     research_context = build_research_context(chat_session, user_message=user_message)
 
-    runtime_config = _get_runtime_model_config(chat_session)
-    # Streaming enables the local memory tools for providers that support them
-    # (the model actively queries memory instead of a passive prefetch).
-    use_memory_tools = _supports_memory_tool_mode(runtime_config)
-    retrieved_memory = ''
-    if not use_memory_tools:
-        retrieved_memory = _build_stream_memory_prefetch(
-            character,
-            chat_session,
-            generate_greeting=generate_greeting,
-        )
-
-    runtime_config, formatted_history, tools = _build_provider_messages(
+    # Shared generation configuration: memory strategy (tools vs prefetch),
+    # prompt building and tool specs are decided once in _prepare_generation
+    # so the streaming and non-streaming paths can never drift apart.
+    runtime_config, formatted_history, tools = _prepare_generation(
         chat_session=chat_session,
         character=character,
         generate_greeting=generate_greeting,
         research_context=research_context,
-        allow_memory_tools=use_memory_tools,
-        retrieved_memory=retrieved_memory,
     )
 
     started_at = time.perf_counter()

@@ -54,6 +54,7 @@ from chat.tasks import (
     _generate_anthropic_response,
     _generate_openai_compatible_response,
     _get_or_upload_generativeai_file,
+    _prepare_generation,
     build_research_context,
     stream_ai_response,
 )
@@ -3291,3 +3292,84 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(payload_lines[1]['tool'], 'web_search')
         self.assertEqual(payload_lines[2]['content'], 'hmm')
         self.assertEqual(payload_lines[4]['thinking'], 'hmm')
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class SharedGenerationConfigTests(TestCase):
+    """Streaming and non-streaming paths share one generation configuration."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='shared-config', password='password123')
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Shared Config Character',
+            avatar_url='',
+            description='A character for shared generation config tests.',
+            personality='Even-keeled',
+            appearance='Beige sweater',
+            scenario='Office',
+            example_dialogue='',
+            affiliation='Team C',
+            tags=['shared'],
+        )
+        self.session = ChatSession.objects.create(
+            user=self.user,
+            character=self.character,
+            title='Shared Config Session',
+        )
+
+    @patch('chat.tasks._build_provider_messages')
+    @patch('chat.tasks._build_stream_memory_prefetch', return_value='PREFETCHED MEMORY')
+    @patch('chat.tasks._supports_memory_tool_mode')
+    @patch('chat.tasks._get_runtime_model_config')
+    def test_prepare_generation_uses_prefetch_when_tools_unsupported(
+        self, mock_config, mock_supports, mock_prefetch, mock_build
+    ):
+        mock_config.return_value = {
+            'provider': 'gemini',
+            'model_name': 'gemini-2.5-flash',
+            'api_key': 'k',
+            'base_url': '',
+        }
+        mock_supports.return_value = False
+        mock_build.return_value = (mock_config.return_value, [], [])
+
+        _prepare_generation(self.session, self.character)
+
+        mock_prefetch.assert_called_once()
+        mock_build.assert_called_once_with(
+            chat_session=self.session,
+            character=self.character,
+            generate_greeting=False,
+            research_context=None,
+            allow_memory_tools=False,
+            retrieved_memory='PREFETCHED MEMORY',
+        )
+
+    @patch('chat.tasks._build_provider_messages')
+    @patch('chat.tasks._build_stream_memory_prefetch')
+    @patch('chat.tasks._supports_memory_tool_mode')
+    @patch('chat.tasks._get_runtime_model_config')
+    def test_prepare_generation_uses_tools_when_supported_and_skips_prefetch(
+        self, mock_config, mock_supports, mock_prefetch, mock_build
+    ):
+        mock_config.return_value = {
+            'provider': 'openai_compatible',
+            'model_name': 'gpt-4.1',
+            'api_key': 'k',
+            'base_url': '',
+        }
+        mock_supports.return_value = True
+        mock_build.return_value = (mock_config.return_value, [], [])
+
+        _prepare_generation(self.session, self.character)
+
+        mock_prefetch.assert_not_called()
+        mock_build.assert_called_once_with(
+            chat_session=self.session,
+            character=self.character,
+            generate_greeting=False,
+            research_context=None,
+            allow_memory_tools=True,
+            retrieved_memory='',
+        )
