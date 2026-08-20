@@ -34,6 +34,7 @@ from chat.attachments import (
     guess_attachment_kind,
     validate_attachment_size,
 )
+from chat.memory.filesystem import CharacterMemoryFilesystem, StagedUploadMemoryFilesystem
 from chat.soul import (
     build_character_prompt_context,
     build_character_system_prompt_preview,
@@ -1564,7 +1565,7 @@ class PromptMemoryTests(TestCase):
             messages=[{'role': 'system', 'content': 'Use memory tools.'}],
             base_url='https://example.com/v1',
             tools=_build_memory_tool_specs(),
-            character=self.character,
+            filesystem=CharacterMemoryFilesystem(self.character),
         )
 
         self.assertEqual(result, 'I still call you Gatewalker.')
@@ -1595,7 +1596,7 @@ class PromptMemoryTests(TestCase):
             messages=[{'role': 'system', 'content': 'Use memory tools if available.'}],
             base_url='https://example.com/v1',
             tools=_build_memory_tool_specs(),
-            character=self.character,
+            filesystem=CharacterMemoryFilesystem(self.character),
         )
 
         self.assertEqual(result, 'Fallback answer without tools.')
@@ -2322,11 +2323,37 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertNotIn('errors', payload)
         self.assertEqual(payload['data']['generateCharacterDraft']['name'], 'Mira')
 
-        _, prompt = mock_generate_text.call_args[0]
-        self.assertIn('Keep the core concept grounded.', prompt)
-        self.assertIn('Name: Mira', prompt)
-        self.assertIn('Mira always answers with calm precision.', prompt)
-        self.assertNotIn('portrait.png', prompt)
+        # The draft must route through the Memory Tools, not inline the file bodies.
+        runtime_config, messages = mock_generate_text.call_args[0]
+        self.assertEqual(runtime_config['provider'], 'openai_compatible')
+        self.assertTrue(mock_generate_text.call_args.kwargs['tools'])
+        filesystem = mock_generate_text.call_args.kwargs['filesystem']
+        self.assertIsInstance(filesystem, StagedUploadMemoryFilesystem)
+
+        prompt_text = '\n'.join(
+            message['content']
+            for message in messages
+            if isinstance(message.get('content'), str)
+        )
+        self.assertIn('Keep the core concept grounded.', prompt_text)
+        # File bodies must NOT be injected into the prompt.
+        self.assertNotIn('Name: Mira', prompt_text)
+        self.assertNotIn('Mira always answers with calm precision.', prompt_text)
+
+        # The files are queryable through the filesystem instead.
+        listing = filesystem.list_memory_files(path_prefix='raw/character_setup/uploads')
+        entries_by_title = {entry['title']: entry for entry in listing['entries']}
+        self.assertIn('profile.txt', entries_by_title)
+        self.assertIn('dialogue.md', entries_by_title)
+        self.assertIn('portrait.png', entries_by_title)
+        self.assertEqual(entries_by_title['portrait.png']['kind'], 'image')
+
+        profile_doc = filesystem.read_memory_file('raw/character_setup/uploads/profile.txt')
+        self.assertIn('Name: Mira', profile_doc['content'])
+
+        portrait_doc = filesystem.read_memory_file('raw/character_setup/uploads/portrait.png')
+        self.assertEqual(portrait_doc['kind'], 'image')
+        self.assertEqual(portrait_doc['content'], '')
 
     def test_create_character_imports_background_text_into_memory_explorer(self):
         background_url = self._write_uploaded_text(
@@ -2358,7 +2385,9 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(payload['data']['createCharacter']['backgroundFileName'], 'legacy-dialogue.txt')
 
         character = Character.objects.get(id=payload['data']['createCharacter']['id'])
-        self.assertTrue(character.file.name.startswith('character_files/'))
+        # Character files live in exactly one place: CharacterKnowledgeAsset.
+        # The legacy `Character.file` mirror is no longer written.
+        self.assertFalse(character.file)
         self.assertEqual(CharacterKnowledgeAsset.objects.filter(character=character).count(), 1)
 
         uploaded_doc = read_memory_explorer_file(
@@ -2498,6 +2527,92 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             'raw/character_setup/uploads/dialogue.txt',
         )
         self.assertIn('Stay with me.', background_doc['content'])
+
+    @patch('chat.graphql.schema._generate_text')
+    def test_generate_draft_routes_many_files_through_reduce_pipeline(self, mock_generate_text):
+        """12+ 个文本文件时走 reduce 流水线，产出映射为 PrisMateDraft。"""
+        ModelConfiguration.objects.create(
+            user=self.user,
+            name='Draft Model',
+            provider='openai_compatible',
+            model_name='gpt-4.1-mini',
+            api_key='user-api-key',
+            base_url='https://example.com/v1',
+        )
+
+        urls = []
+        for i in range(13):
+            body = f'圣亚: 这是第 {i} 段的台词\n老师: 明白'
+            urls.append(self._write_uploaded_text(f'episode_{i}.txt', body))
+
+        def fake_generate_text(runtime_config, messages):
+            system = messages[0].get('content') or ''
+            if '角色分析师' in system:
+                # 批笔记
+                return json.dumps({
+                    'batch_summary': '本批对话。',
+                    'citations': [{'file': 'episode_0.txt', 'quote': '这是第 0 段的台词', 'note': '温和'}],
+                    'personality_evidence': ['温和'],
+                    'language_style': ['礼貌'],
+                    'behavior_notes': [],
+                    'emotion_triggers': [],
+                    'relationships': [],
+                })
+            # 合并
+            return json.dumps({
+                'profile_summary': {
+                    'name': '圣亚',
+                    'description': '三句话背景。第二句。第三句。',
+                    'personality': '温和而礼貌。',
+                    'appearance': '银发',
+                    'affiliation': '三一学园',
+                    'tags': ['温和', '三一'],
+                },
+                'dialogue_library': {
+                    '日常': [{'quote': '今天过得如何？', 'file': 'episode_0.txt', 'note': ''}],
+                    '提问': [{'quote': '老师知道这件事吗？', 'file': 'episode_1.txt', 'note': ''}],
+                    '情绪': [],
+                    '命令拒绝': [],
+                    '玩笑': [],
+                },
+                'behavior_samples': [],
+                'evolution': [],
+            })
+        mock_generate_text.side_effect = fake_generate_text
+
+        response = self.graphql(
+            """
+            mutation GenerateDraft($fileUrls: [String!], $textContext: String) {
+              generateCharacterDraft(fileUrls: $fileUrls, textContext: $textContext) {
+                name
+                description
+                personality
+                affiliation
+                tags
+                exampleDialogue
+              }
+            }
+            """,
+            variables={
+                'fileUrls': urls,
+                'textContext': '目标角色名: 圣亚\n[角色简述]: 分析她',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertNotIn('errors', payload)
+        draft = payload['data']['generateCharacterDraft']
+        self.assertEqual(draft['name'], '圣亚')
+        self.assertEqual(draft['personality'], '温和而礼貌。')
+        self.assertEqual(draft['affiliation'], '三一学园')
+        self.assertEqual(draft['tags'], ['温和', '三一'])
+        self.assertIn('今天过得如何？', draft['exampleDialogue'])
+        self.assertIn('Character: 老师知道这件事吗？', draft['exampleDialogue'])
+
+        # reduce 流水线跑了多批：13 个文件 → main/mid/cameo 分层后分批 + 合并
+        call_count = mock_generate_text.call_count
+        self.assertGreaterEqual(call_count, 3)
 
     @patch('chat.tasks._request_openai_media_analysis', return_value='A young man with a silver pocket watch.')
     def test_provider_messages_include_character_reference_images_via_image_role(self, mock_analysis):
@@ -2960,7 +3075,7 @@ class AnthropicMessageConversionTests(TestCase):
             messages=[{'role': 'user', 'content': 'hi'}],
             base_url='',
             tools=_build_memory_tool_specs(),
-            character=object(),
+            filesystem=object(),
         )
 
         self.assertEqual(result, 'All clear.')

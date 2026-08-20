@@ -1,7 +1,5 @@
 import json
-import os
 
-from django.core.files import File
 from django.http import StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -45,25 +43,6 @@ from .soul import list_memory_explorer_path, read_memory_explorer_file
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _sync_character_primary_reference_file(character):
-    primary_text_asset = character.knowledge_assets.filter(
-        attachment_kind=AttachmentKind.TEXT,
-    ).order_by('sort_order', 'id').first()
-
-    if primary_text_asset and getattr(primary_text_asset, 'file', None):
-        with primary_text_asset.file.open('rb') as source_file:
-            character.file.save(
-                primary_text_asset.attachment_name or os.path.basename(primary_text_asset.file.name or ''),
-                File(source_file),
-                save=False,
-            )
-    elif character.file:
-        character.file.delete(save=False)
-        character.file = None
-
-    character.save(update_fields=['file', 'updated_at'])
 
 
 def _message_serializer(message, request):
@@ -170,7 +149,6 @@ class CharacterViewSet(viewsets.ModelViewSet):
                 )
             )
 
-        _sync_character_primary_reference_file(character)
         serializer = CharacterKnowledgeAssetSerializer(created_assets, many=True, context={'request': request})
         return Response({'assets': serializer.data}, status=status.HTTP_201_CREATED)
 
@@ -184,7 +162,6 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
         asset.file.delete(save=False)
         asset.delete()
-        _sync_character_primary_reference_file(character)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='memory')

@@ -17,6 +17,7 @@ from .attachments import (
     describe_attachment_for_prompt,
     get_message_attachments,
 )
+from .memory.filesystem import CharacterMemoryFilesystem
 from .memory.manager import MemoryManager
 from .memory.prompts import build_memory_extraction_prompt, get_memory_crud_tool_specs
 from .models import (
@@ -34,8 +35,6 @@ from .search import search_web
 from .soul import (
     build_character_prompt_context,
     build_memory_explorer_manifest,
-    list_memory_explorer_path,
-    read_memory_explorer_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -892,23 +891,21 @@ def _request_openai_compatible_completion(
     return response.json()
 
 
-def _execute_local_memory_tool(character, tool_name, raw_arguments):
+def _execute_local_memory_tool(filesystem, tool_name, raw_arguments):
     try:
         arguments = json.loads(raw_arguments or '{}')
     except json.JSONDecodeError:
         arguments = {}
 
     if tool_name == 'list_memory_files':
-        return list_memory_explorer_path(
-            character,
+        return filesystem.list_memory_files(
             path_prefix=arguments.get('path_prefix', ''),
             recursive=bool(arguments.get('recursive', False)),
             max_entries=arguments.get('max_entries', 40),
         )
 
     if tool_name == 'read_memory_file':
-        return read_memory_explorer_file(
-            character,
+        return filesystem.read_memory_file(
             path=arguments.get('path', ''),
             max_chars=arguments.get('max_chars', MEMORY_TOOL_DEFAULT_MAX_CHARS),
         )
@@ -918,7 +915,7 @@ def _execute_local_memory_tool(character, tool_name, raw_arguments):
     }
 
 
-def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, character=None):
+def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None):
     if not tools:
         return _extract_openai_content(
             _request_openai_compatible_completion(
@@ -968,13 +965,13 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 return content
             raise ValueError('OpenAI compatible API returned an empty response after tool execution')
 
-        if character is None:
-            raise ValueError('Local tool execution requires a character context')
+        if filesystem is None:
+            raise ValueError('Local tool execution requires a memory filesystem context')
 
         for tool_call in tool_calls:
             function_payload = tool_call.get('function') or {}
             tool_result = _execute_local_memory_tool(
-                character,
+                filesystem,
                 tool_name=function_payload.get('name', ''),
                 raw_arguments=function_payload.get('arguments', '{}'),
             )
@@ -1187,7 +1184,7 @@ def _request_anthropic_completion(*, model_name, api_key, messages, base_url, to
     return response.json()
 
 
-def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=None, character=None):
+def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=None, filesystem=None):
     if not tools:
         return _extract_anthropic_text(
             _request_anthropic_completion(
@@ -1221,13 +1218,13 @@ def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=
                 return text
             raise ValueError('Anthropic API returned an empty response after tool execution')
 
-        if character is None:
-            raise ValueError('Local tool execution requires a character context')
+        if filesystem is None:
+            raise ValueError('Local tool execution requires a memory filesystem context')
 
         tool_result_blocks = []
         for block in tool_use_blocks:
             tool_result = _execute_local_memory_tool(
-                character,
+                filesystem,
                 tool_name=block.get('name', ''),
                 raw_arguments=json.dumps(block.get('input') or {}, ensure_ascii=False),
             )
@@ -1299,7 +1296,7 @@ def _stream_gemini_response(model_name, api_key, prompt_or_messages, tools=None)
             yield text
 
 
-def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, character=None):
+def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem=None):
     provider = runtime_config['provider']
     model_name = runtime_config['model_name']
     api_key = runtime_config['api_key']
@@ -1318,7 +1315,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, character=
                 messages=prompt_or_messages,
                 base_url=runtime_config.get('base_url', ''),
                 tools=tools,
-                character=character,
+                filesystem=filesystem,
             )
             yield from _iter_buffered_chunks(buffered_text)
             return
@@ -1340,7 +1337,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, character=
                 messages=prompt_or_messages,
                 base_url=runtime_config.get('base_url', ''),
                 tools=tools,
-                character=character,
+                filesystem=filesystem,
             )
             yield from _iter_buffered_chunks(buffered_text)
             return
@@ -1355,7 +1352,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, character=
     raise ValueError(f"Unsupported model provider: {provider}")
 
 
-def _generate_text(runtime_config, prompt_or_messages, tools=None, character=None):
+def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None):
     provider = runtime_config['provider']
     model_name = runtime_config['model_name']
     api_key = runtime_config['api_key']
@@ -1378,7 +1375,7 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, character=Non
             messages=prompt_or_messages,
             base_url=runtime_config.get('base_url', ''),
             tools=tools,
-            character=character,
+            filesystem=filesystem,
         )
 
     if provider == 'anthropic':
@@ -1390,7 +1387,7 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, character=Non
             messages=prompt_or_messages,
             base_url=runtime_config.get('base_url', ''),
             tools=tools,
-            character=character,
+            filesystem=filesystem,
         )
 
     raise ValueError(f"Unsupported model provider: {provider}")
@@ -2315,7 +2312,12 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
         )
 
         started_at = time.perf_counter()
-        ai_response_text = _generate_text(runtime_config, formatted_history, tools=tools, character=character)
+        ai_response_text = _generate_text(
+            runtime_config,
+            formatted_history,
+            tools=tools,
+            filesystem=CharacterMemoryFilesystem(character),
+        )
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         ai_message = _finalize_ai_response(
             chat_session=chat_session,
@@ -2359,7 +2361,12 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     started_at = time.perf_counter()
     collected_chunks = []
 
-    for chunk in _iter_text_chunks(runtime_config, formatted_history, tools=tools, character=character):
+    for chunk in _iter_text_chunks(
+        runtime_config,
+        formatted_history,
+        tools=tools,
+        filesystem=CharacterMemoryFilesystem(character),
+    ):
         if not chunk:
             continue
         collected_chunks.append(chunk)
