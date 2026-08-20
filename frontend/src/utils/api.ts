@@ -3,7 +3,7 @@ interface ApiResponse<T> {
   error?: string;
 }
 
-import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, UserProfile } from '@/types';
+import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, ToolCallInfo, UserProfile } from '@/types';
 import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
@@ -74,6 +74,11 @@ interface ApiMessage {
     }>;
     error?: string;
   };
+  thinking?: string | null;
+  tool_calls?: Array<{
+    tool: string;
+    arguments?: Record<string, unknown>;
+  }>;
   file_uri?: string | null;
   file_name?: string | null;
   file_preview_url?: string | null;
@@ -215,6 +220,8 @@ function normalizeMessage(apiData: ApiMessage): Message {
     senderAvatarUrl: apiData.sender_avatar_url,
     senderType: apiData.sender_type,
     researchPayload: normalizeResearchPayload(apiData.research_payload),
+    thinking: apiData.thinking || '',
+    toolCalls: normalizeToolCalls(apiData.tool_calls),
     attachments,
     fileUri: primaryAttachment?.fileUri || apiData.file_uri || undefined,
     fileName: primaryAttachment?.fileName || apiData.file_name || undefined,
@@ -222,6 +229,15 @@ function normalizeMessage(apiData: ApiMessage): Message {
     fileType: primaryAttachment?.fileType || apiData.file_type || undefined,
     fileMimeType: primaryAttachment?.fileMimeType || apiData.file_mime_type || undefined,
   };
+}
+
+function normalizeToolCalls(apiData?: ApiMessage['tool_calls']): ToolCallInfo[] {
+  return (apiData || [])
+    .filter((call) => call?.tool)
+    .map((call) => ({
+      tool: call.tool,
+      arguments: call.arguments || {},
+    }));
 }
 
 function normalizeMessageAttachments(apiData: ApiMessage): MessageAttachment[] {
@@ -513,6 +529,19 @@ interface StreamDoneEvent {
   provider?: ModelProvider;
   model_name?: string;
   research_payload?: ApiMessage['research_payload'];
+  thinking?: string | null;
+  tool_calls?: ApiMessage['tool_calls'];
+}
+
+interface StreamThinkingEvent {
+  type: 'thinking';
+  content: string;
+}
+
+interface StreamToolEvent {
+  type: 'tool';
+  tool: string;
+  arguments?: Record<string, unknown>;
 }
 
 interface StreamErrorEvent {
@@ -520,7 +549,7 @@ interface StreamErrorEvent {
   error: string;
 }
 
-type StreamMessageEvent = StreamChunkEvent | StreamSessionEvent | StreamDoneEvent | StreamErrorEvent;
+type StreamMessageEvent = StreamChunkEvent | StreamSessionEvent | StreamDoneEvent | StreamThinkingEvent | StreamToolEvent | StreamErrorEvent;
 
 function buildApiUrl(endpoint: string): string {
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;

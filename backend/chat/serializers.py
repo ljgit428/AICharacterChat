@@ -96,6 +96,7 @@ class MessageSerializer(serializers.ModelSerializer):
         model = Message
         fields = [
             'id', 'role', 'content', 'timestamp', 'character', 'research_payload',
+            'thinking', 'tool_calls',
             'file_uri', 'file_preview_url', 'file_name', 'file_type', 'file_mime_type', 'attachments',
         ]
         read_only_fields = ['timestamp']

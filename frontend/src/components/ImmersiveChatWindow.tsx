@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Character, Message, MessageAttachment, RootState } from '@/types';
+import { Character, Message, MessageAttachment, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { Expand, FileText, ImageIcon, Music, Paperclip, Sparkles, Video, X } from 'lucide-react';
+import { BrainCircuit, Expand, FileText, ImageIcon, Music, Paperclip, Sparkles, Video, X } from 'lucide-react';
+import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
 
@@ -378,6 +379,8 @@ export default function ImmersiveChatWindow({
                         }`}
                       >
                         <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
+                        <MessageThinking message={message} copy={copy} />
+                        <ToolCallLines message={message} copy={copy} />
                         {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
                       </div>
                     ))}
@@ -809,4 +812,64 @@ function AttachmentIcon({
     return <Music className={className} />;
   }
   return <FileText className={className} />;
+}
+
+function MessageThinking({
+  message,
+  copy,
+}: {
+  message: Message;
+  copy: I18nMessages;
+}) {
+  const thinking = message.thinking?.trim();
+  if (!thinking) {
+    return null;
+  }
+
+  return (
+    <details className="mb-2 rounded-xl border border-dashed border-slate-300/80 bg-slate-50/80 px-3 py-2 open:pb-3">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700">
+        <BrainCircuit className="h-3.5 w-3.5" />
+        <span>{copy.immersiveChat.thinking}</span>
+      </summary>
+      <p className="mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500">{thinking}</p>
+    </details>
+  );
+}
+
+function ToolCallLines({
+  message,
+  copy,
+}: {
+  message: Message;
+  copy: I18nMessages;
+}) {
+  const toolCalls = message.toolCalls || [];
+  if (toolCalls.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mb-1.5 space-y-0.5">
+      {toolCalls.map((toolCall, index) => (
+        <p key={`${toolCall.tool}-${index}`} className="text-[11px] italic leading-5 text-slate-400">
+          {describeToolCall(toolCall, copy)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function describeToolCall(toolCall: ToolCallInfo, copy: I18nMessages): string {
+  const args = toolCall.arguments || {};
+  if (toolCall.tool === 'web_search') {
+    return copy.immersiveChat.toolSearch(String(args.query || ''));
+  }
+  if (toolCall.tool === 'read_memory_file') {
+    return copy.immersiveChat.toolReadMemory(String(args.path || ''));
+  }
+  if (toolCall.tool === 'list_memory_files') {
+    return copy.immersiveChat.toolListMemory;
+  }
+  return copy.immersiveChat.toolDefault(toolCall.tool);
 }

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, removeMessage, updateChatSession } from '@/store/chatSlice';
+import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
@@ -36,6 +36,11 @@ function normalizeStreamMessage(apiMessage: {
   content: string;
   role: 'user' | 'assistant';
   timestamp: string;
+  thinking?: string | null;
+  tool_calls?: Array<{
+    tool: string;
+    arguments?: Record<string, unknown>;
+  }>;
   file_uri?: string | null;
   file_name?: string | null;
   file_preview_url?: string | null;
@@ -73,6 +78,13 @@ function normalizeStreamMessage(apiMessage: {
     content: apiMessage.content || '',
     role: apiMessage.role,
     timestamp: apiMessage.timestamp,
+    thinking: apiMessage.thinking || '',
+    toolCalls: (apiMessage.tool_calls || [])
+      .filter((call) => call?.tool)
+      .map((call) => ({
+        tool: call.tool,
+        arguments: call.arguments || {},
+      })),
     attachments,
     fileUri: primaryAttachment?.fileUri || apiMessage.file_uri || undefined,
     fileName: primaryAttachment?.fileName || apiMessage.file_name || undefined,
@@ -292,6 +304,25 @@ export default function ChatInterface({
             return;
           }
 
+          if (event.type === 'thinking') {
+            dispatch(appendToMessageThinking({
+              id: streamingAssistantId,
+              content: event.content,
+            }));
+            return;
+          }
+
+          if (event.type === 'tool') {
+            dispatch(appendToMessageToolCall({
+              id: streamingAssistantId,
+              toolCall: {
+                tool: event.tool,
+                arguments: event.arguments || {},
+              },
+            }));
+            return;
+          }
+
           if (event.type === 'done') {
             dispatch(removeMessage(streamingAssistantId));
             dispatch(addMessage({
@@ -303,6 +334,13 @@ export default function ChatInterface({
               senderName: character.name,
               senderAvatarUrl: character.avatarUrl,
               senderType: 'character',
+              thinking: event.thinking || '',
+              toolCalls: (event.tool_calls || [])
+                .filter((call) => call?.tool)
+                .map((call) => ({
+                  tool: call.tool,
+                  arguments: call.arguments || {},
+                })),
               researchPayload: event.research_payload ? {
                 query: event.research_payload.query || '',
                 provider: event.research_payload.provider || '',

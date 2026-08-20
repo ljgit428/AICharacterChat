@@ -57,6 +57,11 @@ export interface KnowledgeAsset {
   updatedAt: string;
 }
 
+export interface ToolCallInfo {
+  tool: string;
+  arguments?: Record<string, unknown>;
+}
+
 export interface Message {
   id: string;
   content: string;
@@ -67,6 +72,8 @@ export interface Message {
   senderAvatarUrl?: string;
   senderType?: 'user' | 'character' | 'system';
   researchPayload?: ResearchPayload | null;
+  thinking?: string;
+  toolCalls?: ToolCallInfo[];
   attachments?: MessageAttachment[];
   fileUri?: string;
   fileName?: string;

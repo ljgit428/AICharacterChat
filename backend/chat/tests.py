@@ -55,6 +55,7 @@ from chat.tasks import (
     _generate_openai_compatible_response,
     _get_or_upload_generativeai_file,
     build_research_context,
+    stream_ai_response,
 )
 
 
@@ -3097,3 +3098,196 @@ class AnthropicMessageConversionTests(TestCase):
             for block in blocks:
                 if block.get('type') == 'text':
                     self.assertTrue(block['text'])
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
+    """Tool lines and native reasoning surfaced through the stream protocol."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='stream-tools', password='password123')
+        self.client.force_login(self.user)
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Stream Character',
+            avatar_url='',
+            description='A character for stream event tests.',
+            personality='Curious',
+            appearance='Green scarf',
+            scenario='Garden',
+            example_dialogue='',
+            affiliation='Team S',
+            tags=['stream'],
+        )
+        self.session = ChatSession.objects.create(
+            user=self.user,
+            character=self.character,
+            title='Stream Tools Session',
+        )
+
+    def _profile(self, **overrides):
+        profile = UserProfile.get_or_create_for_user(self.user)
+        for key, value in overrides.items():
+            setattr(profile, key, value)
+        profile.save()
+        return profile
+
+    @patch('chat.tasks._build_provider_messages')
+    @patch('chat.tasks._get_runtime_model_config')
+    @patch('chat.tasks._iter_text_chunks')
+    @patch('chat.tasks.build_research_context')
+    @patch('chat.tasks._get_user_profile')
+    def test_stream_ai_response_surfaces_tool_and_thinking_events_and_persists(
+        self, mock_profile, mock_research, mock_chunks, mock_config, mock_build
+    ):
+        mock_profile.return_value = self._profile(default_enable_web_search=False)
+        mock_research.return_value = {'query': '', 'items': [], 'provider': '', 'error': ''}
+        mock_chunks.return_value = iter([
+            {'type': 'tool', 'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
+            {'type': 'thinking', 'content': 'Let me check what happened last time...'},
+            {'type': 'delta', 'content': 'Hello'},
+            {'type': 'delta', 'content': ' there'},
+        ])
+        mock_config.return_value = {
+            'provider': 'openai_compatible',
+            'model_name': 'deepseek-r1',
+            'api_key': 'k',
+            'base_url': '',
+        }
+        mock_build.return_value = (mock_config.return_value, [], [])
+
+        events = list(stream_ai_response(self.session, self.character))
+
+        self.assertEqual(events[0]['type'], 'tool')
+        self.assertEqual(events[0]['tool'], 'read_memory_file')
+        self.assertEqual(events[0]['arguments']['path'], 'raw/chat_sessions/session_1/transcript.md')
+
+        thinking_event = next(event for event in events if event['type'] == 'thinking')
+        self.assertEqual(thinking_event['content'], 'Let me check what happened last time...')
+
+        delta_text = ''.join(event['content'] for event in events if event['type'] == 'delta')
+        self.assertEqual(delta_text, 'Hello there')
+
+        done_event = next(event for event in events if event['type'] == 'done')
+        self.assertEqual(done_event['thinking'], 'Let me check what happened last time...')
+        self.assertEqual(done_event['tool_calls'], [
+            {'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
+        ])
+
+        ai_message = Message.objects.get(id=done_event['message_id'])
+        self.assertEqual(ai_message.thinking, 'Let me check what happened last time...')
+        self.assertEqual(ai_message.tool_calls, [
+            {'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
+        ])
+
+    @patch('chat.tasks._build_provider_messages')
+    @patch('chat.tasks._get_runtime_model_config')
+    @patch('chat.tasks._iter_text_chunks')
+    @patch('chat.tasks.build_research_context')
+    @patch('chat.tasks._build_search_query')
+    @patch('chat.tasks._get_user_profile')
+    def test_stream_ai_response_emits_web_search_tool_event(
+        self, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
+    ):
+        mock_profile.return_value = self._profile(default_enable_web_search=True)
+        mock_query.return_value = 'best ramen in tokyo'
+        mock_research.return_value = {
+            'query': 'best ramen in tokyo',
+            'items': [{'title': 'x', 'url': 'https://x', 'snippet': 'y'}],
+            'provider': 'tavily',
+            'error': '',
+        }
+        mock_chunks.return_value = iter([{'type': 'delta', 'content': 'Try Ichiran.'}])
+        mock_config.return_value = {
+            'provider': 'openai_compatible',
+            'model_name': 'm',
+            'api_key': 'k',
+            'base_url': '',
+        }
+        mock_build.return_value = (mock_config.return_value, [], [])
+
+        events = list(stream_ai_response(self.session, self.character))
+
+        self.assertEqual(events[0]['type'], 'tool')
+        self.assertEqual(events[0]['tool'], 'web_search')
+        self.assertEqual(events[0]['arguments']['query'], 'best ramen in tokyo')
+        done_event = next(event for event in events if event['type'] == 'done')
+        self.assertEqual(done_event['tool_calls'][0]['tool'], 'web_search')
+
+    @patch('chat.tasks._execute_local_memory_tool', return_value={'entries': []})
+    @patch('chat.tasks.requests.post')
+    def test_openai_tool_loop_emits_tool_and_thinking_events(self, mock_post, _mock_tool):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.side_effect = [
+            {'choices': [{'message': {
+                'role': 'assistant',
+                'content': None,
+                'tool_calls': [{
+                    'id': 'call_1',
+                    'type': 'function',
+                    'function': {'name': 'list_memory_files', 'arguments': '{"path_prefix": "wiki"}'},
+                }],
+            }}]},
+            {'choices': [{'message': {
+                'role': 'assistant',
+                'content': 'All set.',
+                'reasoning_content': 'I should check the wiki first.',
+            }}]},
+        ]
+
+        event_sink = []
+        result = _generate_openai_compatible_response(
+            model_name='deepseek-r1',
+            api_key='k',
+            messages=[{'role': 'user', 'content': 'hi'}],
+            base_url='https://example.com/v1',
+            tools=_build_memory_tool_specs(),
+            filesystem=object(),
+            event_sink=event_sink,
+        )
+
+        self.assertEqual(result, 'All set.')
+        self.assertEqual(event_sink, [
+            {'type': 'tool', 'tool': 'list_memory_files', 'arguments': {'path_prefix': 'wiki'}},
+            {'type': 'thinking', 'content': 'I should check the wiki first.'},
+        ])
+
+    @patch('chat.views.stream_ai_response')
+    def test_stream_message_passes_tool_and_thinking_events_through(self, mock_stream_ai_response):
+        self.create_model_config()
+        mock_stream_ai_response.return_value = iter([
+            {'type': 'tool', 'tool': 'web_search', 'arguments': {'query': 'x'}},
+            {'type': 'thinking', 'content': 'hmm'},
+            {'type': 'delta', 'content': 'Hello'},
+            {
+                'type': 'done',
+                'message_id': 999,
+                'content': 'Hello',
+                'timestamp': '2026-01-01T00:00:00+00:00',
+                'latency_ms': 10,
+                'thinking': 'hmm',
+                'tool_calls': [{'tool': 'web_search', 'arguments': {'query': 'x'}}],
+            },
+        ])
+
+        response = self.client.post(
+            '/api/chat/stream_message/',
+            data=json.dumps({
+                'character_id': self.character.id,
+                'chat_session_id': self.session.id,
+                'message': 'hi',
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload_lines = [
+            json.loads(line)
+            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            if line.strip()
+        ]
+        event_types = [line['type'] for line in payload_lines]
+        self.assertEqual(event_types, ['session', 'tool', 'thinking', 'delta', 'done'])
+        self.assertEqual(payload_lines[1]['tool'], 'web_search')
+        self.assertEqual(payload_lines[2]['content'], 'hmm')
+        self.assertEqual(payload_lines[4]['thinking'], 'hmm')

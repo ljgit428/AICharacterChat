@@ -285,6 +285,11 @@ export const zhCNMessages = {
     enterToSend: "按 Enter 发送，Shift+Enter 换行",
     system: "系统",
     character: "角色",
+    thinking: "思考过程",
+    toolSearch: (query: string) => `搜索了「${query}」`,
+    toolReadMemory: (path: string) => `翻了翻记忆里的「${path}」`,
+    toolListMemory: "翻了翻记忆",
+    toolDefault: (tool: string) => `使用了工具 ${tool}`,
   },
   research: {
     title: "研究与记忆",

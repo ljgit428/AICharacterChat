@@ -261,6 +261,16 @@ class Message(models.Model):
     timestamp = models.DateTimeField(auto_now_add=True)
     character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
     research_payload = models.JSONField(default=dict, blank=True)
+    thinking = models.TextField(
+        blank=True,
+        default="",
+        help_text="Model native reasoning text (e.g. DeepSeek reasoning_content) captured during streaming.",
+    )
+    tool_calls = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of {tool, arguments} dicts executed while producing this reply.",
+    )
     attachment = models.FileField(upload_to='chat_attachments/', blank=True, null=True)
     attachment_name = models.CharField(max_length=255, blank=True, default="")
     attachment_mime_type = models.CharField(max_length=100, blank=True, default="")

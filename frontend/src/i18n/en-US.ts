@@ -296,6 +296,11 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     enterToSend: "Press Enter to send, Shift+Enter for new line",
     system: "System",
     character: "Character",
+    thinking: "Thinking",
+    toolSearch: (query: string) => `Searched for "${query}"`,
+    toolReadMemory: (path: string) => `Checked the memory file "${path}"`,
+    toolListMemory: "Browsed the memory",
+    toolDefault: (tool: string) => `Used tool ${tool}`,
   },
   research: {
     title: "Research & Memory",
