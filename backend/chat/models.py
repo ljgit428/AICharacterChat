@@ -65,6 +65,11 @@ class ModelConfiguration(models.Model):
     model_name = models.CharField(max_length=255)
     api_key = models.CharField(max_length=500, blank=True)
     base_url = models.URLField(max_length=500, blank=True, default="")
+    context_window = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Model context window in tokens; powers the accurate context-usage indicator.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

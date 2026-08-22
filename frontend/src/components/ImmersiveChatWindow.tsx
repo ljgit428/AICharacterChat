@@ -15,6 +15,7 @@ interface ImmersiveChatWindowProps {
   currentUserLabel: string;
   attachmentSupport: AttachmentSupport;
   localizedMediaMode?: (mode: MediaHandlingMode) => string;
+  contextWindowTokens?: number | null;
 }
 
 export interface PendingAttachment {
@@ -127,6 +128,7 @@ export default function ImmersiveChatWindow({
   currentUserLabel,
   attachmentSupport,
   localizedMediaMode,
+  contextWindowTokens,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -157,6 +159,9 @@ export default function ImmersiveChatWindow({
 
     return { promptTokens, cachedTokens, contextTokens, cacheRate };
   }, [messages]);
+
+  const contextWindow = contextWindowTokens || CONTEXT_WINDOW_ASSUMPTION;
+  const isContextEstimated = !contextWindowTokens;
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
@@ -574,14 +579,14 @@ export default function ImmersiveChatWindow({
               </button>
               {usageStats && (
                 <ComposerContextRing
-                  progress={usageStats.contextTokens / CONTEXT_WINDOW_ASSUMPTION}
+                  progress={usageStats.contextTokens / contextWindow}
                   hoverSections={[
                     {
                       label: copy.immersiveChat.usageContextLabel,
                       detail: copy.immersiveChat.usageContextTitle(
                         usageStats.contextTokens.toLocaleString(),
-                        CONTEXT_WINDOW_ASSUMPTION.toLocaleString()
-                      ),
+                        contextWindow.toLocaleString()
+                      ) + (isContextEstimated ? copy.immersiveChat.usageContextEstimateNote : ''),
                     },
                     {
                       label: copy.immersiveChat.usageCacheLabel,

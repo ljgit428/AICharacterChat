@@ -140,9 +140,14 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
         model = ModelConfiguration
         fields = [
             'id', 'name', 'provider', 'model_name', 'api_key', 'base_url',
-            'created_at', 'updated_at'
+            'context_window', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+    def validate_context_window(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('Context window must be a positive token count.')
+        return value
 
 
 class WebSearchConfigurationSerializer(serializers.ModelSerializer):

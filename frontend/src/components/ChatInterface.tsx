@@ -497,6 +497,7 @@ export default function ChatInterface({
           currentUserLabel={copy.chat.you}
           attachmentSupport={attachmentSupport}
           localizedMediaMode={localizedMediaMode}
+          contextWindowTokens={activeModelConfig?.contextWindow || null}
         />
       </div>
 

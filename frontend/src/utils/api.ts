@@ -49,6 +49,7 @@ interface ApiModelConfig {
   model_name: string;
   api_key: string;
   base_url?: string;
+  context_window?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -378,6 +379,7 @@ function normalizeModelConfig(apiData: ApiModelConfig): ModelConfig {
     modelName: apiData.model_name,
     apiKey: apiData.api_key,
     baseUrl: apiData.base_url || '',
+    contextWindow: apiData.context_window ?? null,
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
   };
@@ -479,6 +481,7 @@ interface CreateModelConfigRequest {
   model_name: string;
   api_key: string;
   base_url?: string;
+  context_window?: number | null;
   is_default?: boolean;
 }
 

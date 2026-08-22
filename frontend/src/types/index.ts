@@ -135,6 +135,7 @@ export interface ModelConfig {
   modelName: string;
   apiKey: string;
   baseUrl?: string;
+  contextWindow?: number | null;
   createdAt: string;
   updatedAt: string;
 }
