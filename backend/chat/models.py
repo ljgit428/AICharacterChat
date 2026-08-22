@@ -260,6 +260,10 @@ class ChatSession(models.Model):
         default='topic',
         help_text='Which interface created this session; the two interfaces keep independent session pools.',
     )
+    is_title_manual = models.BooleanField(
+        default=False,
+        help_text='When true, the auto title generator must not overwrite this title.',
+    )
 
     def __str__(self):
         return f"{self.title or f'Chat with {self.character.name}'} - {self.user.username}"

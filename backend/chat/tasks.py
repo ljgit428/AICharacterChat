@@ -2407,7 +2407,16 @@ def sync_long_term_memory(self, message_id, chat_session_id, character_id):
 
 
 @shared_task(retry_backoff=True)
-def update_session_title(chat_session, history_text, runtime_config):
+def update_session_title(chat_session_id, history_text, runtime_config):
+    try:
+        chat_session = ChatSession.objects.get(id=chat_session_id)
+    except ChatSession.DoesNotExist:
+        return
+
+    # A user-renamed title must never be overwritten by the generator.
+    if chat_session.is_title_manual:
+        return
+
     try:
         prompt = (
             "Analyze the following short conversation start.\n"
@@ -2425,7 +2434,33 @@ def update_session_title(chat_session, history_text, runtime_config):
             chat_session.title = new_title[:200]
             chat_session.save(update_fields=['title'])
     except Exception as exc:
-        logger.error("Failed to auto-generate title for session %s: %s", chat_session.id, exc)
+        logger.error("Failed to auto-generate title for session %s: %s", chat_session_id, exc)
+
+
+def _dispatch_session_title_update(chat_session, history_text, runtime_config):
+    """Enqueue the title LLM call so it never blocks the streamed reply.
+
+    Falls back to an inline call when no broker is reachable (dev without
+    Redis keeps working, just synchronously)."""
+    config_payload = {
+        'provider': runtime_config.get('provider'),
+        'model_name': runtime_config.get('model_name'),
+        'api_key': runtime_config.get('api_key'),
+        'base_url': runtime_config.get('base_url', ''),
+    }
+    try:
+        update_session_title.delay(chat_session.id, history_text, config_payload)
+        return
+    except Exception as exc:
+        logger.warning(
+            'Failed to enqueue title update for session %s; running inline: %s',
+            chat_session.id, exc,
+        )
+
+    try:
+        update_session_title(chat_session.id, history_text, config_payload)
+    except Exception as exc:
+        logger.error('Failed to auto-generate title for session %s: %s', chat_session.id, exc)
 
 
 def _build_research_payload(chat_session, research_context):
@@ -2466,15 +2501,19 @@ def _finalize_ai_response(
         update_fields.append('last_response_latency_ms')
     chat_session.save(update_fields=update_fields)
 
-    if user_message is not None:
-        visible_history_count = len(_get_visible_history_messages(chat_session))
+    if user_message is not None and not chat_session.is_title_manual:
+        # Name the topic exactly once: while the title is still the default,
+        # generated from the full conversation opening (greeting + first user
+        # turn + first reply). A successful run — or a manual rename — freezes
+        # it; a failed run leaves the default title so the next turn retries.
         is_default_title = chat_session.title.startswith("Chat with ")
-        if is_default_title or visible_history_count <= 4:
-            conversation_text_for_title = (
-                f"User: {_build_user_turn_summary(user_message, include_text_body=False)}\n"
-                f"Character: {ai_response_text[:200]}"
+        if is_default_title:
+            history_messages = _get_visible_history_messages(chat_session)
+            conversation_text_for_title = '\n'.join(
+                f"{'User' if message.role == 'user' else 'Character'}: {(message.content or '')[:200]}"
+                for message in history_messages[-6:]
             )
-            update_session_title(chat_session, conversation_text_for_title, runtime_config)
+            _dispatch_session_title_update(chat_session, conversation_text_for_title, runtime_config)
 
     research_payload = _build_research_payload(chat_session, research_context or {})
     ai_message.research_payload = research_payload

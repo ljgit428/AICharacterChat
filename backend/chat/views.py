@@ -429,14 +429,24 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         """Allow toggling ``is_private_mode`` from the chat composer without
-        sending every other field."""
+        sending every other field. A manually patched ``title`` marks the
+        session so the auto title generator will not overwrite it."""
         instance = self.get_object()
         if 'is_private_mode' in request.data:
             is_private_mode = self._parse_bool(request.data.get('is_private_mode'))
             instance.is_private_mode = is_private_mode
             instance.save(update_fields=['is_private_mode', 'updated_at'])
             return Response(ChatSessionSerializer(instance).data)
-        return super().partial_update(request, *args, **kwargs)
+
+        if 'title' in request.data and (request.data.get('title') or '').strip():
+            # Set the manual flag before the generic update so the auto
+            # generator can never race a just-renamed session.
+            instance.is_title_manual = True
+            instance.save(update_fields=['is_title_manual'])
+
+        super().partial_update(request, *args, **kwargs)
+        instance.refresh_from_db()
+        return Response(ChatSessionSerializer(instance, context={'request': request}).data)
 
     @staticmethod
     def _parse_bool(value):

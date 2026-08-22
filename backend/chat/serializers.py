@@ -252,7 +252,7 @@ class ChatSessionSerializer(serializers.ModelSerializer):
         model = ChatSession
         fields = [
             'id', 'character', 'user', 'title', 'messages', 'created_at', 'updated_at',
-            'last_response_latency_ms', 'is_private_mode', 'origin',
+            'last_response_latency_ms', 'is_private_mode', 'origin', 'is_title_manual',
         ]
         read_only_fields = ['created_at', 'updated_at']
 

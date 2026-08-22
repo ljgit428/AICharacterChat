@@ -23,6 +23,7 @@ import {
   Globe,
   LogOut,
   MessagesSquare,
+  Pencil,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
@@ -33,7 +34,7 @@ import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import ResearchPanel from '@/components/ResearchPanel';
 import { useI18n } from '@/i18n/provider';
-import { clearChat } from '@/store/chatSlice';
+import { clearChat, updateChatSession } from '@/store/chatSlice';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
 type RightPanelKind = 'soul' | 'memory' | 'research';
@@ -80,6 +81,9 @@ function AIStudioLayoutContent() {
 
   const [historyPage, setHistoryPage] = useState(1);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
+  const [renamingChat, setRenamingChat] = useState<ChatHistoryItem | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 10;
 
   const dispatch = useDispatch();
@@ -303,6 +307,42 @@ function AIStudioLayoutContent() {
     }
   };
 
+  const handleRenameSession = (e: React.MouseEvent, chat: ChatHistoryItem) => {
+    e.stopPropagation();
+    setRenameDraft(chat.title);
+    setRenameError(null);
+    setRenamingChat(chat);
+  };
+
+  const submitRename = async () => {
+    const chat = renamingChat;
+    const trimmed = renameDraft.trim();
+    if (!chat) {
+      return;
+    }
+
+    if (!trimmed || trimmed === chat.title) {
+      setRenamingChat(null);
+      return;
+    }
+
+    try {
+      const response = await apiService.updateChatSession(chat.id, { title: trimmed });
+      if (response.error || !response.data) {
+        throw new Error(response.error || messages.shell.renameTopicFailed);
+      }
+
+      if (selectedSessionId === chat.id) {
+        dispatch(updateChatSession({ title: response.data.title }));
+      }
+      await fetchChatSessions();
+      setRenamingChat(null);
+    } catch (error) {
+      console.error("Failed to rename session:", error);
+      setRenameError(messages.shell.renameTopicFailed);
+    }
+  };
+
   const defaultModelConfigId = modelRoles?.text?.id || modelConfigs[0]?.id || null;
   const hasModelConfigs = Boolean(modelRoles?.text) || modelConfigs.length > 0;
 
@@ -420,6 +460,13 @@ function AIStudioLayoutContent() {
                   >
                     <MessageSquare size={14} className={`flex-shrink-0 ${selectedSessionId === chat.id ? 'text-sky-600' : 'opacity-70'}`} />
                     <span className="truncate">{chat.title}</span>
+                  </button>
+                  <button
+                    onClick={(e) => handleRenameSession(e, chat)}
+                    className="absolute right-7 rounded-lg p-1 text-slate-400 opacity-0 transition-all hover:bg-sky-50 hover:text-sky-600 group-hover:opacity-100"
+                    title={messages.shell.renameTopic}
+                  >
+                    <Pencil size={12} />
                   </button>
                   <button
                     onClick={(e) => handleDeleteSession(e, chat.id)}
@@ -624,6 +671,62 @@ function AIStudioLayoutContent() {
           </div>
         )}
       </div>
+
+      {renamingChat && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+          onClick={() => setRenamingChat(null)}
+          role="presentation"
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={messages.shell.renameTopic}
+          >
+            <h3 className="text-base font-semibold text-slate-900">{messages.shell.renameTopic}</h3>
+            <input
+              autoFocus
+              type="text"
+              value={renameDraft}
+              onChange={(event) => {
+                setRenameDraft(event.target.value);
+                setRenameError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  void submitRename();
+                } else if (event.key === 'Escape') {
+                  setRenamingChat(null);
+                }
+              }}
+              placeholder={messages.shell.renameTopicPlaceholder}
+              className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            />
+            {renameError && (
+              <p className="mt-2 text-xs text-rose-600">{renameError}</p>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRenamingChat(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-50"
+              >
+                {messages.shell.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitRename()}
+                disabled={!renameDraft.trim()}
+                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {messages.shell.save}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -773,6 +876,13 @@ function AIStudioLayoutContent() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2 border-l border-slate-100 pl-4">
+                          <button
+                            onClick={(e) => handleRenameSession(e, chat)}
+                            className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                            title={messages.shell.renameTopic}
+                          >
+                            <Pencil size={18} />
+                          </button>
                           <button
                             onClick={(e) => handleDeleteSession(e, chat.id)}
                             className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600"

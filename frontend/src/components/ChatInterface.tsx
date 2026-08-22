@@ -10,7 +10,7 @@ import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
-import { FolderTree, Brain, Globe } from 'lucide-react';
+import { FolderTree, Brain, Globe, Pencil } from 'lucide-react';
 import { useI18n } from '@/i18n/provider';
 
 interface ChatInterfaceProps {
@@ -114,6 +114,8 @@ export default function ChatInterface({
   const [showMemoryPanel, setShowMemoryPanel] = useState(false);
   const [hasStartedConversation, setHasStartedConversation] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(initialSessionId || null);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
 
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
@@ -207,6 +209,30 @@ export default function ChatInterface({
     const response = await apiService.getChatSession(sessionId);
     if (response.data) {
       dispatch(setChatSession(response.data as ChatSession));
+    }
+  };
+
+  const startEditTitle = () => {
+    setTitleDraft(chatSession?.title || '');
+    setIsEditingTitle(true);
+  };
+
+  const handleSaveTitle = async () => {
+    const trimmed = titleDraft.trim();
+    setIsEditingTitle(false);
+
+    if (!chatSessionId || !trimmed || trimmed === (chatSession?.title || '')) {
+      return;
+    }
+
+    try {
+      const response = await apiService.updateChatSession(chatSessionId, { title: trimmed });
+      if (response.data) {
+        dispatch(updateChatSession({ title: response.data.title }));
+        onSessionUpdate?.();
+      }
+    } catch (error) {
+      console.error('Failed to update session title:', error);
     }
   };
 
@@ -448,9 +474,42 @@ export default function ChatInterface({
               </span>
             )}
           </div>
-          <h2 className="truncate text-base font-semibold tracking-tight text-slate-900">
-            {character?.name || copy.chat.loadingCharacter}
-          </h2>
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold tracking-tight text-slate-900">
+              {character?.name || copy.chat.loadingCharacter}
+            </h2>
+            {sessionOrigin !== 'chat' && chatSessionId && isEditingTitle && (
+              <input
+                type="text"
+                value={titleDraft}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    void handleSaveTitle();
+                  } else if (event.key === 'Escape') {
+                    setIsEditingTitle(false);
+                  }
+                }}
+                onBlur={() => void handleSaveTitle()}
+                autoFocus
+                placeholder={copy.chat.titlePlaceholder}
+                className="mt-0.5 w-56 max-w-full rounded-lg border border-sky-200 bg-white px-2 py-0.5 text-xs text-slate-700 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+              />
+            )}
+            {sessionOrigin !== 'chat' && chatSessionId && !isEditingTitle && (
+              <button
+                type="button"
+                onClick={startEditTitle}
+                className="group mt-0.5 flex max-w-full items-center gap-1 text-left"
+                title={copy.chat.editTitle}
+              >
+                <span className="truncate text-xs text-slate-400 transition-colors group-hover:text-slate-600">
+                  {chatSession?.title || copy.chat.untitled}
+                </span>
+                <Pencil size={11} className="flex-shrink-0 text-slate-400 opacity-60 transition-opacity group-hover:opacity-100" />
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2 lg:hidden">
           <button
