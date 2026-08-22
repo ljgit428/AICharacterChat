@@ -8,7 +8,7 @@ import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
-import { apiService, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
+import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
 import { FolderTree, Brain, Globe } from 'lucide-react';
 import { useI18n } from '@/i18n/provider';
@@ -344,6 +344,7 @@ export default function ChatInterface({
                   tool: call.tool,
                   arguments: call.arguments || {},
                 })),
+              tokenUsage: normalizeTokenUsage(event.token_usage),
               researchPayload: event.research_payload ? {
                 query: event.research_payload.query || '',
                 provider: event.research_payload.provider || '',

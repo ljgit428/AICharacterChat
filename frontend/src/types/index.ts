@@ -62,6 +62,13 @@ export interface ToolCallInfo {
   arguments?: Record<string, unknown>;
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+}
+
 export interface Message {
   id: string;
   content: string;
@@ -74,6 +81,7 @@ export interface Message {
   researchPayload?: ResearchPayload | null;
   thinking?: string;
   toolCalls?: ToolCallInfo[];
+  tokenUsage?: TokenUsage | null;
   attachments?: MessageAttachment[];
   fileUri?: string;
   fileName?: string;

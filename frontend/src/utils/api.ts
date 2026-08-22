@@ -3,7 +3,7 @@ interface ApiResponse<T> {
   error?: string;
 }
 
-import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, ToolCallInfo, UserProfile } from '@/types';
+import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
 import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
@@ -80,6 +80,12 @@ interface ApiMessage {
     tool: string;
     arguments?: Record<string, unknown>;
   }>;
+  token_usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cached_tokens?: number;
+  } | null;
   file_uri?: string | null;
   file_name?: string | null;
   file_preview_url?: string | null;
@@ -223,6 +229,7 @@ function normalizeMessage(apiData: ApiMessage): Message {
     researchPayload: normalizeResearchPayload(apiData.research_payload),
     thinking: apiData.thinking || '',
     toolCalls: normalizeToolCalls(apiData.tool_calls),
+    tokenUsage: normalizeTokenUsage(apiData.token_usage),
     attachments,
     fileUri: primaryAttachment?.fileUri || apiData.file_uri || undefined,
     fileName: primaryAttachment?.fileName || apiData.file_name || undefined,
@@ -239,6 +246,25 @@ function normalizeToolCalls(apiData?: ApiMessage['tool_calls']): ToolCallInfo[] 
       tool: call.tool,
       arguments: call.arguments || {},
     }));
+}
+
+export function normalizeTokenUsage(apiData?: ApiMessage['token_usage']): TokenUsage | null {
+  if (!apiData) {
+    return null;
+  }
+
+  const promptTokens = apiData.prompt_tokens ?? 0;
+  const completionTokens = apiData.completion_tokens ?? 0;
+  if (!promptTokens && !completionTokens && !apiData.total_tokens) {
+    return null;
+  }
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: apiData.total_tokens ?? (promptTokens + completionTokens),
+    cachedTokens: Math.min(apiData.cached_tokens ?? 0, promptTokens),
+  };
 }
 
 function normalizeMessageAttachments(apiData: ApiMessage): MessageAttachment[] {
@@ -534,6 +560,7 @@ interface StreamDoneEvent {
   research_payload?: ApiMessage['research_payload'];
   thinking?: string | null;
   tool_calls?: ApiMessage['tool_calls'];
+  token_usage?: ApiMessage['token_usage'];
 }
 
 interface StreamThinkingEvent {

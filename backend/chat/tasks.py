@@ -864,6 +864,63 @@ def _build_provider_message_entry(message, runtime_config, role_configs):
     }
 
 
+def _extract_token_usage(usage_payload):
+    """Normalize an OpenAI-compatible ``usage`` dict into the token_usage
+    shape stored on Message. Returns ``None`` when nothing usable is present.
+
+    Cached-token field names differ per vendor: OpenAI/GLM put it in
+    ``prompt_tokens_details.cached_tokens``, DeepSeek uses
+    ``prompt_cache_hit_tokens``; accept the common variants.
+    """
+    if not isinstance(usage_payload, dict):
+        return None
+
+    def _int(value):
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return None
+
+    prompt_tokens = _int(usage_payload.get('prompt_tokens'))
+    completion_tokens = _int(usage_payload.get('completion_tokens'))
+    total_tokens = _int(usage_payload.get('total_tokens'))
+    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+        return None
+
+    prompt_tokens = prompt_tokens or 0
+    completion_tokens = completion_tokens or 0
+    cached_tokens = None
+    details = usage_payload.get('prompt_tokens_details')
+    if isinstance(details, dict):
+        cached_tokens = _int(details.get('cached_tokens'))
+    if cached_tokens is None:
+        cached_tokens = _int(usage_payload.get('cached_tokens'))
+    if cached_tokens is None:
+        cached_tokens = _int(usage_payload.get('prompt_cache_hit_tokens'))
+
+    return {
+        'prompt_tokens': prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens': total_tokens if total_tokens is not None else prompt_tokens + completion_tokens,
+        'cached_tokens': min(cached_tokens or 0, prompt_tokens),
+    }
+
+
+def _merge_token_usage(accumulated, usage):
+    """Sum usage dicts across multi-round tool loops (None starts a fresh total)."""
+    if not usage:
+        return accumulated
+    if not accumulated:
+        return dict(usage)
+    return {
+        key: accumulated.get(key, 0) + usage.get(key, 0)
+        for key in ('prompt_tokens', 'completion_tokens', 'total_tokens', 'cached_tokens')
+    }
+
+
 def _request_openai_compatible_completion(
     *,
     model_name,
@@ -923,15 +980,19 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
     dicts so callers can surface them to the user without extra LLM calls.
     """
     if not tools:
-        return _extract_openai_content(
-            _request_openai_compatible_completion(
-                model_name=model_name,
-                api_key=api_key,
-                messages=messages,
-                base_url=base_url,
-            )
+        response_json = _request_openai_compatible_completion(
+            model_name=model_name,
+            api_key=api_key,
+            messages=messages,
+            base_url=base_url,
         )
+        if event_sink is not None:
+            usage = _extract_token_usage(response_json.get('usage'))
+            if usage:
+                event_sink.append({'type': 'usage', 'usage': usage})
+        return _extract_openai_content(response_json)
 
+    usage_total = None
     history = list(messages)
     for _ in range(OPENAI_LOCAL_TOOL_CALL_LIMIT):
         try:
@@ -950,15 +1011,19 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 )
                 if event_sink is not None:
                     del event_sink[:]
-                return _extract_openai_content(
-                    _request_openai_compatible_completion(
-                        model_name=model_name,
-                        api_key=api_key,
-                        messages=messages,
-                        base_url=base_url,
-                    )
+                response_json = _request_openai_compatible_completion(
+                    model_name=model_name,
+                    api_key=api_key,
+                    messages=messages,
+                    base_url=base_url,
                 )
+                if event_sink is not None:
+                    usage = _extract_token_usage(response_json.get('usage'))
+                    if usage:
+                        event_sink.append({'type': 'usage', 'usage': usage})
+                return _extract_openai_content(response_json)
             raise
+        usage_total = _merge_token_usage(usage_total, _extract_token_usage(response_json.get('usage')))
         assistant_message = _extract_openai_assistant_message(response_json)
         tool_calls = assistant_message.get('tool_calls') or []
         history.append({
@@ -973,6 +1038,8 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
                 if reasoning and event_sink is not None:
                     event_sink.append({'type': 'thinking', 'content': reasoning})
+                if event_sink is not None and usage_total:
+                    event_sink.append({'type': 'usage', 'usage': dict(usage_total)})
                 return content
             raise ValueError('OpenAI compatible API returned an empty response after tool execution')
 
@@ -1009,17 +1076,29 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
 
-    with requests.post(
-        _build_openai_endpoint(base_url),
-        headers=headers,
-        json={
+    def _open_stream(include_usage):
+        payload = {
             'model': model_name,
             'messages': messages,
             'stream': True,
-        },
-        stream=True,
-        timeout=90,
-    ) as response:
+        }
+        if include_usage:
+            payload['stream_options'] = {'include_usage': True}
+        return requests.post(
+            _build_openai_endpoint(base_url),
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=90,
+        )
+
+    response = _open_stream(include_usage=True)
+    if response.status_code == 400:
+        # Older gateways reject unknown body params; retry without the flag —
+        # many vendors still attach usage to the final chunk by default.
+        response.close()
+        response = _open_stream(include_usage=False)
+    try:
         response.raise_for_status()
 
         for raw_line in response.iter_lines(decode_unicode=True):
@@ -1034,6 +1113,13 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
                 break
 
             data = json.loads(line)
+
+            # The usage chunk (when requested via stream_options) carries an
+            # empty choices array, so parse it before the choices guard below.
+            usage = _extract_token_usage(data.get('usage'))
+            if usage:
+                yield {'type': 'usage', 'usage': usage}
+
             choices = data.get('choices') or []
             if not choices:
                 continue
@@ -1056,6 +1142,8 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
             text = _extract_text_from_content(content)
             if text:
                 yield {'type': 'delta', 'content': text}
+    finally:
+        response.close()
 
 
 def _iter_buffered_chunks(text, chunk_size=160):
@@ -2359,6 +2447,7 @@ def _finalize_ai_response(
     research_context=None,
     thinking='',
     tool_calls=None,
+    token_usage=None,
 ):
     ai_message = Message.objects.create(
         chat_session=chat_session,
@@ -2368,6 +2457,7 @@ def _finalize_ai_response(
         research_payload={},
         thinking=thinking or '',
         tool_calls=tool_calls or [],
+        token_usage=token_usage or {},
     )
 
     update_fields = ['updated_at']
@@ -2479,6 +2569,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     started_at = time.perf_counter()
     collected_chunks = []
     collected_thinking = []
+    collected_usage = None
 
     for event in _iter_text_chunks(
         runtime_config,
@@ -2487,6 +2578,10 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         filesystem=CharacterMemoryFilesystem(character),
     ):
         event_type = event.get('type')
+        if event_type == 'usage':
+            # Internal bookkeeping event; folded into the done payload below.
+            collected_usage = _merge_token_usage(collected_usage, event.get('usage'))
+            continue
         if event_type == 'delta':
             content = event.get('content') or ''
             if not content:
@@ -2524,6 +2619,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         research_context=research_context,
         thinking=''.join(collected_thinking).strip(),
         tool_calls=collected_tool_calls,
+        token_usage=collected_usage,
     )
 
     yield {
@@ -2537,4 +2633,5 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         'research_payload': ai_message.research_payload,
         'thinking': ai_message.thinking,
         'tool_calls': ai_message.tool_calls,
+        'token_usage': ai_message.token_usage,
     }

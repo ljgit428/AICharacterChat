@@ -282,6 +282,14 @@ class Message(models.Model):
         blank=True,
         help_text="List of {tool, arguments} dicts executed while producing this reply.",
     )
+    token_usage = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Normalized LLM usage for this reply: "
+            "{prompt_tokens, completion_tokens, total_tokens, cached_tokens}."
+        ),
+    )
     attachment = models.FileField(upload_to='chat_attachments/', blank=True, null=True)
     attachment_name = models.CharField(max_length=255, blank=True, default="")
     attachment_mime_type = models.CharField(max_length=100, blank=True, default="")
