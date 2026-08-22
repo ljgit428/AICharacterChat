@@ -184,6 +184,7 @@ export interface ChatSession {
   title: string;
   lastResponseLatencyMs?: number | null;
   isPrivateMode?: boolean;
+  origin?: string;
   character: Character;
   createdAt: string;
   updatedAt: string;

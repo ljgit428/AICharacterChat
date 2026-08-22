@@ -22,6 +22,7 @@ import {
   Brain,
   Globe,
   LogOut,
+  MessagesSquare,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
@@ -122,7 +123,7 @@ function AIStudioLayoutContent() {
   const fetchChatSessions = useCallback(async () => {
     try {
       setLoadingChats(true);
-      const response = await apiService.getChatSessions();
+      const response = await apiService.getChatSessions(undefined, 'topic');
 
       if (response.error) {
         setChatError(response.error);
@@ -291,7 +292,7 @@ function AIStudioLayoutContent() {
 
     try {
       await apiService.deleteChatSession(sessionId);
-      const response = await apiService.getChatSessions();
+      const response = await apiService.getChatSessions(undefined, 'topic');
 
       if (response.data) {
         setRecentChats(formatChatSessions(response.data));
@@ -449,6 +450,14 @@ function AIStudioLayoutContent() {
               <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.workspace}</p>
             </div>
             <div className="space-y-1">
+              <button
+                type="button"
+                onClick={() => router.push('/chat')}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200 hover:bg-white/80 hover:text-slate-900"
+              >
+                <span className="text-slate-400"><MessagesSquare size={18} /></span>
+                <span className="min-w-0 flex-1 truncate text-left">{messages.chatPage.pageTitle}</span>
+              </button>
               <button
                 type="button"
                 onClick={() => router.push('/memory')}

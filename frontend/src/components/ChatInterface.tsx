@@ -20,6 +20,7 @@ interface ChatInterfaceProps {
   modelRoles?: ModelRoleAssignments | null;
   defaultModelConfigId?: string | null;
   userProfile?: UserProfile | null;
+  sessionOrigin?: 'topic' | 'chat';
   onBack?: () => void;
   onSessionUpdate?: () => void;
   onSoulRefreshKeyChange?: (value: string) => void;
@@ -100,6 +101,7 @@ export default function ChatInterface({
   modelConfigs,
   modelRoles,
   defaultModelConfigId,
+  sessionOrigin,
   onSessionUpdate,
   onSoulRefreshKeyChange,
 }: ChatInterfaceProps) {
@@ -272,6 +274,7 @@ export default function ChatInterface({
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
         start_conversation: isFirstMessage,
+        origin: sessionOrigin,
         attachments: attachments.map((attachment) => attachment.file),
       };
 

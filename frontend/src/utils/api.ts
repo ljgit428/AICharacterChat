@@ -37,6 +37,7 @@ interface ApiSession {
   character: number | ApiCharacter;
   last_response_latency_ms?: number | null;
   is_private_mode?: boolean;
+  origin?: string;
   created_at: string;
   updated_at: string;
 }
@@ -377,6 +378,7 @@ function normalizeSession(
     lastResponseLatencyMs: apiData.last_response_latency_ms ?? null,
     character,
     isPrivateMode: apiData.is_private_mode ?? false,
+    origin: apiData.origin || 'topic',
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
   };
@@ -440,6 +442,7 @@ interface SendMessageRequest {
   character_id: string;
   chat_session_id?: string;
   start_conversation?: boolean;
+  origin?: 'topic' | 'chat';
   attachment?: File | null;
   attachments?: File[];
 }
@@ -691,8 +694,11 @@ class ApiService {
     return { data: undefined };
   }
 
-  async getChatSessions(characterId?: string): Promise<ApiResponse<ChatSession[]>> {
-    const params = characterId ? `?character_id=${characterId}` : '';
+  async getChatSessions(characterId?: string, origin?: 'topic' | 'chat'): Promise<ApiResponse<ChatSession[]>> {
+    const queryParams: string[] = [];
+    if (characterId) queryParams.push(`character_id=${characterId}`);
+    if (origin) queryParams.push(`origin=${origin}`);
+    const params = queryParams.length ? `?${queryParams.join('&')}` : '';
     const response = await this.request<ApiSession[]>(`/sessions${params}`);
 
     if (response.data) {
@@ -869,6 +875,7 @@ class ApiService {
           formData.append('character_id', data.character_id);
           if (data.chat_session_id) formData.append('chat_session_id', data.chat_session_id);
           if (data.start_conversation !== undefined) formData.append('start_conversation', String(data.start_conversation));
+          if (data.origin) formData.append('origin', data.origin);
           attachments.forEach((attachment) => formData.append('attachments', attachment));
           return formData;
         })()
@@ -877,6 +884,7 @@ class ApiService {
           character_id: parseInt(data.character_id),
           chat_session_id: data.chat_session_id ? parseInt(data.chat_session_id) : undefined,
           start_conversation: data.start_conversation,
+          origin: data.origin,
         });
 
     return this.request('/chat/send_message', {
@@ -906,6 +914,7 @@ class ApiService {
             formData.append('character_id', data.character_id);
             if (data.chat_session_id) formData.append('chat_session_id', data.chat_session_id);
             if (data.start_conversation !== undefined) formData.append('start_conversation', String(data.start_conversation));
+            if (data.origin) formData.append('origin', data.origin);
             attachments.forEach((attachment) => formData.append('attachments', attachment));
             return formData;
           })()
@@ -914,6 +923,7 @@ class ApiService {
             character_id: parseInt(data.character_id),
             chat_session_id: data.chat_session_id ? parseInt(data.chat_session_id) : undefined,
             start_conversation: data.start_conversation,
+            origin: data.origin,
           });
 
       const response = await fetch(buildApiUrl('/chat/stream_message'), {

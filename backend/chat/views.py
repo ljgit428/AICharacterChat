@@ -413,6 +413,10 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         if character_id:
             queryset = queryset.filter(character_id=character_id)
 
+        origin = self.request.query_params.get('origin')
+        if origin in dict(ChatSession.ORIGIN_CHOICES):
+            queryset = queryset.filter(origin=origin)
+
         return queryset.order_by('-updated_at')
 
     def perform_create(self, serializer):
@@ -681,6 +685,9 @@ class ChatViewSet(viewsets.ViewSet):
         character_id = request.data.get('character_id')
         chat_session_id = request.data.get('chat_session_id')
         start_conversation = self._parse_bool(request.data.get('start_conversation', False))
+        origin = request.data.get('origin')
+        if origin not in dict(ChatSession.ORIGIN_CHOICES):
+            origin = 'topic'
         attachments = list(request.FILES.getlist('attachments'))
         if not attachments:
             legacy_attachment = request.FILES.get('attachment')
@@ -723,6 +730,7 @@ class ChatViewSet(viewsets.ViewSet):
                 user=user,
                 character=character,
                 title=f"Chat with {character.name}",
+                origin=origin,
             )
 
         has_existing_messages = chat_session.messages.exists()

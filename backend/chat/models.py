@@ -233,6 +233,11 @@ class CharacterKnowledgeAsset(models.Model):
 
 
 class ChatSession(models.Model):
+    ORIGIN_CHOICES = [
+        ('topic', 'Topic workspace'),
+        ('chat', 'Discord-style chat page'),
+    ]
+
     character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='chat_sessions')
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='chat_sessions')
     title = models.CharField(max_length=200, blank=True)
@@ -243,6 +248,12 @@ class ChatSession(models.Model):
     is_private_mode = models.BooleanField(
         default=False,
         help_text='Per-session override: when true, the long-term memory pipeline skips writes for turns in this session.',
+    )
+    origin = models.CharField(
+        max_length=10,
+        choices=ORIGIN_CHOICES,
+        default='topic',
+        help_text='Which interface created this session; the two interfaces keep independent session pools.',
     )
 
     def __str__(self):
