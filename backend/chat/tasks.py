@@ -1059,12 +1059,14 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
 
 
 def _iter_buffered_chunks(text, chunk_size=160):
+    """Re-stream buffered text as ``{'type': 'delta', ...}`` events so the
+    buffered tools path matches the streaming providers' event contract."""
     normalized = (text or '').strip()
     if not normalized:
         return
 
     for start_index in range(0, len(normalized), chunk_size):
-        yield normalized[start_index:start_index + chunk_size]
+        yield {'type': 'delta', 'content': normalized[start_index:start_index + chunk_size]}
 
 
 # ---------------------------------------------------------------------------
