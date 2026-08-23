@@ -989,3 +989,79 @@ class MemoryResearchPromptTests(TestCase):
         self.assertNotIn('tavily down', failed['user'])
         # 提取规则里有平台故障禁令兜底
         self.assertIn('平台故障不是事实', result['system'])
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class WebSearchReadinessEndpointTests(TestCase):
+    """GET /api/web-search-config/readiness/（联网搜索配置缺失提示）。"""
+
+    def setUp(self):
+        from django.urls import reverse
+        from rest_framework.authtoken.models import Token
+        from rest_framework.test import APIClient
+
+        self.user = User.objects.create_user(username='ready-owner', password='password123')
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=self.user).key}")
+        from chat.models import Character, ChatSession, UserProfile, WebSearchConfiguration
+
+        UserProfile.objects.update_or_create(
+            user=self.user, defaults={'default_enable_web_search': True},
+        )
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Ready Character',
+            avatar_url='',
+            description='readiness tests',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Lab',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['search'],
+        )
+        ChatSession.objects.create(user=self.user, character=self.character)
+
+    def _get(self, character_id=None):
+        suffix = f'?character={character_id}' if character_id else ''
+        return self.client.get(f'/api/web-search-config/readiness/{suffix}')
+
+    def test_unconfigured_key_flags_missing(self):
+        response = self._get(self.character.pk)
+        payload = response.json()
+        self.assertTrue(payload['enabled'])
+        self.assertFalse(payload['configured'])
+
+    def test_character_off_overrides_enabled_profile(self):
+        self.character.enable_web_search = False
+        self.character.save(update_fields=['enable_web_search'])
+        WebSearchConfiguration = __import__('chat.models', fromlist=['WebSearchConfiguration']).WebSearchConfiguration
+        WebSearchConfiguration.objects.update_or_create(
+            user=self.user,
+            defaults={'provider': 'tavily', 'api_key': 'tvly_x'},
+        )
+        response = self._get(self.character.pk)
+        payload = response.json()
+        self.assertFalse(payload['enabled'])
+        self.assertTrue(payload['configured'])
+
+    def test_configured_key_reports_ready(self):
+        WebSearchConfigurationModel = __import__('chat.models', fromlist=['WebSearchConfiguration']).WebSearchConfiguration
+        WebSearchConfigurationModel.objects.update_or_create(
+            user=self.user,
+            defaults={'provider': 'tavily', 'api_key': 'tvly_x'},
+        )
+        response = self._get()
+        payload = response.json()
+        self.assertTrue(payload['enabled'])
+        self.assertTrue(payload['configured'])
+
+    def test_neutral_chat_prompt_line_hides_raw_error(self):
+        from chat.tasks import _format_research_context
+
+        line = _format_research_context({
+            'query': 'q', 'items': [], 'error': 'Tavily search failed: 401 Client Error',
+        })
+        self.assertIn('temporarily unavailable', line)
+        self.assertNotIn('401', line)

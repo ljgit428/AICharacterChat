@@ -131,7 +131,27 @@ export default function ChatInterface({
   // Memory-growth chip (memory v2 §5.1): poll count after each turn.
   const lastMemoryCountRef = useRef<number | null>(null);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  // 联网搜索配置缺失提示（2026-08-24：开启但未配 key 时提醒用户）
+  const [webSearchMissingKey, setWebSearchMissingKey] = useState(false);
   const characterIdForMemory = character?.id;
+
+  useEffect(() => {
+    if (!characterIdForMemory) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiService.getWebSearchReadiness(characterIdForMemory);
+        if (!cancelled && response.data) {
+          setWebSearchMissingKey(Boolean(response.data.enabled && !response.data.configured));
+        }
+      } catch {
+        // readiness is best-effort
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [characterIdForMemory]);
 
   useEffect(() => {
     if (!characterIdForMemory) return;
@@ -664,6 +684,9 @@ export default function ChatInterface({
           onStop={handleStopStreaming}
           pendingQueueTexts={pendingQueueTexts}
           memoryNotice={memoryNotice ?? undefined}
+          webSearchHint={
+            webSearchMissingKey ? copy.immersiveChat.webSearchMissingKey : undefined
+          }
         />
       </div>
 

@@ -2002,7 +2002,9 @@ def _format_research_context(research_context):
     if not items:
         error = research_context.get('error', '')
         if error:
-            return f"Web search requested but unavailable: {error}"
+            # 只告知模型"暂不可用"，不透出原始报错细节——避免模型把
+            # 基础设施故障照搬进角色扮演台词（2026-08-24 玛丽案例）。
+            return "Live web search was attempted but is temporarily unavailable."
         return ""
 
     lines = [f"Search Query: {research_context.get('query', '')}"]
@@ -2635,16 +2637,15 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
 
 
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
-    # Surface web search as a tool line before the search HTTP call starts.
     collected_tool_calls = []
-    if _web_search_enabled(chat_session):
-        search_query = _build_search_query(chat_session, user_message=user_message)
-        if search_query:
-            search_arguments = {'query': search_query}
-            collected_tool_calls.append({'tool': 'web_search', 'arguments': search_arguments})
-            yield {'type': 'tool', 'tool': 'web_search', 'arguments': search_arguments}
-
+    # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
+    # 此时不再假装"搜索了…"(2026-08-24 GUI 实测发现误导性假动作)。
     research_context = build_research_context(chat_session, user_message=user_message)
+    if research_context.get('query') and not research_context.get('error'):
+        search_arguments = {'query': research_context['query']}
+        collected_tool_calls.append({'tool': 'web_search', 'arguments': search_arguments})
+        yield {'type': 'tool', 'tool': 'web_search', 'arguments': search_arguments}
+
 
     # Shared generation configuration: memory strategy (tools vs prefetch),
     # prompt building and tool specs are decided once in _prepare_generation

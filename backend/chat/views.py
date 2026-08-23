@@ -371,6 +371,29 @@ class UserProfileViewSet(viewsets.ViewSet):
 class WebSearchConfigurationViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
+    @action(detail=False, methods=['get'])
+    def readiness(self, request):
+        """前端提示用：联网搜索是否开启、Tavily key 是否已配置。
+
+        enabled 解析与聊天门控一致：角色三态覆盖优先，否则回退用户全局默认。
+        """
+        enabled = None
+        character_id = request.query_params.get('character')
+        if character_id:
+            try:
+                character = Character.objects.get(pk=character_id, created_by=request.user)
+                if character.enable_web_search is not None:
+                    enabled = bool(character.enable_web_search)
+            except Character.DoesNotExist:
+                pass
+        if enabled is None:
+            profile = getattr(request.user, 'profile', None)
+            enabled = bool(getattr(profile, 'default_enable_web_search', False))
+
+        config = WebSearchConfiguration.get_for_user(request.user)
+        configured = bool(config and (config.api_key or '').strip())
+        return Response({'enabled': enabled, 'configured': configured})
+
     @action(detail=False, methods=['get', 'patch'])
     def me(self, request):
         config = WebSearchConfiguration.get_for_user(request.user)

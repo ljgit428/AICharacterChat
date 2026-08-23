@@ -1317,6 +1317,11 @@ class ApiService {
     };
   }
 
+  async getWebSearchReadiness(characterId?: string): Promise<ApiResponse<{ enabled: boolean; configured: boolean }>> {
+    const query = characterId ? `?character=${encodeURIComponent(characterId)}` : '';
+    return this.request<{ enabled: boolean; configured: boolean }>(`/web-search-config/readiness${query}`);
+  }
+
   async createMemoryEntry(characterId: string, section: string, description: string, reason?: string): Promise<ApiResponse<MemoryEntry>> {
     const response = await this.request<{
       short_id: string;

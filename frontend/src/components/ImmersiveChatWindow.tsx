@@ -22,6 +22,8 @@ interface ImmersiveChatWindowProps {
   pendingQueueTexts?: string[];
   /** One-line notice (e.g. "Memory +2") shown above the composer. */
   memoryNotice?: string;
+  /** 联网搜索已开启但未配置 key 时的一次性提示（memory/search v2）。 */
+  webSearchHint?: string;
 }
 
 export interface PendingAttachment {
@@ -138,6 +140,7 @@ export default function ImmersiveChatWindow({
   onStop,
   pendingQueueTexts,
   memoryNotice,
+  webSearchHint,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -527,6 +530,11 @@ export default function ImmersiveChatWindow({
             {memoryNotice && (
               <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-200">
                 {memoryNotice}
+              </span>
+            )}
+            {webSearchHint && (
+              <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700 ring-1 ring-rose-200">
+                ⚠︎ {webSearchHint}
               </span>
             )}
             {(pendingQueueTexts?.length ?? 0) > 0 && (
