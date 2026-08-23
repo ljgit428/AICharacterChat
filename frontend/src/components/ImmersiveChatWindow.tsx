@@ -412,69 +412,91 @@ export default function ImmersiveChatWindow({
           </div>
         ) : (
           <div className="space-y-6">
-            {groups.map((group) => (
-              <div
-                key={`${group.senderKey}-${group.messages[0].id}`}
-                className={`flex gap-3 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {group.role !== 'user' && (
-                  <div className="mt-1 flex-shrink-0">
-                    <AvatarBadge
-                      name={group.name}
-                      avatarUrl={group.avatarUrl}
-                      tone={group.role === 'assistant' ? 'character' : 'system'}
-                    />
-                  </div>
-                )}
+            {groups.map((group) => {
+              // 渲染分层（2026-08-24 交互规范）：
+              // 工具调用 = 浅色文字无气泡无头像；思考 = 虚线边框气泡无头像；
+              // 只有角色说话的内容才配头像和实线气泡。
+              const hasSpeech = (m: Message) =>
+                Boolean((m.content ?? '').trim()) || Boolean(m.attachments?.length);
+              const contentMessages = group.messages.filter(
+                (m) => group.role === 'user' || hasSpeech(m),
+              );
+              const metaMessages = group.messages.filter(
+                (m) => Boolean((m.thinking ?? '').trim()) || (m.toolCalls?.length ?? 0) > 0,
+              );
 
-                <div className={`flex max-w-[min(48rem,86vw)] flex-col ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
-                  <div className={`mb-2 flex items-center gap-2 px-1 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <span className="text-sm font-medium text-slate-700">{group.name}</span>
-                    <span className="text-xs text-slate-400">
-                      {formatTimestamp(group.messages[group.messages.length - 1].timestamp)}
-                    </span>
-                  </div>
+              return (
+                <div key={`${group.senderKey}-${group.messages[0].id}`} className="space-y-3">
+                  {metaMessages.length > 0 && (
+                    <div className="max-w-[min(48rem,86vw)] space-y-2">
+                      {metaMessages.map((message) => (
+                        <div key={`meta-${message.id}`} className="flex flex-col gap-1.5 pl-1">
+                          <MessageThinking message={message} copy={copy} />
+                          <ToolCallLines message={message} copy={copy} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
-                  <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
-                    {group.messages.map((message, index) => (
-                      <div
-                        key={message.id}
-                        className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
-                          group.role === 'user'
-                            ? 'bg-slate-900 text-white'
-                            : group.role === 'assistant'
-                              ? 'border border-white/80 bg-white/90 text-slate-800'
-                              : 'border border-amber-200/70 bg-amber-50 text-amber-900'
-                        } ${
-                          group.role === 'user'
-                            ? index === group.messages.length - 1
-                              ? 'rounded-br-md'
-                              : ''
-                            : index === group.messages.length - 1
-                              ? 'rounded-bl-md'
-                              : ''
-                        }`}
-                      >
-                        <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
-                        <MessageThinking message={message} copy={copy} />
-                        <ToolCallLines message={message} copy={copy} />
-                        {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
+                  {contentMessages.length > 0 && (
+                    <div className={`flex gap-3 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      {group.role !== 'user' && (
+                        <div className="mt-1 flex-shrink-0">
+                          <AvatarBadge
+                            name={group.name}
+                            avatarUrl={group.avatarUrl}
+                            tone={group.role === 'assistant' ? 'character' : 'system'}
+                          />
+                        </div>
+                      )}
+
+                      <div className={`flex max-w-[min(48rem,86vw)] flex-col ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                        <div className={`mb-2 flex items-center gap-2 px-1 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <span className="text-sm font-medium text-slate-700">{group.name}</span>
+                          <span className="text-xs text-slate-400">
+                            {formatTimestamp(contentMessages[contentMessages.length - 1].timestamp)}
+                          </span>
+                        </div>
+
+                        <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                          {contentMessages.map((message, index) => (
+                            <div
+                              key={message.id}
+                              className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
+                                group.role === 'user'
+                                  ? 'bg-slate-900 text-white'
+                                  : 'border border-white/80 bg-white/90 text-slate-800'
+                              } ${
+                                group.role === 'user'
+                                  ? index === contentMessages.length - 1
+                                    ? 'rounded-br-md'
+                                    : ''
+                                  : index === contentMessages.length - 1
+                                    ? 'rounded-bl-md'
+                                    : ''
+                              }`}
+                            >
+                              <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
+                              {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
 
-                {group.role === 'user' && (
-                  <div className="mt-1 flex-shrink-0">
-                    <AvatarBadge
-                      name={group.name}
-                      avatarUrl={group.avatarUrl}
-                      tone="user"
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
+                      {group.role === 'user' && (
+                        <div className="mt-1 flex-shrink-0">
+                          <AvatarBadge
+                            name={group.name}
+                            avatarUrl={group.avatarUrl}
+                            tone="user"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -962,7 +984,7 @@ function MessageThinking({
   }
 
   return (
-    <details className="mb-2 rounded-xl border border-dashed border-slate-300/80 bg-slate-50/80 px-3 py-2 open:pb-3">
+    <details className="rounded-xl border border-dashed border-slate-300/80 bg-slate-50/60 px-3 py-2 open:pb-3">
       <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700">
         <BrainCircuit className="h-3.5 w-3.5" />
         <span>{copy.immersiveChat.thinking}</span>
@@ -985,7 +1007,7 @@ function ToolCallLines({
   }
 
   return (
-    <div className="mb-1.5 space-y-0.5">
+    <div className="space-y-0.5">
       {toolCalls.map((toolCall, index) => (
         <p key={`${toolCall.tool}-${index}`} className="text-[11px] italic leading-5 text-slate-400">
           {describeToolCall(toolCall, copy)}
