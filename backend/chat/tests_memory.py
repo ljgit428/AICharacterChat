@@ -514,3 +514,166 @@ class SyncLongTermMemoryTaskTests(TestCase):
         self.assertEqual(rows[0].action, MemoryAuditAction.CREATE)
         self.assertEqual(rows[0].source, MemoryAuditSource.CELERY_WORKER)
         self.assertEqual(rows[0].after_description, 'Prefers warm drinks.')
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryPromptInjectionTests(TestCase):
+    """memory v2 §3.2: budget-aware injection with priority sections."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='inject-owner', password='password123')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Inject Character',
+            avatar_url='',
+            description='Injection trimming tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.manager = MemoryManager(self.character)
+        # Insertion order = recency order (updated_at auto_now).
+        self.manager.create_item(section='工作', description='Item A1 (oldest work).')
+        self.manager.create_item(section='工作', description='Item A2.')
+        self.manager.create_item(section='工作', description='Item A3.')
+        self.manager.create_item(section='工作', description='Item A4 (newest work).')
+        self.manager.create_item(section='关系', description='关系正在升温，开始互相开玩笑。')
+        self.manager.create_item(section='里程碑', description='2026-08-23 第一次一起看了流星雨。')
+
+    def test_unlimited_budget_returns_everything_and_not_truncated(self):
+        narrative, truncated = self.manager.get_prompt_memory()
+        self.assertFalse(truncated)
+        for needle in ('Item A1', 'Item A4', '关系', '里程碑'):
+            self.assertIn(needle, narrative)
+        # Priority sections come first regardless of creation order.
+        self.assertLess(narrative.index('## 关系'), narrative.index('## 工作'))
+
+    def test_tight_budget_keeps_priority_sections_drops_oldest_work_items(self):
+        # Header(31) + priority blocks(~54) leaves room for the newest work
+        # items but not the oldest one (total-without-A1 = 137 <= 140 < 162).
+        narrative, truncated = self.manager.get_prompt_memory(budget_chars=140)
+
+        self.assertTrue(truncated)
+        # Priority sections survive in full.
+        self.assertIn('关系正在升温', narrative)
+        self.assertIn('第一次一起看了流星雨', narrative)
+        # Newest non-priority items are kept, oldest dropped whole.
+        self.assertIn('Item A4', narrative)
+        self.assertIn('Item A2', narrative)
+        self.assertNotIn('Item A1', narrative)
+
+    def test_zero_budget_still_keeps_priority_sections(self):
+        narrative, truncated = self.manager.get_prompt_memory(budget_chars=1)
+
+        self.assertTrue(truncated)
+        self.assertIn('关系正在升温', narrative)
+        self.assertIn('第一次一起看了流星雨', narrative)
+        self.assertNotIn('## 工作', narrative)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryToolRejectionTests(TestCase):
+    """memory v2 §3.4: invalid model input is rejected, not fatal."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='reject-owner', password='password123')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+        from chat.tasks import _execute_memory_crud_tool
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Reject Character',
+            avatar_url='',
+            description='Tool rejection tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.manager = MemoryManager(self.character)
+        self.execute = _execute_memory_crud_tool
+
+    def test_missing_description_is_rejected_not_raised(self):
+        result = self.execute(self.character, self.manager, None, 'create_memory', json.dumps({'section': '身份'}))
+        self.assertEqual(result['status'], 'rejected')
+        self.assertEqual(self.character.memory_items.count(), 0)
+
+    def test_unknown_short_id_update_is_rejected_not_raised(self):
+        result = self.execute(
+            self.character, self.manager, None, 'update_memory',
+            json.dumps({'id': 'zzzzzzzz', 'description': 'whatever', 'reason': 'test'}),
+        )
+        self.assertEqual(result['status'], 'rejected')
+
+    def test_overlong_description_is_rejected_then_valid_create_succeeds(self):
+        rejected = self.execute(
+            self.character, self.manager, None, 'create_memory',
+            json.dumps({'section': '身份', 'description': 'x' * 500}),
+        )
+        self.assertEqual(rejected['status'], 'rejected')
+
+        ok = self.execute(
+            self.character, self.manager, None, 'create_memory',
+            json.dumps({'section': '身份', 'description': 'Prefers tea.'}),
+        )
+        self.assertEqual(ok['status'], 'created')
+        self.assertEqual(self.character.memory_items.count(), 1)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class DispatchMemorySyncFallbackTests(TestCase):
+    """memory v2 §3.1: broker failure degrades to inline execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='dispatch-owner', password='password123')
+        from chat.models import Character, ChatSession, Message
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Dispatch Character',
+            avatar_url='',
+            description='Dispatch fallback tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.session = ChatSession.objects.create(user=self.user, character=self.character, title='t')
+        self.message = Message.objects.create(
+            chat_session=self.session, role='assistant', content='hello', character=self.character,
+        )
+
+    def test_broker_failure_runs_task_inline_when_fallback_enabled(self):
+        from chat.tasks import _dispatch_memory_sync, sync_long_term_memory
+
+        with override_settings(MEMORY_SYNC_INLINE_FALLBACK=True), \
+             patch.object(sync_long_term_memory, 'delay', side_effect=Exception('broker down')) as mock_delay, \
+             patch.object(sync_long_term_memory, 'apply', return_value=None) as mock_apply:
+            _dispatch_memory_sync(self.session, self.message, self.character)
+
+        mock_delay.assert_called_once()
+        mock_apply.assert_called_once()
+
+    def test_broker_failure_skips_inline_when_fallback_disabled(self):
+        from chat.tasks import _dispatch_memory_sync, sync_long_term_memory
+
+        with override_settings(MEMORY_SYNC_INLINE_FALLBACK=False), \
+             patch.object(sync_long_term_memory, 'delay', side_effect=Exception('broker down')) as mock_delay, \
+             patch.object(sync_long_term_memory, 'apply', return_value=None) as mock_apply:
+            _dispatch_memory_sync(self.session, self.message, self.character)
+
+        mock_delay.assert_called_once()
+        mock_apply.assert_not_called()

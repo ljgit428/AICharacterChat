@@ -747,7 +747,17 @@ class ChatViewSet(viewsets.ViewSet):
         if start_conversation and has_existing_messages:
             raise ValueError('This conversation has already started')
 
-        generate_greeting = start_conversation or not has_existing_messages
+        # A greeting is generated ONLY for an explicit start request carrying no
+        # user content. Any non-empty message/attachment is a real first turn and
+        # must be saved and answered (memory v2 §3.3: the first typed message used
+        # to be silently swallowed here, so it never reached chat history or the
+        # long-term memory extractor).
+        generate_greeting = (
+            start_conversation
+            and not message_content
+            and not attachment_payloads
+            and not has_existing_messages
+        )
         user_message = None
         if not generate_greeting:
             user_message = Message.objects.create(

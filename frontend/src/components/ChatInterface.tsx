@@ -296,10 +296,13 @@ export default function ChatInterface({
 
     try {
       const requestData: SendMessageRequest = {
-        message: isFirstMessage ? '' : trimmedInput,
+        message: trimmedInput,
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
-        start_conversation: isFirstMessage,
+        // Greeting only fires for an explicit empty-composer start on a fresh
+        // session; a typed first message is a real turn and must be saved and
+        // answered (memory v2 spec §3.3).
+        start_conversation: isFirstMessage && !trimmedInput && attachments.length === 0,
         origin: sessionOrigin,
         attachments: attachments.map((attachment) => attachment.file),
       };

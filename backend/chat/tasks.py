@@ -69,7 +69,10 @@ OPENAI_VIDEO_FRAME_FPS = 2.0
 CHARACTER_REFERENCE_IMAGE_LIMIT = 4
 OPENAI_LOCAL_TOOL_CALL_LIMIT = 6
 MEMORY_TOOL_DEFAULT_MAX_CHARS = 6000
-STREAM_MEMORY_SECTION_LIMIT = 900
+# Injection budget for the long-term-memory narrative (memory v2 §3.2).
+# Trimming happens per-item inside MemoryManager.get_prompt_memory(), which
+# always preserves priority sections (关系/里程碑) in full.
+STREAM_MEMORY_SECTION_LIMIT = 6000
 LONG_TERM_MEMORY_DESC_LIMIT = 200
 LONG_TERM_MEMORY_SECTION_LIMIT = 64
 LONG_TERM_MEMORY_TOOL_ROUND_TRIP_LIMIT = 8
@@ -1860,9 +1863,12 @@ def _build_stream_memory_prefetch(character, chat_session, generate_greeting=Fal
 
     sections = []
 
+    memory_narrative, _memory_truncated = MemoryManager(character).get_prompt_memory(
+        budget_chars=STREAM_MEMORY_SECTION_LIMIT,
+    )
     candidates = [
         ('Character Setup', prompt_context.get('soul', '')),
-        ('Long-Term Memory (User Model)', MemoryManager(character).render_narrative()),
+        ('Long-Term Memory (User Model)', memory_narrative),
     ]
     if generate_greeting:
         candidates.append(('Uploaded Background Text', prompt_context.get('uploaded_background', '')))
@@ -2147,7 +2153,23 @@ def _publish_memory_event(chat_session_id, action):
 
 
 def _execute_memory_crud_tool(character, manager, source_message, tool_name, raw_args):
-    """Local tool implementation invoked by the Celery worker ReAct loop."""
+    """Local tool implementation invoked by the Celery worker ReAct loop.
+
+    Invalid model input (missing/over-long fields, unknown short_id) is
+    rejected back to the model as a structured result so it can retry within
+    the same extraction turn (memory v2 §3.4, v1 spec §5.6) — one bad call no
+    longer aborts the whole turn's actions.
+    """
+    from .memory.manager import MemoryItemNotFoundError
+
+    try:
+        return _execute_memory_crud_tool_inner(character, manager, source_message, tool_name, raw_args)
+    except (MemoryItemNotFoundError, ValueError) as exc:
+        logger.info('Memory tool %s rejected: %s', tool_name, exc)
+        return {'status': 'rejected', 'tool': tool_name, 'error': str(exc)}
+
+
+def _execute_memory_crud_tool_inner(character, manager, source_message, tool_name, raw_args):
     try:
         arguments = json.loads(raw_args or '{}')
     except json.JSONDecodeError:
@@ -2519,18 +2541,38 @@ def _finalize_ai_response(
     ai_message.research_payload = research_payload
     ai_message.save(update_fields=['research_payload'])
 
-    # Async long-term memory write (SonettoHere parity). Fire-and-forget:
-    # if the broker is unavailable we still return the AI reply successfully.
+    _dispatch_memory_sync(chat_session, ai_message, character)
+
+    return ai_message
+
+
+def _dispatch_memory_sync(chat_session, ai_message, character):
+    """Enqueue the per-turn long-term-memory write (memory v2 §3.1).
+
+    Fire-and-forget: the AI reply is returned regardless of broker health.
+    When the broker rejects the enqueue and ``MEMORY_SYNC_INLINE_FALLBACK``
+    is enabled (dev default), the task body runs in-process so a missing
+    Celery worker never silently drops memory writes.
+    """
     try:
         sync_long_term_memory.delay(
             message_id=ai_message.id,
             chat_session_id=chat_session.id,
             character_id=character.id,
         )
+        return
     except Exception as exc:  # noqa: BLE001
-        logger.warning('Failed to enqueue sync_long_term_memory: %s', exc)
+        from django.conf import settings
 
-    return ai_message
+        fallback_enabled = getattr(settings, 'MEMORY_SYNC_INLINE_FALLBACK', False)
+        logger.warning(
+            'Failed to enqueue sync_long_term_memory (%s); inline fallback=%s', exc, fallback_enabled,
+        )
+        if fallback_enabled:
+            sync_long_term_memory.apply(
+                args=[ai_message.id, chat_session.id, character.id],
+                throw=False,
+            )
 
 
 @shared_task(retry_backoff=True)

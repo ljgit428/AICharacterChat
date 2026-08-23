@@ -72,7 +72,9 @@ def dispatch_memory_sync(chat_session, ai_message, character):
             )
 ```
 
-- 新增设置 `MEMORY_SYNC_INLINE_FALLBACK`（`BoolField`，默认 `True`；生产环境建议关掉并在 `.env.template` 注明）。
+- 双层设置（2026-08-23 实测修正：Redis 在跑但 worker 没跑时 `.delay()` 并不抛错，任务只是滞留队列，仅靠 enqueue 异常的降级覆盖不了最常见的开发场景）：
+  - `CELERY_TASK_ALWAYS_EAGER`（默认 = DEBUG）：开发模式下所有 Celery 任务在进程内执行，不起 worker 记忆也即时生效；
+  - `MEMORY_SYNC_INLINE_FALLBACK`（默认 False）：broker 真正拒绝入队时的进程内兜底，生产保持关闭。
 - **代价说明**：inline 回调会把整段提取（含最多 8 轮工具往返）阻塞在回复收尾路径上。流式路径下 `done` 事件在此之前发出，用户感知为"回复结束后连接多挂几秒"，可接受；这是与静默丢数据之间的显式取舍。
 - 顺带补齐可观测性：任务返回值已有 `{status, actions}`，增加 `logger.info` 的 `reason` 字段透传（skipped 原因），方便 §8 的自测流程直接读日志定性。
 
