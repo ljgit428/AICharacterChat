@@ -4,7 +4,6 @@ import { Suspense, useState, useEffect, useCallback } from 'react';
 import { useDispatch } from 'react-redux';
 import { useSearchParams, useRouter } from 'next/navigation';
 import {
-  Home,
   Zap,
   PlusCircle,
   KeyRound,
@@ -22,12 +21,12 @@ import {
   Brain,
   Globe,
   LogOut,
-  MessagesSquare,
   Pencil,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
 import ChatInterface from '@/components/ChatInterface';
+import ModeSwitch from '@/components/ModeSwitch';
 import ModelApiSettingsPanel from '@/components/ModelApiSettingsPanel';
 import UserSettingsPanel from '@/components/UserSettingsPanel';
 import SoulPanel from '@/components/SoulPanel';
@@ -393,9 +392,10 @@ function AIStudioLayoutContent() {
       <aside
         className={`${isSidebarOpen ? 'w-[300px]' : 'w-0'} flex-shrink-0 overflow-hidden border-r border-white/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(244,247,250,0.92))] backdrop-blur-xl transition-all duration-300 ease-in-out`}
       >
-        <div className="flex h-20 flex-shrink-0 items-center border-b border-slate-200/70 px-5">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
+        <div className="flex h-[60px] flex-shrink-0 items-center justify-between gap-2 border-b border-slate-200/70 px-4">
+          <ModeSwitch active="topic" />
+          <div className="min-w-0 text-right">
+            <div className="flex items-center justify-end gap-2">
               <span className="rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-white">
                 {messages.shell.studioBadge}
               </span>
@@ -403,27 +403,14 @@ function AIStudioLayoutContent() {
                 {APP_VERSION}
               </span>
             </div>
-            <div className="font-semibold text-xl tracking-tight text-slate-900">
+            <div className="font-semibold text-lg tracking-tight text-slate-900">
               <span className="text-sky-700">{APP_NAME}</span>
             </div>
-            <p className="text-xs text-slate-500">{messages.shell.characterWorkbenchArchive}</p>
           </div>
         </div>
-        <div className="flex-1 space-y-6 overflow-y-auto px-4 py-5">
-          <div className="space-y-1">
-            <NavItem
-              icon={<Home size={18} />}
-              label={messages.shell.home}
-              active={currentView === 'home'}
-              onClick={() => setCurrentView('home')}
-            />
-          </div>
+        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
           <div className="rounded-[1.5rem] border border-white/70 bg-white/60 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.06)]">
-            <div className="mb-2 flex items-center justify-between px-1">
-              <div>
-                <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.sessions}</p>
-              </div>
-            </div>
+            <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.sessions}</p>
             <div className="mb-1">
               <NavItem
                 icon={<Zap size={18} />}
@@ -491,20 +478,9 @@ function AIStudioLayoutContent() {
                 <ArrowRight size={14} className={`transition-opacity ${currentView === 'history_all' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
               </button>
             </div>
-          </div>
-          <div className="rounded-[1.5rem] border border-white/70 bg-white/50 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.04)]">
-            <div className="mb-2 px-1">
-              <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.workspace}</p>
-            </div>
-            <div className="space-y-1">
-              <button
-                type="button"
-                onClick={() => router.push('/chat')}
-                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200 hover:bg-white/80 hover:text-slate-900"
-              >
-                <span className="text-slate-400"><MessagesSquare size={18} /></span>
-                <span className="min-w-0 flex-1 truncate text-left">{messages.chatPage.pageTitle}</span>
-              </button>
+            <div className="mt-3 border-t border-slate-200/70 pt-3">
+              <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.workspace}</p>
+              <div className="space-y-1">
               <button
                 type="button"
                 onClick={() => router.push('/memory')}
@@ -533,9 +509,9 @@ function AIStudioLayoutContent() {
                 active={currentView === 'user_settings'}
                 onClick={() => setCurrentView('user_settings')}
               />
+              </div>
             </div>
           </div>
-
         </div>
       </aside>
       <div className="flex min-w-0 flex-1">

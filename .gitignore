@@ -10,6 +10,7 @@ clean_comments.py
 # Local test artifacts and transient UI verification outputs
 tmp_Photos.sqlite
 tmp_ui_screenshots/
+gui-test-screenshots/
 frontend/logs/
 step*.png
 

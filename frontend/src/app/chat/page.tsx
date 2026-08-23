@@ -5,6 +5,7 @@ import { useDispatch } from "react-redux";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Loader2, Menu, MessagesSquare, Search, X } from "lucide-react";
 import ChatInterface from "@/components/ChatInterface";
+import ModeSwitch from "@/components/ModeSwitch";
 import { useI18n } from "@/i18n/provider";
 import { clearChat } from "@/store/chatSlice";
 import { apiService } from "@/utils/api";
@@ -258,19 +259,12 @@ function DiscordChatPageContent() {
           selectedCharacterId && !isSidebarOpen ? "-translate-x-full" : "translate-x-0"
         }`}
       >
-        <div className="flex h-[60px] flex-shrink-0 items-center gap-2 border-b border-slate-200/70 px-4">
-          <button
-            type="button"
-            onClick={() => router.push("/")}
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
-            title={copy.chatPage.backToTopics}
-          >
-            <ArrowLeft size={18} />
-          </button>
-          <div className="min-w-0">
+        <div className="flex h-[60px] flex-shrink-0 items-center justify-between gap-2 border-b border-slate-200/70 px-4">
+          <ModeSwitch active="chat" />
+          <div className="min-w-0 text-right">
             <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-400">{APP_NAME}</p>
-            <p className="flex items-center gap-1.5 text-base font-semibold tracking-tight text-slate-900">
-              <MessagesSquare size={15} className="text-sky-600" />
+            <p className="flex items-center justify-end gap-1.5 truncate text-sm font-semibold tracking-tight text-slate-900">
+              <MessagesSquare size={14} className="text-sky-600" />
               {copy.chatPage.pageTitle}
             </p>
           </div>
