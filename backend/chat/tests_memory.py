@@ -812,3 +812,66 @@ class MemoryNarrativeEndpointTests(TestCase):
         client.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=stranger).key}")
         response = client.get(f'/api/characters/{self.character.pk}/memory/narrative/')
         self.assertEqual(response.status_code, 404)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class ReducePipelineHelperTests(TestCase):
+    """memory v2 GUI-test regressions (2026-08-24 folder-import test)."""
+
+    def test_target_name_keeps_multi_word_names(self):
+        from chat.character_reduce import _normalize_target_name
+
+        # A name containing spaces used to truncate at the first space.
+        self.assertEqual(
+            _normalize_target_name("目标角色名: Mika Suenaga\n角色简介:\n"),
+            "Mika Suenaga",
+        )
+        self.assertEqual(
+            _normalize_target_name("目标角色名: 玛丽\n角色简介:\n"),
+            "玛丽",
+        )
+        self.assertEqual(_normalize_target_name(""), "")
+        self.assertEqual(_normalize_target_name(None), "")
+
+    def test_speaker_count_matches_prefixed_lines(self):
+        from chat.character_reduce import _speaker_line_count
+
+        content = "玛丽: 你好\n老师: 早安\n玛丽（啦啦队服）: 加油\n旁白: 安静"
+        self.assertEqual(_speaker_line_count(content, "玛丽"), 2)
+
+    def test_reduce_result_coerces_non_string_llm_fields(self):
+        from chat.character_reduce import reduce_result_to_draft
+
+        pipeline_result = {
+            "result": {
+                "profile_summary": {
+                    "name": ["玛丽"],  # LLM returned a list — used to crash
+                    "description": "一段简介。",
+                    "personality": None,
+                    "appearance": {"k": "v"},  # dict must not explode
+                    "affiliation": " 三一 ",
+                    "tags": ["元气", 3, "", None],
+                },
+                "dialogue_library": {
+                    "日常": [
+                        {"quote": ["列表台词"], "file": "a.txt"},
+                        {"quote": "正常台词", "file": "b.txt"},
+                        "not-a-dict",
+                    ],
+                    "提问": "not-a-list",
+                },
+            }
+        }
+
+        draft = reduce_result_to_draft(pipeline_result)
+        self.assertEqual(draft["name"], "玛丽")
+        self.assertEqual(draft["affiliation"], "三一")
+        self.assertEqual(draft["personality"], "")
+        self.assertEqual(draft["appearance"], "")
+        self.assertEqual(draft["tags"], ["元气"])
+        self.assertIn("正常台词", draft["example_dialogue"])
+        # List-typed quotes are joined into usable text instead of crashing.
+        self.assertIn("列表台词", draft["example_dialogue"])
+        self.assertNotIn("not-a-dict", draft["example_dialogue"])
+        self.assertNotIn("not-a-list", draft["example_dialogue"])

@@ -176,14 +176,38 @@ def _build_example_dialogue(dialogue_library: Optional[dict]) -> str:
     samples: List[str] = []
     for category in DIALOGUE_CATEGORIES:
         items = dialogue_library.get(category) or []
+        if not isinstance(items, list):
+            continue
         for item in items[:2]:
-            quote = (item.get("quote") or "").strip()
+            if not isinstance(item, dict):
+                continue
+            quote = _as_text(item.get("quote"))
             if not quote:
                 continue
-            file_ref = item.get("file") or ""
+            file_ref = _as_text(item.get("file"))
             source = f"（{file_ref}）" if file_ref else ""
             samples.append(f"User: <触发场景>{source}\nCharacter: {quote}")
     return "\n\n".join(samples)
+
+
+def _as_text(value, fallback: str = "") -> str:
+    """把 LLM 返回的字段安全转成文本。
+
+    推理/中转模型偶尔会把单个字段返回成 list（如 "name": ["玛丽"]）或
+    其他非字符串类型；直接 .strip() 会炸掉整条 reduce 管线
+    （2026-08-24 实测 'list' object has no attribute 'strip'）。
+    """
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        parts = [str(v).strip() for v in value if v is not None and str(v).strip()]
+        return "\n".join(parts) if parts else fallback
+    if isinstance(value, dict):
+        return ""
+    text = str(value).strip()
+    return text or fallback
 
 
 def reduce_result_to_draft(pipeline_result: dict) -> dict:
@@ -194,12 +218,12 @@ def reduce_result_to_draft(pipeline_result: dict) -> dict:
     example_dialogue = _build_example_dialogue(result.get("dialogue_library"))
 
     return {
-        "name": (summary.get("name") or "Unknown").strip(),
-        "description": (summary.get("description") or "").strip(),
-        "personality": (summary.get("personality") or "").strip(),
-        "appearance": (summary.get("appearance") or "").strip(),
-        "affiliation": (summary.get("affiliation") or "").strip(),
-        "tags": summary.get("tags") or [],
+        "name": _as_text(summary.get("name"), "Unknown"),
+        "description": _as_text(summary.get("description")),
+        "personality": _as_text(summary.get("personality")),
+        "appearance": _as_text(summary.get("appearance")),
+        "affiliation": _as_text(summary.get("affiliation")),
+        "tags": [t for t in (summary.get("tags") or []) if isinstance(t, str) and t.strip()],
         "visual_summary": "",
         "example_dialogue": example_dialogue,
     }
@@ -209,13 +233,15 @@ def _normalize_target_name(text_context: Optional[str]) -> str:
     """从 text_context 里解析目标角色名。
 
     前端约定 text_context 含 "目标角色名: xxx" 行；取不到则返回空。
+    名字取到行尾为止——带空格的名字（如英文 "Mika Suenaga"）不能在
+    第一个空格处截断，否则台词计数永远匹配不到（2026-08-24 实测 bug）。
     """
     if not text_context:
         return ""
-    m = re.search(r"目标角色名\s*[:：]\s*(\S+)", text_context)
+    m = re.search(r"目标角色名\s*[:：]\s*(.+)", text_context)
     if m:
         return m.group(1).strip()
-    m = re.search(r"target\s*character\s*name\s*[:：]\s*(\S+)", text_context, re.IGNORECASE)
+    m = re.search(r"target\s*character\s*name\s*[:：]\s*(.+)", text_context, re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return ""

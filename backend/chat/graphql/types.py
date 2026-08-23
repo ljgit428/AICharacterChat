@@ -26,7 +26,9 @@ class CharacterKnowledgeAssetInput:
 @strawberry.input
 class CharacterInput:
     name: str
-    avatar_url: str
+    # 头像在 UI 上是可选项（“可选，但强烈建议添加”）；之前是必填 String!，
+    # 与产品文案矛盾（2026-08-24 GUI 导入实测发现）。
+    avatar_url: Optional[str] = ""
     description: str
     user_address: Optional[str] = ""
     personality: Optional[str] = ""

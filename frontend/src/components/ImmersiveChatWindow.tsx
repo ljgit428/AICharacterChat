@@ -220,8 +220,10 @@ export default function ImmersiveChatWindow({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewAttachment]);
 
-  const submitMessage = () => {
-    const message = draftMessage.trim();
+  const submitMessage = (explicitText?: string) => {
+    // explicitText comes straight from the textarea element on Enter so a
+    // state flush lag can never drop a submission.
+    const message = (explicitText ?? draftMessage).trim();
     if (!message && pendingAttachments.length === 0 && !isFirstMessage) {
       return;
     }
@@ -243,7 +245,7 @@ export default function ImmersiveChatWindow({
       if (isFirstMessage) {
         return;
       }
-      submitMessage();
+      submitMessage(event.currentTarget.value);
     }
   };
 
@@ -646,7 +648,7 @@ export default function ImmersiveChatWindow({
             ) : (
               <button
                 className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                onClick={submitMessage}
+                onClick={() => submitMessage()}
                 disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
               >
                 {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}

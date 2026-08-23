@@ -589,7 +589,7 @@ class Mutation:
             user = _get_authenticated_user(info)
             character = Character.objects.create(
                 name=input.name,
-                avatar_url=input.avatar_url,
+                avatar_url=input.avatar_url or "",
                 description=input.description,
                 user_address=input.user_address,
                 personality=input.personality,
