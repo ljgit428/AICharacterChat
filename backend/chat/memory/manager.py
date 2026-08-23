@@ -21,7 +21,7 @@ from ..models import (
     MemoryAuditSource,
     Message,
 )
-from .constants import PRIORITY_SECTIONS
+from .constants import PRIORITY_SECTIONS, RELATIONSHIP_SECTION
 
 
 class MemoryItemNotFoundError(Exception):
@@ -82,6 +82,26 @@ class MemoryManager:
                 f"description exceeds {self.description_limit} characters (got {len(description)}); "
                 "split into multiple shorter entries instead."
             )
+        # Memory v2 §4.2 hard constraint: 「关系」 holds exactly one entry. If the
+        # extraction model ignores the prompt rule and creates a second one,
+        # silently redirect this call into an update of the existing entry so
+        # the version history (and thus the growth timeline) stays in one place.
+        if section == RELATIONSHIP_SECTION:
+            existing = (
+                CharacterMemoryItem.objects
+                .filter(character=self.character, section=RELATIONSHIP_SECTION)
+                .order_by("-updated_at", "-id")
+                .first()
+            )
+            if existing is not None:
+                redirect_reason = (reason or "").strip() or "关系更新"
+                return self.update_item(
+                    short_id=existing.short_id,
+                    description=description,
+                    reason=f"{redirect_reason}（auto-redirect: single-entry section）",
+                    source_message=source_message,
+                    source=source,
+                )
         with transaction.atomic():
             short_id = self._unique_short_id()
             item = CharacterMemoryItem.objects.create(
@@ -128,6 +148,18 @@ class MemoryManager:
             item = self.get_item(short_id)
             old_desc, old_section, old_time = item.description, item.section, _now_iso()
             new_section = (section or item.section).strip()[:64] or item.section
+            if new_section == RELATIONSHIP_SECTION and old_section != RELATIONSHIP_SECTION:
+                clash = (
+                    CharacterMemoryItem.objects
+                    .filter(character=self.character, section=RELATIONSHIP_SECTION)
+                    .exclude(short_id=short_id)
+                    .exists()
+                )
+                if clash:
+                    raise ValueError(
+                        "「关系」 section already holds its single entry; update that entry "
+                        "instead of moving another one into it."
+                    )
             history = list(item.description_history or [])
             history.append({
                 "old_desc": old_desc,
@@ -206,6 +238,19 @@ class MemoryManager:
             )
         if id1 == id2:
             raise ValueError("merge requires two distinct ids")
+        if section == RELATIONSHIP_SECTION:
+            clash = (
+                CharacterMemoryItem.objects
+                .filter(character=self.character, section=RELATIONSHIP_SECTION)
+                .exclude(short_id=id1)
+                .exclude(short_id=id2)
+                .exists()
+            )
+            if clash:
+                raise ValueError(
+                    "「关系」 section already holds its single entry; merge into that "
+                    "entry instead of producing a second one."
+                )
         with transaction.atomic():
             primary = self.get_item(id1)
             secondary = self.get_item(id2)

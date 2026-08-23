@@ -13,6 +13,16 @@ from zoneinfo import ZoneInfo
 from ..models import CharacterMemoryItem, ChatSession, Message
 
 
+SPECIAL_SECTION_RULES = """
+特殊分区:
+- 「关系」: 此分区永远只允许一条记忆，描述用户与角色当前关系的阶段与氛围
+  （例: 已从陌生变得亲近，开始互相开玩笑）。关系发生变化时必须用 update_memory
+  更新那一条并说明原因，禁止新建第二条「关系」。
+- 「里程碑」: 只追加以绝对日期开头的共同经历（例: 2026-08-23 第一次一起看了流星雨）。
+  这是只增不减的回忆册：不得因为时间久远而删除；仅当两条确实描述同一事件时才允许 merge。
+""".strip() + "\n\n"
+
+
 CORE_PRINCIPLES = """\
 核心原则:
 0. 对于记忆来讲，主观印象第一，客观事实第二。科技、事实等固定的客观事实必须简洁简练；用户的喜好等主观印象可以相对正常地描写。每条描述最长不超过 200 字符（含标点）。
@@ -33,7 +43,7 @@ COLD_START_SYSTEM = """\
 - 无需调用 update_memory 或 delete_memory（冷启动时没有旧记忆）
 
 由于当前记忆为空，你必须创建新分区（1-4 字中文名词，例: 身份, 品味, 瞬间, 工作）。
-""" + CORE_PRINCIPLES
+""" + SPECIAL_SECTION_RULES + CORE_PRINCIPLES
 
 
 UPDATE_SYSTEM = """\
@@ -46,7 +56,7 @@ UPDATE_SYSTEM = """\
 - 相似条目用 merge_memories 合并（id1 + id2 → id1 保留，合并两边的 history）
 
 记忆分区：优先使用已有分区；若记忆不适合任何已有分区或用户明确要求新建，可创建新分区（1-4 字中文名词）。
-""" + CORE_PRINCIPLES
+""" + SPECIAL_SECTION_RULES + CORE_PRINCIPLES
 
 
 def _format_current_items(items: Iterable[CharacterMemoryItem]) -> str:

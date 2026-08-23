@@ -677,3 +677,79 @@ class DispatchMemorySyncFallbackTests(TestCase):
 
         mock_delay.assert_called_once()
         mock_apply.assert_not_called()
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class GrowthSectionConstraintTests(TestCase):
+    """memory v2 §4: 「关系」single-entry constraint + 「里程碑」 conventions."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='growth-owner', password='password123')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Growth Character',
+            avatar_url='',
+            description='Growth section tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.manager = MemoryManager(self.character)
+
+    def test_second_relationship_create_redirects_into_update(self):
+        first = self.manager.create_item(section='关系', description='初识阶段，还比较生疏。')
+        second = self.manager.create_item(
+            section='关系', description='已经变得亲近，开始互相开玩笑。', reason='聊得很热络',
+        )
+
+        items = list(self.character.memory_items.filter(section='关系'))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].short_id, first.short_id)
+        self.assertEqual(items[0].description, '已经变得亲近，开始互相开玩笑。')
+        # The redirect is recorded inside the version chain.
+        last = items[0].description_history[-1]
+        self.assertIn('auto-redirect', last['reason'])
+        self.assertEqual(last['old_desc'], '初识阶段，还比较生疏。')
+
+    def test_update_renaming_foreign_entry_into_relationship_is_rejected(self):
+        self.manager.create_item(section='关系', description='初识阶段。')
+        work = self.manager.create_item(section='工作', description='用户是护士。')
+
+        with self.assertRaises(ValueError):
+            self.manager.update_item(
+                short_id=work.short_id,
+                description=work.description,
+                reason='should not be allowed',
+                section='关系',
+            )
+        # Nothing changed.
+        work.refresh_from_db()
+        self.assertEqual(work.section, '工作')
+
+    def test_merge_producing_second_relationship_entry_is_rejected(self):
+        rel = self.manager.create_item(section='关系', description='初识阶段。')
+        a = self.manager.create_item(section='工作', description='用户是护士。')
+        b = self.manager.create_item(section='爱好', description='用户喜欢喝冰美式。')
+
+        with self.assertRaises(ValueError):
+            self.manager.merge_items(
+                id1=a.short_id, id2=b.short_id,
+                content='合并后的内容。', section='关系', reason='test',
+            )
+        rel.refresh_from_db()
+        self.assertTrue(self.character.memory_items.filter(short_id=rel.short_id).exists())
+
+    def test_extraction_prompts_carry_special_section_rules(self):
+        from chat.memory.prompts import COLD_START_SYSTEM, UPDATE_SYSTEM
+
+        for prompt in (COLD_START_SYSTEM, UPDATE_SYSTEM):
+            self.assertIn('特殊分区', prompt)
+            self.assertIn('「关系」', prompt)
+            self.assertIn('「里程碑」', prompt)
