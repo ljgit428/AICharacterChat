@@ -1966,9 +1966,18 @@ def _build_search_query(chat_session, user_message=None):
     return _truncate_text(query, 300)
 
 
-def build_research_context(chat_session, user_message=None):
+def _web_search_enabled(chat_session):
+    """角色级三态开关（None=跟随用户全局设置）优先，其次回退到用户默认值。"""
+    character = chat_session.character
+    override = getattr(character, 'enable_web_search', None)
+    if override is not None:
+        return bool(override)
     profile = _get_user_profile(chat_session)
-    if not profile.default_enable_web_search:
+    return bool(profile.default_enable_web_search)
+
+
+def build_research_context(chat_session, user_message=None):
+    if not _web_search_enabled(chat_session):
         return {
             'query': '',
             'items': [],
@@ -2404,6 +2413,7 @@ def sync_long_term_memory(self, message_id, chat_session_id, character_id):
             chat_session=chat_session,
             new_message=message,
             timezone_name=profile.timezone or 'UTC',
+            research_payload=getattr(message, 'research_payload', None) or None,
         )
         runtime_config = _get_runtime_model_config(chat_session)
         actions = _collect_memory_actions(
@@ -2627,8 +2637,7 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     # Surface web search as a tool line before the search HTTP call starts.
     collected_tool_calls = []
-    profile = _get_user_profile(chat_session)
-    if profile.default_enable_web_search:
+    if _web_search_enabled(chat_session):
         search_query = _build_search_query(chat_session, user_message=user_message)
         if search_query:
             search_arguments = {'query': search_query}

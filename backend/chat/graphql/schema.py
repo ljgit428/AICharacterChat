@@ -597,6 +597,7 @@ class Mutation:
                 response_guidelines=input.response_guidelines,
                 scenario=input.scenario,
                 example_dialogue=input.example_dialogue,
+                enable_web_search=input.enable_web_search,
                 affiliation=input.affiliation,
                 system_prompt_preview=input.system_prompt_preview,
                 tags=input.tags,
@@ -645,6 +646,7 @@ class Mutation:
             character.affiliation = input.affiliation
             character.system_prompt_preview = input.system_prompt_preview
             character.tags = input.tags
+            character.enable_web_search = input.enable_web_search
             _attach_character_reference_assets(
                 character,
                 uploaded_assets,

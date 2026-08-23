@@ -153,6 +153,8 @@ async function collectFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
 
 type PromptPreviewLocale = 'zh-CN' | 'en-US';
 
+type WebSearchMode = 'default' | 'on' | 'off';
+
 type FormState = {
   name: string;
   description: string;
@@ -165,6 +167,7 @@ type FormState = {
   exampleDialogue: string;
   tags: string;
   avatarUrl: string;
+  webSearchMode: WebSearchMode;
 };
 
 type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'affiliation' | 'tags' | 'exampleDialogue'>;
@@ -303,6 +306,7 @@ const GET_CHARACTER = gql`
       affiliation
       tags
       avatarUrl
+      enableWebSearch
       knowledgeAssets {
         fileUrl
         fileName
@@ -645,7 +649,8 @@ export default function CreateCharacterSimplifiedForm({
     scenario: '',
     exampleDialogue: '',
     tags: '',
-    avatarUrl: ''
+    avatarUrl: '',
+    webSearchMode: 'default',
   });
   const [autoInputText, setAutoInputText] = useState('');
   const [backgroundFiles, setBackgroundFiles] = useState<ReferenceFile[]>([]);
@@ -690,6 +695,8 @@ export default function CreateCharacterSimplifiedForm({
       exampleDialogue: char.exampleDialogue || '',
       tags: Array.isArray(char.tags) ? char.tags.join(', ') : '',
       avatarUrl: char.avatarUrl || '',
+      webSearchMode:
+        char.enableWebSearch === true ? 'on' : char.enableWebSearch === false ? 'off' : 'default',
     };
     const nextBackgroundFiles = Array.isArray(char.knowledgeAssets)
       ? char.knowledgeAssets.map((asset: { fileName: string; fileUrl: string; fileType: string }) => ({
@@ -1002,6 +1009,8 @@ export default function CreateCharacterSimplifiedForm({
         scenario: form.scenario.trim(),
         exampleDialogue: form.exampleDialogue.trim(),
         tags: form.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+        enableWebSearch:
+          form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
         backgroundFiles: backgroundFiles.map((file) => ({
           uploadedUrl: file.url,
           fileName: file.name,
@@ -1270,6 +1279,23 @@ export default function CreateCharacterSimplifiedForm({
                   placeholder={copy.characterForm.exampleDialoguePlaceholder}
                   className={`w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${fieldHighlightClass('exampleDialogue')}`}
                 />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-gray-700">
+                  {copy.characterForm.webSearchLabel}
+                </label>
+                <select
+                  value={form.webSearchMode}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, webSearchMode: e.target.value as WebSearchMode }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                >
+                  <option value="default">{copy.characterForm.webSearchDefault}</option>
+                  <option value="on">{copy.characterForm.webSearchOn}</option>
+                  <option value="off">{copy.characterForm.webSearchOff}</option>
+                </select>
+                <p className="text-xs text-gray-400">{copy.characterForm.webSearchHint}</p>
               </div>
             </div>
           </div>

@@ -42,6 +42,8 @@ class CharacterInput:
     background_file_url: Optional[str] = ""
     background_file_name: Optional[str] = ""
     background_files: Optional[List[CharacterKnowledgeAssetInput]] = None
+    # 角色级联网搜索三态开关：None=跟随用户全局设置
+    enable_web_search: Optional[bool] = None
 
 
 @strawberry.type
@@ -81,6 +83,8 @@ class CharacterType:
     affiliation: str
     system_prompt_preview: str
     tags: List[str]
+    # 角色级联网搜索三态开关（None=跟随用户全局设置）
+    enable_web_search: Optional[bool]
 
     @strawberry.field
     async def background_file_url(self) -> Optional[str]:

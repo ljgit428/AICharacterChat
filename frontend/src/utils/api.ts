@@ -19,6 +19,7 @@ interface ApiCharacter {
   appearance: string;
   response_guidelines: string;
   avatar_url: string;
+  enable_web_search?: boolean | null;
   file: string;
   affiliation: string;
   disabled_states?: {

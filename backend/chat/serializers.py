@@ -12,6 +12,7 @@ class CharacterSerializer(serializers.ModelSerializer):
             'id', 'name', 'avatar_url', 'description', 'user_address',
             'scenario', 'example_dialogue', 'affiliation', 'tags', 'personality',
             'appearance', 'response_guidelines', 'file',
+            'enable_web_search',
             'disabled_states', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']

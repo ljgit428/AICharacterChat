@@ -523,7 +523,7 @@ class MemoryPromptInjectionTests(TestCase):
 
     def setUp(self):
         self.user = User.objects.create_user(username='inject-owner', password='password123')
-        from chat.models import Character
+        from chat.models import Character, CharacterMemoryItem
         from chat.memory.manager import MemoryManager
 
         self.character = Character.objects.create(
@@ -546,6 +546,17 @@ class MemoryPromptInjectionTests(TestCase):
         self.manager.create_item(section='工作', description='Item A4 (newest work).')
         self.manager.create_item(section='关系', description='关系正在升温，开始互相开玩笑。')
         self.manager.create_item(section='里程碑', description='2026-08-23 第一次一起看了流星雨。')
+        # 固定确定性的新旧顺序（同毫秒创建会让 updated_at 排序不稳定）
+        from django.utils import timezone as dj_tz
+        import datetime as _dt
+        now = dj_tz.now()
+        work_items = list(
+            self.character.memory_items.filter(section='工作').order_by('id')
+        )
+        for offset, item in enumerate(work_items):
+            CharacterMemoryItem.objects.filter(pk=item.pk).update(
+                updated_at=now - _dt.timedelta(minutes=(len(work_items) - offset)),
+            )
 
     def test_unlimited_budget_returns_everything_and_not_truncated(self):
         narrative, truncated = self.manager.get_prompt_memory()
@@ -566,6 +577,7 @@ class MemoryPromptInjectionTests(TestCase):
         self.assertIn('第一次一起看了流星雨', narrative)
         # Newest non-priority items are kept, oldest dropped whole.
         self.assertIn('Item A4', narrative)
+        self.assertIn('Item A3', narrative)
         self.assertIn('Item A2', narrative)
         self.assertNotIn('Item A1', narrative)
 
@@ -875,3 +887,101 @@ class ReducePipelineHelperTests(TestCase):
         self.assertIn("列表台词", draft["example_dialogue"])
         self.assertNotIn("not-a-dict", draft["example_dialogue"])
         self.assertNotIn("not-a-list", draft["example_dialogue"])
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class WebSearchGatingTests(TestCase):
+    """角色级联网搜索三态开关（2026-08-24 联网搜索功能补全）。"""
+
+    def setUp(self):
+        from chat.models import Character, ChatSession, UserProfile
+
+        self.user = User.objects.create_user(username='search-owner', password='password123')
+        UserProfile.objects.update_or_create(
+            user=self.user, defaults={'default_enable_web_search': True},
+        )
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Search Character',
+            avatar_url='',
+            description='Web search gating tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Lab',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['search'],
+        )
+        self.session = ChatSession.objects.create(user=self.user, character=self.character)
+
+    def _enabled(self):
+        from chat.tasks import _web_search_enabled
+        return _web_search_enabled(self.session)
+
+    def test_null_follows_user_default(self):
+        self.character.enable_web_search = None
+        self.character.save(update_fields=['enable_web_search'])
+        self.assertTrue(self._enabled())
+
+    def test_character_false_overrides_user_true(self):
+        self.character.enable_web_search = False
+        self.character.save(update_fields=['enable_web_search'])
+        self.assertFalse(self._enabled())
+
+    def test_character_true_overrides_user_false(self):
+        from chat.models import UserProfile
+        self.character.enable_web_search = True
+        self.character.save(update_fields=['enable_web_search'])
+        UserProfile.objects.update_or_create(
+            user=self.user, defaults={'default_enable_web_search': False},
+        )
+        self.assertTrue(self._enabled())
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryResearchPromptTests(TestCase):
+    """搜索结果注入记忆提取 prompt（联网搜索 × 记忆打通）。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='research-mem-owner', password='password123')
+        from chat.models import Character
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Research Memory Character',
+            avatar_url='',
+            description='Research memory tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Lab',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+
+    def _build(self, payload):
+        from chat.memory.prompts import build_memory_extraction_prompt
+        return build_memory_extraction_prompt(
+            character_name=self.character.name,
+            items=[],
+            chat_session=None,
+            new_message=None,
+            research_payload=payload,
+        )
+
+    def test_research_payload_renders_into_prompt(self):
+        result = self._build({
+            'query': '附近咖啡店',
+            'items': [{'title': '标题一', 'snippet': '一家很棒的咖啡店'}],
+        })
+        self.assertIn('WEB RESEARCH THIS TURN', result['user'])
+        self.assertIn('附近咖啡店', result['user'])
+        self.assertIn('标题一', result['user'])
+
+    def test_empty_or_error_payload_stays_quiet(self):
+        result = self._build({'query': '', 'items': [], 'error': ''})
+        self.assertNotIn('WEB RESEARCH THIS TURN', result['user'])
+
+        failed = self._build({'query': 'q', 'items': [], 'error': 'tavily down'})
+        self.assertIn('检索失败', failed['user'])

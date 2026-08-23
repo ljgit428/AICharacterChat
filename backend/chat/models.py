@@ -211,6 +211,14 @@ class Character(models.Model):
     )
     file = models.FileField(upload_to='character_files/', blank=True, null=True)
     disabled_states = models.JSONField(default=get_default_disabled_states)
+    # 角色级联网搜索开关（三态）：None=跟随用户全局设置 default_enable_web_search；
+    # True/False=强制覆盖。创建与编辑角色时可在表单中选择。
+    enable_web_search = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text="Per-character web search override. None follows the user's global default.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):

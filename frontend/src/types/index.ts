@@ -109,6 +109,8 @@ export interface Character {
   appearance: string;
   responseGuidelines: string;
   avatarUrl?: string;
+  /** 角色级联网搜索三态开关：null/undefined = 跟随用户全局设置 */
+  enableWebSearch?: boolean | null;
   fileUrl?: string;
   filePreviewUrl?: string;
   affiliation: string;

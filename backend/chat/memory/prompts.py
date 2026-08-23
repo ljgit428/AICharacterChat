@@ -105,6 +105,29 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _format_research_for_prompt(research_payload: dict | None) -> str:
+    """把本轮联网检索结果压缩成记忆提取可读的段落（memory v2 §搜索×记忆）。"""
+    if not research_payload:
+        return ""
+    items = research_payload.get("items") or []
+    query = (research_payload.get("query") or "").strip()
+    if not items and not query:
+        return ""
+    lines = ["### WEB RESEARCH THIS TURN"]
+    if research_payload.get("error"):
+        lines.append(f"（检索失败: {research_payload['error']}）")
+        return "\n".join(lines)
+    if query:
+        lines.append(f"检索词: {query}")
+    for index, item in enumerate(items[:3], start=1):
+        title = (item.get("title") or "Untitled").strip()
+        snippet = (item.get("snippet") or "").strip()
+        lines.append(f"{index}. {title} — {snippet[:160]}")
+    lines.append("若检索内容揭示了用户的持久事实（喜好、计划、身份等），可按核心原则记录；"
+                 "纯时效性新闻或与用户无关的内容应丢弃。")
+    return "\n".join(lines)
+
+
 def build_memory_extraction_prompt(
     *,
     character_name: str,
@@ -112,6 +135,7 @@ def build_memory_extraction_prompt(
     chat_session: ChatSession | None,
     new_message: Message | None,
     timezone_name: str = "UTC",
+    research_payload: dict | None = None,
 ) -> dict[str, str]:
     """Build the (system, user) tuple for the extraction call."""
     items_list = list(items)
@@ -120,6 +144,10 @@ def build_memory_extraction_prompt(
 
     user_sections: list[str] = ["### CURRENT MEMORY (read-only snapshot)"]
     user_sections.append(_format_current_items(items_list))
+    research_section = _format_research_for_prompt(research_payload)
+    if research_section:
+        user_sections.append("")
+        user_sections.append(research_section)
     if chat_session:
         user_sections.append("")
         user_sections.append("### NEW TURN")
