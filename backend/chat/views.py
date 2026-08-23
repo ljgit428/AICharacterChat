@@ -192,6 +192,13 @@ class CharacterViewSet(viewsets.ModelViewSet):
         view.request = request
         return view.merge(request=request, pk=pk)
 
+    @action(detail=True, methods=['get'], url_path='memory/narrative')
+    def memory_narrative(self, request, pk=None):
+        view = CharacterMemoryViewSet()
+        view.permission_classes = self.permission_classes
+        view.request = request
+        return view.narrative(request=request, pk=pk)
+
     @action(
         detail=True,
         methods=['patch', 'delete'],
@@ -491,6 +498,24 @@ class CharacterMemoryViewSet(viewsets.ViewSet):
             'sections': snapshot['sections'],
             'wiki_markdown': manager.render_wiki_markdown(),
             'count': sum(len(section['items']) for section in snapshot['sections']),
+        })
+
+    def narrative(self, request, pk=None):
+        """AI-view preview: the exact text injected into the system prompt
+        (memory v2 §5.3), plus whether budget trimming kicked in."""
+        from .memory.constants import STREAM_MEMORY_SECTION_LIMIT
+
+        character, manager = self._memory(request, pk)
+        narrative, truncated = manager.get_prompt_memory(
+            budget_chars=STREAM_MEMORY_SECTION_LIMIT,
+        )
+        items = manager.list_items()
+        last_updated = max((item.updated_at for item in items), default=None)
+        return Response({
+            'narrative': narrative,
+            'truncated': truncated,
+            'count': len(items),
+            'last_updated': last_updated.isoformat() if last_updated else None,
         })
 
     def create(self, request, pk=None):

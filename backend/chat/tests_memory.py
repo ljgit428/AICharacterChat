@@ -753,3 +753,62 @@ class GrowthSectionConstraintTests(TestCase):
             self.assertIn('特殊分区', prompt)
             self.assertIn('「关系」', prompt)
             self.assertIn('「里程碑」', prompt)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryNarrativeEndpointTests(TestCase):
+    """memory v2 §5.3: GET /characters/{id}/memory/narrative/."""
+
+    def setUp(self):
+        from django.urls import reverse
+        from rest_framework.authtoken.models import Token
+        from rest_framework.test import APIClient
+
+        self.user = User.objects.create_user(username='narrative-owner', password='password123')
+        self.token = Token.objects.create(user=self.user)
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {self.token.key}')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Narrative Character',
+            avatar_url='',
+            description='Narrative endpoint tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        manager = MemoryManager(self.character)
+        manager.create_item(section='关系', description='初识阶段，还在互相了解。')
+        manager.create_item(section='身份', description='用户是一名护士。')
+        self.reverse = reverse
+
+    def _url(self):
+        return self.reverse('character-memory-narrative', args=[self.character.pk])
+
+    def test_narrative_lists_priority_sections_first(self):
+        response = self.client.get(f'/api/characters/{self.character.pk}/memory/narrative/')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload['truncated'])
+        self.assertEqual(payload['count'], 2)
+        self.assertIn('初识阶段', payload['narrative'])
+        # 关系 (priority) appears before 身份 regardless of insertion order.
+        self.assertLess(payload['narrative'].index('## 关系'), payload['narrative'].index('## 身份'))
+
+    def test_narrative_requires_ownership(self):
+        from django.contrib.auth.models import User
+        from rest_framework.authtoken.models import Token
+        from rest_framework.test import APIClient
+
+        stranger = User.objects.create_user(username='narrative-stranger', password='password123')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=stranger).key}")
+        response = client.get(f'/api/characters/{self.character.pk}/memory/narrative/')
+        self.assertEqual(response.status_code, 404)

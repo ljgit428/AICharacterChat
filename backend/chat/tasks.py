@@ -70,9 +70,9 @@ CHARACTER_REFERENCE_IMAGE_LIMIT = 4
 OPENAI_LOCAL_TOOL_CALL_LIMIT = 6
 MEMORY_TOOL_DEFAULT_MAX_CHARS = 6000
 # Injection budget for the long-term-memory narrative (memory v2 §3.2).
-# Trimming happens per-item inside MemoryManager.get_prompt_memory(), which
-# always preserves priority sections (关系/里程碑) in full.
-STREAM_MEMORY_SECTION_LIMIT = 6000
+# Canonical value lives in memory.constants; kept as an alias here because
+# much of the codebase imports it from this module.
+from .memory.constants import STREAM_MEMORY_SECTION_LIMIT
 LONG_TERM_MEMORY_DESC_LIMIT = 200
 LONG_TERM_MEMORY_SECTION_LIMIT = 64
 LONG_TERM_MEMORY_TOOL_ROUND_TRIP_LIMIT = 8

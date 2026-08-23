@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Video, X } from 'lucide-react';
+import { BrainCircuit, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
@@ -16,6 +16,12 @@ interface ImmersiveChatWindowProps {
   attachmentSupport: AttachmentSupport;
   localizedMediaMode?: (mode: MediaHandlingMode) => string;
   contextWindowTokens?: number | null;
+  /** Natural-chat spec §2: aborts the in-flight generation. */
+  onStop?: () => void;
+  /** Texts queued while a reply was streaming; rendered as pending chips. */
+  pendingQueueTexts?: string[];
+  /** One-line notice (e.g. "Memory +2") shown above the composer. */
+  memoryNotice?: string;
 }
 
 export interface PendingAttachment {
@@ -129,6 +135,9 @@ export default function ImmersiveChatWindow({
   attachmentSupport,
   localizedMediaMode,
   contextWindowTokens,
+  onStop,
+  pendingQueueTexts,
+  memoryNotice,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -489,6 +498,28 @@ export default function ImmersiveChatWindow({
       </div>
 
       <div className="border-t border-slate-200/70 bg-white/80 p-4 backdrop-blur">
+        {(isLoading || (pendingQueueTexts?.length ?? 0) > 0 || memoryNotice) && (
+          <div className="mx-1 mb-2 flex flex-wrap items-center gap-2">
+            {memoryNotice && (
+              <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-200">
+                {memoryNotice}
+              </span>
+            )}
+            {(pendingQueueTexts?.length ?? 0) > 0 && (
+              <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-amber-200">
+                {copy.immersiveChat.pendingQueuedCount(pendingQueueTexts!.length)}
+              </span>
+            )}
+            {pendingQueueTexts?.map((text, index) => (
+              <span
+                key={index}
+                className="max-w-[14rem] truncate rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500 ring-1 ring-slate-200"
+              >
+                ⏳ {text || copy.immersiveChat.pendingAttachmentOnly}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="rounded-[1.75rem] border border-slate-200 bg-white px-3 py-3 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
           {pendingAttachments.length > 0 && (
             <div className="mb-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
@@ -501,7 +532,7 @@ export default function ImmersiveChatWindow({
                   type="button"
                   onClick={() => attachmentInputRef.current?.click()}
                   className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                  disabled={isLoading || isFirstMessage}
+                  disabled={isFirstMessage}
                 >
                   {copy.immersiveChat.addMoreFiles}
                 </button>
@@ -553,7 +584,7 @@ export default function ImmersiveChatWindow({
             accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,video/*"
             multiple
             onChange={handleAttachmentChange}
-            disabled={isLoading || isFirstMessage}
+            disabled={isFirstMessage}
           />
           <textarea
             ref={textareaRef}
@@ -563,7 +594,7 @@ export default function ImmersiveChatWindow({
             value={draftMessage}
             onChange={(event) => setDraftMessage(event.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isLoading || isFirstMessage}
+            disabled={isFirstMessage}
             title={copy.immersiveChat.enterToSend}
           />
           <div className="mt-1 flex items-center justify-between gap-3 px-1">
@@ -572,7 +603,7 @@ export default function ImmersiveChatWindow({
                 type="button"
                 onClick={() => attachmentInputRef.current?.click()}
                 className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={isLoading || isFirstMessage}
+                disabled={isFirstMessage}
                 title={copy.immersiveChat.attachFile}
               >
                 <Plus className="h-5 w-5" />
@@ -600,13 +631,27 @@ export default function ImmersiveChatWindow({
                 />
               )}
             </div>
-            <button
-              className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-              onClick={submitMessage}
-              disabled={isLoading || (!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0)}
-            >
-              {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
-            </button>
+            {isLoading ? (
+              <button
+                type="button"
+                onClick={onStop}
+                disabled={!onStop}
+                title={copy.immersiveChat.stop}
+                aria-label={copy.immersiveChat.stop}
+                className="flex h-9 items-center gap-2 rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Square className="h-3.5 w-3.5" fill="currentColor" />
+                {copy.immersiveChat.stop}
+              </button>
+            ) : (
+              <button
+                className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                onClick={submitMessage}
+                disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
+              >
+                {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
+              </button>
+            )}
           </div>
         </div>
         {composerError && (

@@ -14,3 +14,8 @@ MILESTONE_SECTION = '里程碑'
 # Sections that must survive prompt-injection budget trimming in full,
 # highest priority first.
 PRIORITY_SECTIONS = (RELATIONSHIP_SECTION, MILESTONE_SECTION)
+
+# Injection budget (chars) for the long-term-memory narrative. Trimming is
+# per-item inside MemoryManager.get_prompt_memory(); priority sections are
+# always preserved in full.
+STREAM_MEMORY_SECTION_LIMIT = 6000

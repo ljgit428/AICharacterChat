@@ -3,7 +3,7 @@ interface ApiResponse<T> {
   error?: string;
 }
 
-import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
+import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
 import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
@@ -927,8 +927,9 @@ class ApiService {
     data: SendMessageRequest,
     handlers: {
       onEvent: (event: StreamMessageEvent) => void;
-    }
-  ): Promise<ApiResponse<{ chat_session_id?: string }>> {
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<ApiResponse<{ chat_session_id?: string }> & { aborted?: boolean }> {
     try {
       const token = getAuthToken();
       const attachments = data.attachments?.length
@@ -963,6 +964,7 @@ class ApiService {
           ...(token ? { Authorization: `Token ${token}` } : {}),
         },
         body,
+        signal: options?.signal,
       });
 
       if (!response.ok) {
@@ -1014,6 +1016,11 @@ class ApiService {
 
       return { data: { chat_session_id: chatSessionId } };
     } catch (error) {
+      if (options?.signal?.aborted) {
+        // Deliberate stop (natural-chat spec §3.3): not an error. Whatever
+        // content already streamed stays on screen via the caller.
+        return { data: {}, aborted: true };
+      }
       console.error('Streaming request failed:', error);
       return { error: error instanceof Error ? error.message : 'Unknown error' };
     }
@@ -1285,6 +1292,26 @@ class ApiService {
         sections,
         wikiMarkdown: response.data.wiki_markdown || '',
         count: response.data.count || 0,
+      },
+    };
+  }
+
+  async getMemoryNarrative(characterId: string): Promise<ApiResponse<MemoryNarrative>> {
+    const response = await this.request<{
+      narrative: string;
+      truncated: boolean;
+      count: number;
+      last_updated: string | null;
+    }>(`/characters/${characterId}/memory/narrative`);
+    if (!response.data) {
+      return { data: undefined };
+    }
+    return {
+      data: {
+        narrative: response.data.narrative || '',
+        truncated: Boolean(response.data.truncated),
+        count: response.data.count || 0,
+        lastUpdated: response.data.last_updated,
       },
     };
   }

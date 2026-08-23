@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession } from '@/store/chatSlice';
@@ -123,6 +123,34 @@ export default function ChatInterface({
   const isLoading = useSelector((state: RootState) => state.chat.isLoading);
   const messages = useSelector((state: RootState) => state.chat.messages);
 
+  // Natural-chat spec §2/§3.3: abortable streaming + queued sends.
+  const abortRef = useRef<AbortController | null>(null);
+  const pendingQueueRef = useRef<Array<{ text: string; attachments: PendingAttachment[] }>>([]);
+  const [pendingQueueTexts, setPendingQueueTexts] = useState<string[]>([]);
+  const handleSendMessageRef = useRef<(message: string, attachments: PendingAttachment[]) => void>(() => {});
+  // Memory-growth chip (memory v2 §5.1): poll count after each turn.
+  const lastMemoryCountRef = useRef<number | null>(null);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  const characterIdForMemory = character?.id;
+
+  useEffect(() => {
+    if (!characterIdForMemory) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiService.getCharacterMemory(characterIdForMemory);
+        if (!cancelled && response.data && response.data.count != null) {
+          lastMemoryCountRef.current = response.data.count;
+        }
+      } catch {
+        // Baseline is best-effort; the chip simply stays quiet on failure.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [characterIdForMemory]);
+
   useEffect(() => {
 
     const loadCharacter = async () => {
@@ -239,6 +267,16 @@ export default function ChatInterface({
   const handleSendMessage = async (userInput: string, attachments: PendingAttachment[] = []) => {
     if (!character) return;
 
+    // While a reply is streaming, submissions are queued and auto-sent when
+    // the current turn finishes (natural-chat spec §2) instead of being blocked.
+    if (isLoading) {
+      const queuedText = userInput.trim();
+      if (!queuedText && attachments.length === 0) return;
+      pendingQueueRef.current = [...pendingQueueRef.current, { text: queuedText, attachments }];
+      setPendingQueueTexts(pendingQueueRef.current.map((item) => item.text));
+      return;
+    }
+
     const isFirstMessage = !hasStartedConversation;
     const trimmedInput = userInput.trim();
     const streamingAssistantId = `stream-${Date.now()}`;
@@ -294,6 +332,10 @@ export default function ChatInterface({
     dispatch(setLoading(true));
     dispatch(setError(null));
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let streamedContent = '';
+
     try {
       const requestData: SendMessageRequest = {
         message: trimmedInput,
@@ -308,8 +350,7 @@ export default function ChatInterface({
       };
 
       const response = await apiService.streamMessage(requestData, {
-        onEvent: (event: StreamMessageEvent) => {
-          if (event.type === 'session') {
+        onEvent: (event: StreamMessageEvent) => {          if (event.type === 'session') {
             setChatSessionId(String(event.chat_session_id));
             if (event.user_message) {
               optimisticAttachments.forEach((attachment) => {
@@ -329,6 +370,7 @@ export default function ChatInterface({
           }
 
           if (event.type === 'delta') {
+            streamedContent += event.content;
             dispatch(appendToMessage({
               id: streamingAssistantId,
               content: event.content,
@@ -394,7 +436,27 @@ export default function ChatInterface({
             throw new Error(event.error);
           }
         },
-      });
+      }, { signal: controller.signal });
+
+      if (controller.signal.aborted || (response as { aborted?: boolean }).aborted) {
+        // Stopped by the user: keep whatever partial content streamed in as a
+        // regular bubble. The backend does not persist interrupted replies.
+        dispatch(removeMessage(streamingAssistantId));
+        const partial = streamedContent.trim();
+        if (partial) {
+          dispatch(addMessage({
+            id: `${streamingAssistantId}-stopped`,
+            content: partial,
+            role: 'assistant',
+            timestamp: new Date().toISOString(),
+            senderId: character.id,
+            senderName: character.name,
+            senderAvatarUrl: character.avatarUrl,
+            senderType: 'character',
+          }));
+        }
+        return;
+      }
 
       if (response.error) {
         throw new Error(response.error);
@@ -440,8 +502,47 @@ export default function ChatInterface({
       dispatch(addMessage(errorMessage));
     } finally {
       dispatch(setLoading(false));
+      abortRef.current = null;
+
+      // Auto-send queued submissions (natural-chat spec §2). The short delay
+      // absorbs stragglers so a burst of messages becomes one merged turn.
+      const queued = pendingQueueRef.current;
+      if (queued.length > 0) {
+        pendingQueueRef.current = [];
+        setPendingQueueTexts([]);
+        const mergedText = queued.map((item) => item.text).filter(Boolean).join('\n\n');
+        const mergedAttachments = queued.flatMap((item) => item.attachments);
+        window.setTimeout(() => {
+          handleSendMessageRef.current(mergedText, mergedAttachments);
+        }, 800);
+      }
+
+      // Memory-growth chip (memory v2 §5.1): compare entry count after the turn.
+      if (character) {
+        void (async () => {
+          try {
+            const memoryResponse = await apiService.getCharacterMemory(character.id);
+            const count = memoryResponse.data?.count ?? null;
+            if (count != null && lastMemoryCountRef.current != null && count > lastMemoryCountRef.current) {
+              setMemoryNotice(copy.immersiveChat.memoryGrew(count - lastMemoryCountRef.current));
+              window.setTimeout(() => setMemoryNotice(null), 6000);
+            }
+            if (count != null) {
+              lastMemoryCountRef.current = count;
+            }
+          } catch {
+            // Chip is best-effort; ignore polling failures.
+          }
+        })();
+      }
     }
   };
+
+  const handleStopStreaming = () => {
+    abortRef.current?.abort();
+  };
+
+  handleSendMessageRef.current = handleSendMessage;
 
   const activeModelConfig =
     modelRoles?.text ||
@@ -560,6 +661,9 @@ export default function ChatInterface({
           attachmentSupport={attachmentSupport}
           localizedMediaMode={localizedMediaMode}
           contextWindowTokens={activeModelConfig?.contextWindow || null}
+          onStop={handleStopStreaming}
+          pendingQueueTexts={pendingQueueTexts}
+          memoryNotice={memoryNotice ?? undefined}
         />
       </div>
 

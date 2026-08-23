@@ -230,6 +230,13 @@ export interface MemorySnapshot {
   count: number;
 }
 
+export interface MemoryNarrative {
+  narrative: string;
+  truncated: boolean;
+  count: number;
+  lastUpdated: string | null;
+}
+
 export interface ChatState {
   messages: Message[];
   character: Character | null;
