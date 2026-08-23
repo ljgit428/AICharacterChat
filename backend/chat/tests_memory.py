@@ -980,8 +980,12 @@ class MemoryResearchPromptTests(TestCase):
         self.assertIn('标题一', result['user'])
 
     def test_empty_or_error_payload_stays_quiet(self):
+        # 错误细节绝不进入提取 prompt（平台故障不是事实，2026-08-24 玛丽案例）
         result = self._build({'query': '', 'items': [], 'error': ''})
         self.assertNotIn('WEB RESEARCH THIS TURN', result['user'])
 
         failed = self._build({'query': 'q', 'items': [], 'error': 'tavily down'})
-        self.assertIn('检索失败', failed['user'])
+        self.assertNotIn('WEB RESEARCH THIS TURN', failed['user'])
+        self.assertNotIn('tavily down', failed['user'])
+        # 提取规则里有平台故障禁令兜底
+        self.assertIn('平台故障不是事实', result['system'])

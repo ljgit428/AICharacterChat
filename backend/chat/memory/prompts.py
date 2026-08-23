@@ -32,6 +32,7 @@ CORE_PRINCIPLES = """\
 4. 用第三人称自然语言描述。
 5. 禁止使用"今天""明天""昨天""下周"等相对时间词汇，必须使用绝对日期写入记忆。已提供当前日期。
 6. 少即是多。任何条目不能过长。被系统驳回的过长条目请主动拆分。
+7. 平台故障不是事实：网络检索失败、接口报错、功能未配置等只是临时的技术状态，与用户和剧情无关，绝对不要为它们创建或更新任何记忆条目。
 """.strip()
 
 
@@ -111,12 +112,13 @@ def _format_research_for_prompt(research_payload: dict | None) -> str:
         return ""
     items = research_payload.get("items") or []
     query = (research_payload.get("query") or "").strip()
-    if not items and not query:
+    error = (research_payload.get("error") or "").strip()
+    if error or not items:
+        # 检索失败属于平台临时状态。错误细节一旦进入提取 prompt，就会被
+        # 误存成"角色的功能坏了"这类伪事实（2026-08-24 玛丽实测案例），
+        # 所以这里选择整段省略，交给核心原则里的平台故障禁令兜底。
         return ""
     lines = ["### WEB RESEARCH THIS TURN"]
-    if research_payload.get("error"):
-        lines.append(f"（检索失败: {research_payload['error']}）")
-        return "\n".join(lines)
     if query:
         lines.append(f"检索词: {query}")
     for index, item in enumerate(items[:3], start=1):
