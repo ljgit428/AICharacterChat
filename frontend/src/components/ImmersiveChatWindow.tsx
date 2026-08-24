@@ -765,6 +765,8 @@ export default function ImmersiveChatWindow({
               >
                 <Plus className="h-5 w-5" />
               </button>
+            </div>
+            <div className="flex items-center gap-2">
               {usageStats && (
                 <ComposerContextRing
                   progress={usageStats.contextTokens / contextWindow}
@@ -801,7 +803,7 @@ export default function ImmersiveChatWindow({
                   {modelMenuOpen && (
                     <>
                       <div className="fixed inset-0 z-10" onClick={() => setModelMenuOpen(false)} />
-                      <div className="absolute bottom-11 left-0 z-20 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.18)]">
+                      <div className="absolute bottom-11 right-0 z-20 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.18)]">
                         <p className="px-3 pb-1 pt-2.5 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
                           {copy.immersiveChat.mainModel}
                         </p>
@@ -835,28 +837,28 @@ export default function ImmersiveChatWindow({
                   )}
                 </div>
               )}
+              {isLoading ? (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  disabled={!onStop}
+                  title={copy.immersiveChat.stop}
+                  aria-label={copy.immersiveChat.stop}
+                  className="flex h-9 items-center gap-2 rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Square className="h-3.5 w-3.5" fill="currentColor" />
+                  {copy.immersiveChat.stop}
+                </button>
+              ) : (
+                <button
+                  className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  onClick={() => submitMessage()}
+                  disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
+                >
+                  {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
+                </button>
+              )}
             </div>
-            {isLoading ? (
-              <button
-                type="button"
-                onClick={onStop}
-                disabled={!onStop}
-                title={copy.immersiveChat.stop}
-                aria-label={copy.immersiveChat.stop}
-                className="flex h-9 items-center gap-2 rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Square className="h-3.5 w-3.5" fill="currentColor" />
-                {copy.immersiveChat.stop}
-              </button>
-            ) : (
-              <button
-                className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                onClick={() => submitMessage()}
-                disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
-              >
-                {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
-              </button>
-            )}
           </div>
         </div>
         {composerError && (
