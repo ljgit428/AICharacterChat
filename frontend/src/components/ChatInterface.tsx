@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession } from '@/store/chatSlice';
+import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import CameraPanel from '@/components/CameraPanel';
 import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
@@ -131,6 +131,7 @@ export default function ChatInterface({
   const chatSession = useSelector((state: RootState) => state.chat.chatSession);
   const isLoading = useSelector((state: RootState) => state.chat.isLoading);
   const messages = useSelector((state: RootState) => state.chat.messages);
+  const messagesBySession = useSelector((state: RootState) => state.chat.messagesBySession);
 
   // Natural-chat spec §2/§3.3: abortable streaming + queued sends.
   const abortRef = useRef<AbortController | null>(null);
@@ -399,6 +400,21 @@ export default function ChatInterface({
     loadCharacter();
   }, [dispatch, character, characterId, failedToLoadCharacterMessage]);
 
+  // 缓存命中：绘制前同步渲染上次的历史（配合子组件 useLayoutEffect 钉底），
+  // 切换会话的第一帧就是最底部，全程无加载占位；随后后台静默刷新。
+  const seededSessionRef = useRef<string | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (seededSessionRef.current === initialSessionId) return;
+    seededSessionRef.current = initialSessionId;
+    if (!initialSessionId) return;
+    const cached = messagesBySession[initialSessionId];
+    if (cached && cached.length > 0 && messages.length === 0) {
+      dispatch(setMessages(cached));
+      setHasStartedConversation(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSessionId]);
+
   useEffect(() => {
     const loadChatHistory = async () => {
       if (!initialSessionId) {
@@ -409,8 +425,14 @@ export default function ChatInterface({
         return;
       }
 
-      dispatch(clearChat());
-      dispatch(setLoading(true));
+      // 缓存命中时不清屏、不转圈：上面已同步渲染缓存历史，这里只做
+      // 后台静默刷新；无缓存的冷打开才显示加载占位。
+      const cached = messagesBySession[initialSessionId];
+      const hasCache = Boolean(cached && cached.length > 0);
+      if (!hasCache) {
+        dispatch(clearChat());
+        dispatch(setLoading(true));
+      }
       setChatSessionId(initialSessionId);
 
       try {
@@ -421,8 +443,9 @@ export default function ChatInterface({
 
         if (messagesRes.data && messagesRes.data.length > 0) {
           dispatch(setMessages(messagesRes.data));
+          dispatch(cacheMessages({ sessionId: initialSessionId, messages: messagesRes.data }));
           setHasStartedConversation(true);
-        } else {
+        } else if (!hasCache) {
           setHasStartedConversation(false);
         }
 
@@ -431,13 +454,18 @@ export default function ChatInterface({
         }
       } catch (err) {
         console.error("Failed to load chat history:", err);
-        dispatch(setError(failedToLoadHistoryMessage));
+        if (!hasCache) {
+          dispatch(setError(failedToLoadHistoryMessage));
+        }
       } finally {
-        dispatch(setLoading(false));
+        if (!hasCache) {
+          dispatch(setLoading(false));
+        }
       }
     };
 
     loadChatHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSessionId, dispatch, failedToLoadHistoryMessage]);
 
   const syncSessionState = async (sessionId: string) => {

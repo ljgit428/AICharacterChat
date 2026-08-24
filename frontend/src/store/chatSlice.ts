@@ -3,6 +3,7 @@ import { ChatState, Message, Character, ChatSession, ToolCallInfo } from '@/type
 
 const initialState: ChatState = {
   messages: [],
+  messagesBySession: {},
   character: null,
   chatSession: null,
   isLoading: false,
@@ -74,6 +75,10 @@ const chatSlice = createSlice({
       state.messages = [];
       state.error = null;
     },
+    // 会话消息缓存（clearChat 不清除）：切回会话时第一帧直接渲染历史。
+    cacheMessages: (state, action: PayloadAction<{ sessionId: string; messages: Message[] }>) => {
+      state.messagesBySession[action.payload.sessionId] = action.payload.messages;
+    },
   },
 });
 
@@ -92,6 +97,7 @@ export const {
   updateChatSession,
   updateCharacter,
   clearChat,
+  cacheMessages,
 } = chatSlice.actions;
 
 export default chatSlice.reducer;

@@ -241,6 +241,8 @@ export interface MemoryNarrative {
 
 export interface ChatState {
   messages: Message[];
+  /** 会话消息缓存：sessionId → 上次加载的消息。切换回会话时第一帧直接渲染，无加载占位。 */
+  messagesBySession: Record<string, Message[]>;
   character: Character | null;
   chatSession: ChatSession | null;
   isLoading: boolean;
