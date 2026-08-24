@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Check, Cpu, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
+import { BrainCircuit, Check, Cpu, Expand, FileText, ImageIcon, Loader2, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
@@ -490,6 +490,15 @@ export default function ImmersiveChatWindow({
         )}
         <div ref={scrollAreaRef} className="h-full overflow-y-auto px-4 py-5 md:px-6">
         {messages.length === 0 ? (
+          isLoading ? (
+            // 历史加载中：不渲染场景卡，避免"先看到空/顶部内容再跳底部"的闪现。
+            <div className="flex h-full items-center justify-center">
+              <div className="flex items-center gap-2 rounded-full bg-white/80 px-4 py-2 text-sm text-slate-500 ring-1 ring-slate-200">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{copy.immersiveChat.preparingConversation}</span>
+              </div>
+            </div>
+          ) : (
           <div className="flex h-full items-center justify-center">
             <div className="max-w-xl rounded-[2rem] border border-white/80 bg-white/80 px-6 py-8 text-center shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
               <div className="mx-auto flex h-20 w-20 items-center justify-center overflow-hidden rounded-[1.5rem] bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 shadow-sm">
@@ -514,6 +523,7 @@ export default function ImmersiveChatWindow({
               </p>
             </div>
           </div>
+          )
         ) : (
           <div className="space-y-6">
             {groups.map((group) => {
