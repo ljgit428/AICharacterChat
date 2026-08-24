@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import { useState } from 'react';
 import { useQuery, useMutation, gql } from '@apollo/client';
-import { Edit2, MessageCircle, Trash2, X } from 'lucide-react';
+import { ChevronDown, Edit2, MessageCircle, Trash2, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useI18n } from '@/i18n/provider';
 
@@ -116,6 +116,10 @@ function CharacterDetailDialog({
   onEdit: (id: string) => void;
 }) {
   const { messages } = useI18n();
+  const hasVoiceBehavior = Boolean(
+    character.personality?.trim() || character.responseGuidelines?.trim() || character.exampleDialogue?.trim(),
+  );
+  const hasWorldLore = Boolean(character.scenario?.trim() || character.appearance?.trim());
 
   return (
     <div
@@ -205,26 +209,32 @@ function CharacterDetailDialog({
             </div>
           </div>
 
-          <details className="rounded-2xl border border-slate-200 bg-white p-5">
-            <summary className="cursor-pointer list-none text-base font-semibold text-slate-900">
-              {messages.gallery.voiceBehavior}
-            </summary>
-            <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
-              <CharacterField label={messages.gallery.personalityNotes} value={character.personality} />
-              <CharacterField label={messages.gallery.speakingRules} value={character.responseGuidelines} />
-              <CharacterField label={messages.gallery.exampleDialogue} value={character.exampleDialogue} />
-            </div>
-          </details>
+          {hasVoiceBehavior && (
+            <details className="group/section rounded-2xl border border-slate-200 bg-white p-5">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-base font-semibold text-slate-900">
+                {messages.gallery.voiceBehavior}
+                <ChevronDown size={16} className="flex-shrink-0 text-slate-400 transition-transform duration-200 group-open/section:rotate-180" />
+              </summary>
+              <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
+                <CharacterField label={messages.gallery.personalityNotes} value={character.personality} />
+                <CharacterField label={messages.gallery.speakingRules} value={character.responseGuidelines} />
+                <CharacterField label={messages.gallery.exampleDialogue} value={character.exampleDialogue} />
+              </div>
+            </details>
+          )}
 
-          <details className="rounded-2xl border border-slate-200 bg-white p-5">
-            <summary className="cursor-pointer list-none text-base font-semibold text-slate-900">
-              {messages.gallery.worldLore}
-            </summary>
-            <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
-              <CharacterField label={messages.gallery.scenario} value={character.scenario} />
-              <CharacterField label={messages.gallery.appearance} value={character.appearance} />
-            </div>
-          </details>
+          {hasWorldLore && (
+            <details className="group/section rounded-2xl border border-slate-200 bg-white p-5">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-base font-semibold text-slate-900">
+                {messages.gallery.worldLore}
+                <ChevronDown size={16} className="flex-shrink-0 text-slate-400 transition-transform duration-200 group-open/section:rotate-180" />
+              </summary>
+              <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
+                <CharacterField label={messages.gallery.scenario} value={character.scenario} />
+                <CharacterField label={messages.gallery.appearance} value={character.appearance} />
+              </div>
+            </details>
+          )}
         </div>
       </div>
     </div>
