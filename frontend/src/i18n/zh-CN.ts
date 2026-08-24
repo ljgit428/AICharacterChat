@@ -311,6 +311,9 @@ export const zhCNMessages = {
     subtitlePopOut: "弹出置顶字幕窗",
     subtitlePopUnavailable: "当前浏览器不支持置顶字幕窗，已使用底部字幕条。",
     subtitleClose: "隐藏字幕条",
+    voiceReply: "语音回复",
+    voiceReplyTitle: "开启后角色回复将自动朗读（本地 TTS）",
+    voiceReplyUnavailable: "语音回复暂不可用：请先启动 TTS 引擎服务。",
   },
   immersiveChat: {
     conversationSpace: "对话空间",

@@ -13,7 +13,7 @@ import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
-import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video } from 'lucide-react';
+import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import { useI18n } from '@/i18n/provider';
 
@@ -104,6 +104,23 @@ function formatLatencyMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** 语音回复分句：按中英标点切句，合并到 ~80 字符一块，首句先合成先出声。 */
+function splitReplyChunks(text: string, maxLen = 80): string[] {
+  const sentences = text.replace(/\s+/g, ' ').match(/[^。！？!?…\n]+[。！？!?…\n]*/g) || [text];
+  const chunks: string[] = [];
+  let current = '';
+  for (const sentence of sentences) {
+    if (current && (current + sentence).length > maxLen) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter(Boolean);
+}
+
 export default function ChatInterface({
   characterId,
   initialSessionId,
@@ -155,6 +172,15 @@ export default function ChatInterface({
   // 主模型快速切换：记录本会话内最近一次切换（PUT /model-roles 已同步服务端），
   // 未切换时回退到角色分配 / 默认配置。
   const [textModelOverrideId, setTextModelOverrideId] = useState<string | null>(null);
+  // 语音回复（TTS）：开启后角色回复按句合成并自动朗读。
+  const [voiceReplyOn, setVoiceReplyOn] = useState(
+    () => typeof window !== 'undefined' && window.localStorage.getItem('prismate.voiceReply') === '1',
+  );
+  const [ttsReady, setTtsReady] = useState<{ available: boolean; hint: string } | null>(null);
+  const voiceReplyRef = useRef(voiceReplyOn);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speakCancelRef = useRef(false);
+  voiceReplyRef.current = voiceReplyOn;
   // frameGrabberRef 挂摄像头抓帧、screenGrabberRef 挂屏幕抓帧；同轮附帧时屏幕优先。
   const frameGrabberRef = useRef<(() => File | null) | null>(null);
   const screenGrabberRef = useRef<(() => File | null) | null>(null);
@@ -192,6 +218,100 @@ export default function ChatInterface({
   const registerScreenGrabber = useCallback((grab: (() => File | null) | null) => {
     screenGrabberRef.current = grab;
   }, []);
+
+  // 语音回复（TTS）：分句合成、顺序朗读；随时可取消。
+  const cancelSpeech = useCallback(() => {
+    speakCancelRef.current = true;
+    currentAudioRef.current?.pause();
+    currentAudioRef.current = null;
+  }, []);
+
+  const playBlob = (blob: Blob) => new Promise<void>((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    currentAudioRef.current = audio;
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+    audio.onpause = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('speech cancelled'));
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('speech playback failed'));
+    };
+    void audio.play().catch(() => reject(new Error('speech autoplay blocked')));
+  });
+
+  const speakReply = async (text: string) => {
+    if (!voiceReplyRef.current || !text.trim()) return;
+    speakCancelRef.current = false;
+    for (const chunk of splitReplyChunks(text)) {
+      if (speakCancelRef.current) return;
+      try {
+        const blob = await apiService.synthesizeSpeech(chunk);
+        if (speakCancelRef.current) return;
+        await playBlob(blob);
+      } catch {
+        return; // 合成或播放失败即停止本轮朗读
+      }
+    }
+  };
+  const speakReplyRef = useRef<(text: string) => void>(() => {});
+  speakReplyRef.current = (text) => {
+    void speakReply(text);
+  };
+
+  useEffect(() => cancelSpeech, [cancelSpeech]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiService.getTtsReadiness();
+        if (!cancelled && response.data) {
+          setTtsReady({ available: response.data.available, hint: response.data.hint });
+        }
+      } catch {
+        // readiness is best-effort
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleVoiceReply = async () => {
+    if (voiceReplyOn) {
+      cancelSpeech();
+      setVoiceReplyOn(false);
+      window.localStorage.removeItem('prismate.voiceReply');
+      return;
+    }
+
+    let readiness = ttsReady;
+    if (!readiness) {
+      try {
+        const response = await apiService.getTtsReadiness();
+        if (response.data) {
+          readiness = { available: response.data.available, hint: response.data.hint };
+          setTtsReady(readiness);
+        }
+      } catch {
+        // readiness is best-effort; fall through and try enabling anyway.
+      }
+    }
+    if (readiness && !readiness.available) {
+      setRealtimeNotice(readiness.hint || copy.realtime.voiceReplyUnavailable);
+      window.setTimeout(() => setRealtimeNotice(null), 6000);
+      return;
+    }
+
+    setVoiceReplyOn(true);
+    window.localStorage.setItem('prismate.voiceReply', '1');
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -502,6 +622,9 @@ export default function ChatInterface({
   const handleSendMessage = async (userInput: string, attachments: PendingAttachment[] = []) => {
     if (!character) return;
 
+    // 新一轮开始时停止上一轮的朗读，避免声音交叠。
+    cancelSpeech();
+
     // While a reply is streaming, submissions are queued and auto-sent when
     // the current turn finishes (natural-chat spec §2) instead of being blocked.
     if (isLoading) {
@@ -670,6 +793,8 @@ export default function ChatInterface({
                 error: event.research_payload.error || '',
               } : null,
             }));
+            // 语音回复开启时，回复完成后按句合成朗读。
+            speakReplyRef.current(event.content);
             return;
           }
 
@@ -937,6 +1062,18 @@ export default function ChatInterface({
             title={copy.realtime.cameraToggle}
           >
             <Video size={17} />
+          </button>
+          <button
+            type="button"
+            onClick={() => void toggleVoiceReply()}
+            title={copy.realtime.voiceReplyTitle}
+            className={`flex h-10 w-10 items-center justify-center rounded-2xl transition-colors ${
+              voiceReplyOn
+                ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200 hover:bg-amber-100'
+                : 'bg-white/80 text-slate-500 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900'
+            }`}
+          >
+            <Volume2 size={17} />
           </button>
           <button
             type="button"

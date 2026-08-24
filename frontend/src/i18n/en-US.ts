@@ -322,6 +322,9 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     subtitlePopOut: "Pop out an always-on-top subtitle window",
     subtitlePopUnavailable: "This browser does not support the always-on-top subtitle window; using the bottom subtitle bar instead.",
     subtitleClose: "Hide subtitles",
+    voiceReply: "Voice reply",
+    voiceReplyTitle: "Read character replies aloud automatically (local TTS)",
+    voiceReplyUnavailable: "Voice reply unavailable: start the TTS engine service first.",
   },
   immersiveChat: {
     conversationSpace: "Conversation Space",

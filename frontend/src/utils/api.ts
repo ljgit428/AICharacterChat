@@ -494,6 +494,16 @@ export interface AsrReadiness {
   hint: string;
 }
 
+export interface TtsReadiness {
+  provider: string;
+  configured: boolean;
+  reachable: boolean;
+  available: boolean;
+  label: string;
+  hint: string;
+  providers: Array<{ key: string; label: string }>;
+}
+
 interface CreateModelConfigRequest {
   name: string;
   provider: ModelProvider;
@@ -922,6 +932,34 @@ class ApiService {
 
   async getAsrReadiness(): Promise<ApiResponse<AsrReadiness>> {
     return this.request('/chat/asr_readiness');
+  }
+
+  async getTtsReadiness(): Promise<ApiResponse<TtsReadiness>> {
+    return this.request('/chat/tts_readiness');
+  }
+
+  /** 实时模式语音合成：返回音频 Blob（wav）。失败抛错，错误信息可直接展示。 */
+  async synthesizeSpeech(text: string, provider?: string): Promise<Blob> {
+    const token = getAuthToken();
+    const response = await fetch(buildApiUrl('/chat/tts'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Token ${token}` } : {}),
+      },
+      body: JSON.stringify({ text, ...(provider ? { provider } : {}) }),
+    });
+    if (!response.ok) {
+      let message = `TTS failed (${response.status})`;
+      try {
+        const data = await response.json();
+        if (data?.error) message = data.error;
+      } catch {
+        // 非 JSON 错误体，保留默认信息
+      }
+      throw new Error(message);
+    }
+    return response.blob();
   }
 
   async sendMessage(data: SendMessageRequest): Promise<ApiResponse<{ ai_message: ApiMessage; chat_session_id?: string }>> {

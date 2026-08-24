@@ -1,6 +1,6 @@
 import json
 
-from django.http import StreamingHttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -785,14 +785,44 @@ class ChatViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'])
     def tts(self, request):
-        """TTS 预留端点：Phase C 落地前一律 501 + 能力说明。"""
-        return Response(
-            {
-                'error': '语音回复尚未实现（realtime Phase C 预留接口）。',
-                'capabilities': chat_tts.CAPABILITIES,
-            },
-            status=status.HTTP_501_NOT_IMPLEMENTED,
-        )
+        """实时模式语音合成：{text, provider?} → 音频流（上游透传）。
+
+        provider 由 TTS_PROVIDER 配置（genie/gptsovits/indextts），请求可覆盖。
+        未配置返回 501；已配置但服务不可达返回 503 + readiness 提示。
+        """
+        text = (request.data.get('text') or '').strip()
+        if not text:
+            return Response({'error': 'text is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(text) > 1000:
+            return Response(
+                {'error': 'text too long (max 1000 chars per request); split by sentence first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        provider = (request.data.get('provider') or '').strip().lower() or None
+        try:
+            result = chat_tts.synthesize_speech(text, provider=provider)
+        except chat_tts.TtsUnavailableError as exc:
+            readiness = chat_tts.readiness()
+            status_code = (
+                status.HTTP_501_NOT_IMPLEMENTED
+                if readiness['provider'] == 'none'
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+            return Response({'error': str(exc), 'readiness': readiness}, status=status_code)
+        except Exception as exc:
+            logger.exception("TTS synthesis failed")
+            return Response({'error': f'TTS failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        audio_response = HttpResponse(result['audio'], content_type=result['content_type'])
+        audio_response['X-TTS-Provider'] = result['provider']
+        audio_response['X-TTS-Processing-Ms'] = str(result['processing_ms'])
+        if result.get('first_byte_ms') is not None:
+            audio_response['X-TTS-First-Byte-Ms'] = str(result['first_byte_ms'])
+        return audio_response
+
+    @action(detail=False, methods=['get'])
+    def tts_readiness(self, request):
+        """前端"语音回复"开关的提示数据源（未配置/不可达时给出可读 hint）。"""
+        return Response(chat_tts.readiness())
 
     def _prepare_chat_turn(self, request):
         user = request.user

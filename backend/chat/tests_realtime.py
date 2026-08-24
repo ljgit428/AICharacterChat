@@ -95,7 +95,60 @@ class TtsReservedEndpointTests(TestCase):
         self.user = User.objects.create_user(username='tts_user', password='pw')
         self.client.force_login(self.user)
 
-    def test_tts_returns_501_with_capabilities(self):
-        response = self.client.post('/api/chat/tts/', {}, content_type='application/json')
+    def _post(self, payload):
+        return self.client.post('/api/chat/tts/', payload, content_type='application/json')
+
+    def test_missing_text_returns_400(self):
+        response = self._post({})
+        self.assertEqual(response.status_code, 400)
+
+    def test_oversized_text_returns_400(self):
+        response = self._post({'text': '啊' * 1001})
+        self.assertEqual(response.status_code, 400)
+
+    def test_provider_none_returns_501(self):
+        with override_settings(TTS_PROVIDER='none'):
+            response = self._post({'text': '你好'})
         self.assertEqual(response.status_code, 501)
-        self.assertFalse(response.json()['capabilities']['available'])
+        body = response.json()
+        self.assertTrue(body['error'])
+        self.assertIn('available', body['readiness'])
+
+    def test_unreachable_service_returns_503_with_hint(self):
+        with override_settings(TTS_GENIE_URL='http://127.0.0.1:1'):
+            response = self._post({'text': '你好'})
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertIn('不可达', body['error'])
+        self.assertFalse(body['readiness']['reachable'])
+
+    def test_success_returns_wav_and_latency_headers(self):
+        fake = {
+            'audio': b'RIFF....WAVEfmt ',
+            'content_type': 'audio/wav',
+            'provider': 'genie',
+            'processing_ms': 830,
+            'first_byte_ms': 410,
+        }
+        with patch('chat.tts.synthesize_speech', return_value=fake) as mock_synth:
+            response = self._post({'text': '今晚的月色真美。'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'audio/wav')
+        self.assertEqual(response['X-TTS-Provider'], 'genie')
+        self.assertEqual(response['X-TTS-Processing-Ms'], '830')
+        self.assertEqual(mock_synth.call_args.kwargs['provider'], None)
+
+    def test_provider_override_passthrough(self):
+        fake = {'audio': b'RIFF', 'content_type': 'audio/wav',
+                'provider': 'gptsovits', 'processing_ms': 10, 'first_byte_ms': None}
+        with patch('chat.tts.synthesize_speech', return_value=fake) as mock_synth:
+            response = self._post({'text': '你好', 'provider': 'gptsovits'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_synth.call_args.kwargs['provider'], 'gptsovits')
+
+    def test_readiness_shape(self):
+        response = self.client.get('/api/chat/tts_readiness/')
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        for key in ('provider', 'configured', 'reachable', 'available', 'label', 'hint', 'providers'):
+            self.assertIn(key, body)

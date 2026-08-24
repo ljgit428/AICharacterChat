@@ -142,27 +142,36 @@ Phase B 中停止 = 向频道发布一条 cancel 控制（或直接删除去重�
 - 未来动工时的建议顺序：Phase A（一天级，立刻改善体感）→ 独立立项 Phase B。
 - （更新 2026-08-24：Phase A 已随 v0.1.2 提前落地。）
 
-## 8. Phase C —— 实时语音（预留；输入侧已随 v0.1.3 落地）
+## 8. Phase C —— 实时语音（TTS 已实现；输入侧已随 v0.1.3 落地）
 
 > v0.1.3 实时模式现状：进入实时模式后持续聆听（自适应 VAD 断句，无按键），
 > 说完自动转写发送、流式回复后继续聆听——即"说话会对应回复"。
 > ASR 走服务端 CPU faster-whisper（int8，按句分段 HTTP），摄像头帧作为
 > 图片附件走既有多模态管线，让角色"看到"用户。本节记录 TTS 与全双工
-> 方向的预留设计。
+> 方向的设计与落地情况。
 
-### 8.1 v0.1.3 已预留的接口形状
+### 8.1 TTS 落地（2026-08-24，Genie-TTS 路线）
 
-- `POST /api/chat/tts`：恒返 **501 + capabilities**（`chat/tts.py`）。落地时在
-  同文件实现 `TtsProvider`（CPU 候选：piper / kokoro-onnx），端点只换掉 501 分支。
-- 流式事件预留 `tts` 字段位：done 事件可携带 `{audio_b64 | voice_url}`，
-  前端拿到即播、不阻塞文本渲染。
-- ASR provider 抽象在 `chat/asr.py`：换 sherpa-onnx / FunASR 只改 provider，
-  端点与前端契约不变（text + processing_ms / model_load_ms 延迟字段是硬契约，
-  前端实时角标与 docs/latency 记录都消费它们）。
+- **引擎选型**：纯 CPU 约束下否决 GSV 官方推理/IndexTTS/ChatTTS（RTF≫1
+  或许可冲突），采用 **Genie-TTS**（GPT-SoVITS 的 ONNX 推理引擎，MIT）：
+  把已训练的角色音色（如圣亚 `Seia_e8_s240.pth`+`.ckpt`，V2ProPlus）转换为
+  ONNX，CPU 首响 ~1.1s 量级、RTF≈0.9-1.2（i7 级笔记本实测）。
+- **架构**：TTS 引擎一律以独立 HTTP 服务运行，Django 只做客户端
+  （`chat/tts.py`），三种 provider 可切换：
+  * `genie`（默认）—— Genie FastAPI（/load_character → /set_reference_audio
+    → /tts 返回 32kHz/16bit/mono 裸 PCM，Django 侧包 WAV 头）；
+  * `gptsovits` —— 官方 api_v2，支持 v2/v2pro/v2proplus/v4 全部四种模型
+    版本（CPU 实时性差，留给有 GPU 的场景）；
+  * `indextts` —— 预留 HTTP 客户端。
+- **上游 bug 补丁**：genie 的中文声调连读（ToneSandhi）对「嗯」等无韵母字
+  `[-1][-1]` 越界、返回空音频——`backend/scripts/patch_genie_tonesandhi.py`
+  幂等修复，重装后需重跑。
+- **前端交互**：聊天头部「语音回复」开关（localStorage 持久）；回复 done
+  后按句切块（~80 字符）顺序合成播放，首句先出声；新回合/关闭开关即停。
 
 ### 8.2 届时的目标交互（动工前评审）
 
-- 角色回复以语音播报为主、文本为辅；用户开口即暂停播报（半双工起步）。
+- ~~角色回复以语音播报为主、文本为辅~~（已实现：文本为主，开关开启时朗读）
 - barge-in（打断）：依赖 §2 排队状态机扩展出 `speaking` 态，打断 = 中止 TTS
   并立即回到聆听，而非中止生成。
 - 延迟预算沿用 v0.1.3 的测量协议：断句窗 → ASR → 首字 → 播报起点逐段埋点，
@@ -170,4 +179,4 @@ Phase B 中停止 = 向频道发布一条 cancel 控制（或直接删除去重�
 
 ## 9. 排期决定（Phase C）
 
-- 未排期。输入侧（ASR+摄像头）已可用；TTS 落地前需先完成 §8.2 评审。
+- TTS 已随 v0.1.3 落地（Genie 路线 + 三 provider 抽象）；barge-in 未排期。

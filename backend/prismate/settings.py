@@ -207,6 +207,22 @@ ASR_MODEL = env('ASR_MODEL', default='base')
 ASR_DEVICE = env('ASR_DEVICE', default='cpu')
 ASR_COMPUTE_TYPE = env('ASR_COMPUTE_TYPE', default='int8')
 
+# Realtime voice reply (TTS). Engines run as standalone HTTP services;
+# Django only talks to them. genie = Genie-TTS (GPT-SoVITS ONNX on CPU,
+# supports v2/v2ProPlus converted characters); gptsovits = official
+# api_v2 (all four model versions, needs GPU for realtime); indextts reserved.
+TTS_PROVIDER = env('TTS_PROVIDER', default='genie')
+TTS_GENIE_URL = env('TTS_GENIE_URL', default='http://127.0.0.1:8050')
+TTS_GENIE_CHARACTER = env('TTS_GENIE_CHARACTER', default='seia')
+TTS_GENIE_LANGUAGE = env('TTS_GENIE_LANGUAGE', default='zh')
+TTS_GPTSOVITS_URL = env('TTS_GPTSOVITS_URL', default='http://127.0.0.1:9880')
+TTS_GPTSOVITS_TEXT_LANG = env('TTS_GPTSOVITS_TEXT_LANG', default='zh')
+TTS_GPTSOVITS_REF_AUDIO_PATH = env('TTS_GPTSOVITS_REF_AUDIO_PATH', default='')
+TTS_GPTSOVITS_PROMPT_TEXT = env('TTS_GPTSOVITS_PROMPT_TEXT', default='')
+TTS_GPTSOVITS_PROMPT_LANG = env('TTS_GPTSOVITS_PROMPT_LANG', default='zh')
+TTS_INDEXTTS_URL = env('TTS_INDEXTTS_URL', default='')
+TTS_INDEXTTS_TEXT_FIELD = env('TTS_INDEXTTS_TEXT_FIELD', default='text')
+
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'

@@ -26,3 +26,4 @@ test/
 
 # Leftover from a manual login via curl/python during debugging
 backend/cookies.txt
+backend/models/

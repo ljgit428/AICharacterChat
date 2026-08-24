@@ -63,3 +63,25 @@ curl -s -X POST http://127.0.0.1:8000/api/chat/asr/ -F "audio=@clip.wav;type=aud
 
 前端五段埋点（录音停止→ASR 响应→发出请求→首字→流结束）由实时模式
 角标展示「识别 X · 首字 Y · 整轮 Z」，浏览器实测数据随 GUI 测试补充。
+
+## 4. TTS 延迟（Genie-TTS，圣亚 V2ProPlus ONNX，纯 CPU）
+
+环境同上（无显卡）；引擎为独立 FastAPI 服务（127.0.0.1:8050），
+Django `/api/chat/tts` 透传。测试句：中文 15-22 字。
+
+| 场景 | 耗时 | 音频时长 | RTF |
+|---|---|---|---|
+| 首次合成（含预热） | 14 233 ms | 7.0 s | 2.0 |
+| 直连热身第 1 轮 | 8 896 ms | 9.4 s | 0.94 |
+| 直连热身第 2 轮 | 8 232 ms | 8.8 s | 0.93 |
+| 经 Django（短句 6.0s 音频） | 7 567 ms | 6.0 s | 1.26 |
+| 经 Django（长句 9.1s 音频） | 10 873 ms | 9.1 s | 1.20 |
+
+要点：
+- **接近实时**（RTF≈0.9-1.3）：合成耗时 ≈ 音频时长。前端按句切块
+  （~80 字符）顺序合成播放，首句 ~2s 音频约 2-3s 出声。
+- 已知上游 bug：genie 的中文声调连读对「嗯」等无韵母字越界崩溃、返回
+  空音频——`backend/scripts/patch_genie_tonesandhi.py` 幂等修复（重装后重跑）。
+- Genie `/tts` 返回裸 PCM（32kHz/16bit/mono），Django 侧包 WAV 头。
+- 角色加载必须在服务器启动后经 HTTP `/load_character`（uvicorn worker
+  独立进程），`backend/scripts/genie_server.py` 已封装该流程。
