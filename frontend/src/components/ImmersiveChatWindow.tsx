@@ -162,6 +162,15 @@ export default function ImmersiveChatWindow({
   const [previewAttachment, setPreviewAttachment] = useState<PreviewAttachment | null>(null);
   const messages = useSelector((state: RootState) => state.chat.messages);
   const character = useSelector((state: RootState) => state.chat.character);
+  const chatError = useSelector((state: RootState) => state.chat.error);
+  // 历史加载一旦出现过 loading，空状态就保持占位条直到消息真正渲染。
+  // 否则"loading 复位但消息未落地"的中间帧会闪出空场景卡
+  // （2026-08-24 用户视频逐帧实证：spinner→场景卡1帧→历史）。
+  const [sawInitialLoading, setSawInitialLoading] = useState(false);
+  useEffect(() => {
+    if (isLoading) setSawInitialLoading(true);
+  }, [isLoading]);
+  const showLoadingPlaceholder = messages.length === 0 && (isLoading || (sawInitialLoading && !chatError));
 
   const usageStats = useMemo(() => {
     const withUsage = messages.filter(
@@ -490,7 +499,7 @@ export default function ImmersiveChatWindow({
         )}
         <div ref={scrollAreaRef} className="h-full overflow-y-auto px-4 py-5 md:px-6">
         {messages.length === 0 ? (
-          isLoading ? (
+          showLoadingPlaceholder ? (
             // 历史加载中：不渲染场景卡，避免"先看到空/顶部内容再跳底部"的闪现。
             <div className="flex h-full items-center justify-center">
               <div className="flex items-center gap-2 rounded-full bg-white/80 px-4 py-2 text-sm text-slate-500 ring-1 ring-slate-200">
