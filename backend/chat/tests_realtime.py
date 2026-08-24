@@ -1,14 +1,16 @@
-"""实时模式端点测试：ASR 转写、就绪提示、TTS 预留。
+"""实时模式端点测试：ASR 转写、就绪提示、TTS 合成与角色级语音配置。
 
-全部走 mock provider——真实 faster-whisper 模型不进测试路径；
+全部走 mock provider——真实 faster-whisper / Genie-TTS 不进测试路径；
 延迟字段的形状在这里锁定，供前端角标与 docs/latency 记录消费。
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+
+from chat.models import Character
 
 
 class AsrEndpointTests(TestCase):
@@ -145,6 +147,55 @@ class TtsReservedEndpointTests(TestCase):
             response = self._post({'text': '你好', 'provider': 'gptsovits'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_synth.call_args.kwargs['provider'], 'gptsovits')
+
+    @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+    def test_character_genie_version_mismatch_returns_503(self):
+        # 角色界面选了 v4 + genie：明确报版本不兼容，而不是静默用错引擎
+        # （关掉 dev 自动登录：否则中间件会把 request.user 覆盖成 demo_user，
+        #   角色归属校验失败静默回退全局音色）
+        character = Character.objects.create(
+            created_by=self.user, name='V4角色',
+            tts_config={'provider': 'genie', 'model_version': 'v4', 'voice_name': 'v4voice'},
+        )
+        mock_instance = MagicMock()
+        mock_instance.readiness_probe.return_value = (True, '')
+        with patch('chat.tts.get_tts_provider_instance', return_value=mock_instance):
+            response = self._post({'text': '你好', 'character_id': character.id})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('v4', response.json()['error'])
+
+    @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+    def test_character_voice_config_passed_to_genie(self):
+        character = Character.objects.create(
+            created_by=self.user, name='圣亚',
+            tts_config={
+                'voice_name': 'seia',
+                'onnx_model_dir': 'D:/models/seia_onnx',
+                'model_version': 'v2proplus',
+                'language': 'zh',
+            },
+        )
+        mock_instance = MagicMock()
+        mock_instance.readiness_probe.return_value = (True, '')
+        mock_instance.synthesize.return_value = {
+            'audio': b'RIFF....', 'content_type': 'audio/wav',
+            'provider': 'genie', 'processing_ms': 100, 'first_byte_ms': 50,
+        }
+        with patch('chat.tts.get_tts_provider_instance', return_value=mock_instance):
+            response = self._post({'text': '你好', 'character_id': character.id})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['X-TTS-Provider'], 'genie')
+        voice = mock_instance.synthesize.call_args.args[1]
+        self.assertEqual(voice['name'], 'seia')
+        self.assertEqual(voice['onnx_model_dir'], 'D:/models/seia_onnx')
+
+    def test_invalid_character_id_falls_back_to_global(self):
+        fake = {'audio': b'RIFF', 'content_type': 'audio/wav',
+                'provider': 'genie', 'processing_ms': 10, 'first_byte_ms': None}
+        with patch('chat.tts.synthesize_speech', return_value=fake) as mock_synth:
+            response = self._post({'text': '你好', 'character_id': '999999'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_synth.call_args.kwargs['character_tts_config'], None)
 
     def test_readiness_shape(self):
         response = self.client.get('/api/chat/tts_readiness/')

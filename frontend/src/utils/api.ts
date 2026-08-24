@@ -938,8 +938,12 @@ class ApiService {
     return this.request('/chat/tts_readiness');
   }
 
-  /** 实时模式语音合成：返回音频 Blob（wav）。失败抛错，错误信息可直接展示。 */
-  async synthesizeSpeech(text: string, provider?: string): Promise<Blob> {
+  /** 实时模式语音合成：返回音频 Blob（wav）。失败抛错，错误信息可直接展示。
+   *  传 characterId 时使用该角色在"语音模型"区块配置的专属音色。 */
+  async synthesizeSpeech(
+    text: string,
+    options?: { provider?: string; characterId?: string },
+  ): Promise<Blob> {
     const token = getAuthToken();
     const response = await fetch(buildApiUrl('/chat/tts'), {
       method: 'POST',
@@ -947,7 +951,11 @@ class ApiService {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Token ${token}` } : {}),
       },
-      body: JSON.stringify({ text, ...(provider ? { provider } : {}) }),
+      body: JSON.stringify({
+        text,
+        ...(options?.provider ? { provider: options.provider } : {}),
+        ...(options?.characterId ? { character_id: options.characterId } : {}),
+      }),
     });
     if (!response.ok) {
       let message = `TTS failed (${response.status})`;

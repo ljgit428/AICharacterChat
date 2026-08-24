@@ -111,6 +111,8 @@ export interface Character {
   avatarUrl?: string;
   /** 角色级联网搜索三态开关：null/undefined = 跟随用户全局设置 */
   enableWebSearch?: boolean | null;
+  /** 角色级语音模型配置（引擎/模型版本/音色名/ONNX 目录/参考音频），空 = 跟随全局 */
+  ttsConfig?: Record<string, string> | null;
   fileUrl?: string;
   filePreviewUrl?: string;
   affiliation: string;

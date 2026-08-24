@@ -13,6 +13,7 @@ class CharacterSerializer(serializers.ModelSerializer):
             'scenario', 'example_dialogue', 'affiliation', 'tags', 'personality',
             'appearance', 'response_guidelines', 'file',
             'enable_web_search',
+            'tts_config',
             'disabled_states', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']

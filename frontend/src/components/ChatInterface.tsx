@@ -248,10 +248,11 @@ export default function ChatInterface({
   const speakReply = async (text: string) => {
     if (!voiceReplyRef.current || !text.trim()) return;
     speakCancelRef.current = false;
+    const characterId = character?.id;
     for (const chunk of splitReplyChunks(text)) {
       if (speakCancelRef.current) return;
       try {
-        const blob = await apiService.synthesizeSpeech(chunk);
+        const blob = await apiService.synthesizeSpeech(chunk, { characterId });
         if (speakCancelRef.current) return;
         await playBlob(blob);
       } catch {

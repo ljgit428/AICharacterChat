@@ -155,6 +155,41 @@ type PromptPreviewLocale = 'zh-CN' | 'en-US';
 
 type WebSearchMode = 'default' | 'on' | 'off';
 
+type TtsProviderChoice = '' | 'genie' | 'gptsovits' | 'indextts';
+type TtsModelVersion = '' | 'v2' | 'v2pr' | 'v2proplus' | 'v4';
+
+type TtsConfigForm = {
+  provider: TtsProviderChoice;
+  modelVersion: TtsModelVersion;
+  voiceName: string;
+  onnxModelDir: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+};
+
+const EMPTY_TTS_CONFIG: TtsConfigForm = {
+  provider: '',
+  modelVersion: '',
+  voiceName: '',
+  onnxModelDir: '',
+  refAudioPath: '',
+  refAudioText: '',
+  refAudioLanguage: '',
+};
+
+function toTtsConfigInput(tts: TtsConfigForm): Record<string, string> {
+  const config: Record<string, string> = {};
+  if (tts.provider) config.provider = tts.provider;
+  if (tts.modelVersion) config.model_version = tts.modelVersion;
+  if (tts.voiceName.trim()) config.voice_name = tts.voiceName.trim();
+  if (tts.onnxModelDir.trim()) config.onnx_model_dir = tts.onnxModelDir.trim();
+  if (tts.refAudioPath.trim()) config.ref_audio_path = tts.refAudioPath.trim();
+  if (tts.refAudioText.trim()) config.ref_audio_text = tts.refAudioText.trim();
+  if (tts.refAudioLanguage.trim()) config.ref_audio_language = tts.refAudioLanguage.trim();
+  return config;
+}
+
 type FormState = {
   name: string;
   description: string;
@@ -168,6 +203,7 @@ type FormState = {
   tags: string;
   avatarUrl: string;
   webSearchMode: WebSearchMode;
+  ttsConfig: TtsConfigForm;
 };
 
 type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'affiliation' | 'tags' | 'exampleDialogue'>;
@@ -307,6 +343,7 @@ const GET_CHARACTER = gql`
       tags
       avatarUrl
       enableWebSearch
+      ttsConfig
       knowledgeAssets {
         fileUrl
         fileName
@@ -651,6 +688,7 @@ export default function CreateCharacterSimplifiedForm({
     tags: '',
     avatarUrl: '',
     webSearchMode: 'default',
+    ttsConfig: { ...EMPTY_TTS_CONFIG },
   });
   const [autoInputText, setAutoInputText] = useState('');
   const [backgroundFiles, setBackgroundFiles] = useState<ReferenceFile[]>([]);
@@ -667,6 +705,7 @@ export default function CreateCharacterSimplifiedForm({
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const skipNextPromptPreviewSyncRef = useRef(false);
+  const loadedCharacterIdRef = useRef<string | null>(null);
 
   const [generateDraft, { loading: aiLoading }] = useMutation(GENERATE_DRAFT);
   const [createCharacter, { loading: saveLoading }] = useMutation(CREATE_CHARACTER);
@@ -683,6 +722,13 @@ export default function CreateCharacterSimplifiedForm({
     }
 
     const char = data.character;
+    // 同一角色只在首次加载时预填：Apollo 窗口聚焦会自动 refetch，
+    // 不设防的话每次 refetch 都会用服务端旧值覆盖用户正在编辑的表单。
+    if (loadedCharacterIdRef.current === String(char.id)) {
+      return;
+    }
+    loadedCharacterIdRef.current = String(char.id);
+    const charTts = (char.ttsConfig || {}) as Record<string, string>;
     const nextForm: FormState = {
       name: char.name || '',
       description: char.description || '',
@@ -697,6 +743,15 @@ export default function CreateCharacterSimplifiedForm({
       avatarUrl: char.avatarUrl || '',
       webSearchMode:
         char.enableWebSearch === true ? 'on' : char.enableWebSearch === false ? 'off' : 'default',
+      ttsConfig: {
+        provider: (charTts.provider as TtsConfigForm['provider']) || '',
+        modelVersion: (charTts.model_version as TtsConfigForm['modelVersion']) || '',
+        voiceName: charTts.voice_name || '',
+        onnxModelDir: charTts.onnx_model_dir || '',
+        refAudioPath: charTts.ref_audio_path || '',
+        refAudioText: charTts.ref_audio_text || '',
+        refAudioLanguage: charTts.ref_audio_language || '',
+      },
     };
     const nextBackgroundFiles = Array.isArray(char.knowledgeAssets)
       ? char.knowledgeAssets.map((asset: { fileName: string; fileUrl: string; fileType: string }) => ({
@@ -1009,8 +1064,9 @@ export default function CreateCharacterSimplifiedForm({
         scenario: form.scenario.trim(),
         exampleDialogue: form.exampleDialogue.trim(),
         tags: form.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
-        enableWebSearch:
-          form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
+      enableWebSearch:
+        form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
+      ttsConfig: toTtsConfigInput(form.ttsConfig),
         backgroundFiles: backgroundFiles.map((file) => ({
           uploadedUrl: file.url,
           fileName: file.name,
@@ -1296,6 +1352,146 @@ export default function CreateCharacterSimplifiedForm({
                   <option value="off">{copy.characterForm.webSearchOff}</option>
                 </select>
                 <p className="text-xs text-gray-400">{copy.characterForm.webSearchHint}</p>
+              </div>
+
+              <div className="space-y-3 rounded-2xl border border-amber-100 bg-amber-50/50 p-4">
+                <div>
+                  <label className="text-sm font-bold text-gray-700">
+                    {copy.characterForm.ttsSectionTitle}
+                  </label>
+                  <p className="mt-1 text-xs text-gray-400">{copy.characterForm.ttsSectionHint}</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">
+                      {copy.characterForm.ttsEngineLabel}
+                    </label>
+                    <select
+                      value={form.ttsConfig.provider}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ttsConfig: { ...prev.ttsConfig, provider: e.target.value as TtsConfigForm['provider'] },
+                        }))
+                      }
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="">{copy.characterForm.ttsEngineDefault}</option>
+                      <option value="genie">Genie-TTS（CPU 实时，v2/v2proplus）</option>
+                      <option value="gptsovits">GPT-SoVITS api_v2（全部版本）</option>
+                      <option value="indextts">IndexTTS</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">
+                      {copy.characterForm.ttsVersionLabel}
+                    </label>
+                    <select
+                      value={form.ttsConfig.modelVersion}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ttsConfig: { ...prev.ttsConfig, modelVersion: e.target.value as TtsConfigForm['modelVersion'] },
+                        }))
+                      }
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="">{copy.characterForm.ttsVersionDefault}</option>
+                      <option value="v2">v2</option>
+                      <option value="v2pr">v2pr（v2Pro）</option>
+                      <option value="v2proplus">v2proplus（v2ProPlus）</option>
+                      <option value="v4">v4</option>
+                    </select>
+                    {form.ttsConfig.modelVersion === 'v2pr' || form.ttsConfig.modelVersion === 'v4' ? (
+                      <p className="text-xs text-amber-600">{copy.characterForm.ttsVersionLinkageHint}</p>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">
+                      {copy.characterForm.ttsVoiceNameLabel}
+                    </label>
+                    <input
+                      value={form.ttsConfig.voiceName}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ttsConfig: { ...prev.ttsConfig, voiceName: e.target.value },
+                        }))
+                      }
+                      placeholder={copy.characterForm.ttsVoiceNamePlaceholder}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">
+                      {copy.characterForm.ttsOnnxDirLabel}
+                    </label>
+                    <input
+                      value={form.ttsConfig.onnxModelDir}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ttsConfig: { ...prev.ttsConfig, onnxModelDir: e.target.value },
+                        }))
+                      }
+                      placeholder={copy.characterForm.ttsOnnxDirPlaceholder}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-gray-500">
+                    {copy.characterForm.ttsRefAudioPathLabel}
+                  </label>
+                  <input
+                    value={form.ttsConfig.refAudioPath}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        ttsConfig: { ...prev.ttsConfig, refAudioPath: e.target.value },
+                      }))
+                    }
+                    placeholder={copy.characterForm.ttsRefAudioPathPlaceholder}
+                    className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-[1.6fr_0.4fr]">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">
+                      {copy.characterForm.ttsRefAudioTextLabel}
+                    </label>
+                    <textarea
+                      value={form.ttsConfig.refAudioText}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ttsConfig: { ...prev.ttsConfig, refAudioText: e.target.value },
+                        }))
+                      }
+                      rows={2}
+                      placeholder={copy.characterForm.ttsRefAudioTextPlaceholder}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-500">
+                      {copy.characterForm.ttsRefAudioLangLabel}
+                    </label>
+                    <input
+                      value={form.ttsConfig.refAudioLanguage}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ttsConfig: { ...prev.ttsConfig, refAudioLanguage: e.target.value },
+                        }))
+                      }
+                      placeholder="jp"
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           </div>

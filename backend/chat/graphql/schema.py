@@ -598,6 +598,7 @@ class Mutation:
                 scenario=input.scenario,
                 example_dialogue=input.example_dialogue,
                 enable_web_search=input.enable_web_search,
+                tts_config=input.tts_config or {},
                 affiliation=input.affiliation,
                 system_prompt_preview=input.system_prompt_preview,
                 tags=input.tags,
@@ -647,6 +648,7 @@ class Mutation:
             character.system_prompt_preview = input.system_prompt_preview
             character.tags = input.tags
             character.enable_web_search = input.enable_web_search
+            character.tts_config = input.tts_config or {}
             _attach_character_reference_assets(
                 character,
                 uploaded_assets,

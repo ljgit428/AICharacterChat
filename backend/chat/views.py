@@ -799,8 +799,20 @@ class ChatViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         provider = (request.data.get('provider') or '').strip().lower() or None
+        # 角色级语音模型配置（角色界面"语音模型"区块）优先于全局配置；
+        # 无效/不属于当前用户的 character_id 静默回退全局默认音色。
+        character_tts_config = None
+        character_id = str(request.data.get('character_id') or '').strip()
+        if character_id:
+            try:
+                character = Character.objects.get(pk=character_id, created_by=request.user)
+                character_tts_config = character.tts_config or {}
+            except (Character.DoesNotExist, ValueError):
+                pass
         try:
-            result = chat_tts.synthesize_speech(text, provider=provider)
+            result = chat_tts.synthesize_speech(
+                text, provider=provider, character_tts_config=character_tts_config,
+            )
         except chat_tts.TtsUnavailableError as exc:
             readiness = chat_tts.readiness()
             status_code = (

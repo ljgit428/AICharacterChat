@@ -88,18 +88,52 @@ def provider_ready(config: dict, provider: str) -> tuple[bool, str]:
 
 
 class GenieTtsProvider:
-    """Genie-TTS 服务器客户端。/tts 返回 audio/wav 流，直接透传。"""
+    """Genie-TTS 服务器客户端。/tts 返回裸 PCM（32kHz/16bit/mono）→ 包 WAV 头。
+
+    角色音色按需自动加载：voice 字典带 onnx_model_dir / 参考音频时，
+    首次合成前自动 POST /load_character + /set_reference_audio。
+    """
 
     name = 'genie'
 
-    def __init__(self, base_url: str, character: str, language: str):
+    def __init__(self, base_url: str):
         self.base_url = base_url.rstrip('/')
-        self.character = character
-        self.language = language
+        self._loaded_voices: set[str] = set()
 
-    def synthesize(self, text: str, timeout: float = 60.0):
+    def ensure_voice_loaded(self, voice: dict) -> None:
+        name = voice['name']
+        if name in self._loaded_voices:
+            return
+        response = requests.post(
+            f'{self.base_url}/load_character',
+            json={
+                'character_name': name,
+                'onnx_model_dir': voice['onnx_model_dir'],
+                'language': voice['language'],
+            },
+            timeout=300,
+        )
+        if response.status_code != 200:
+            raise TtsUnavailableError(
+                f'Genie-TTS 加载角色 {name} 失败：{response.text[:200]}'
+            )
+        if voice.get('ref_audio_path'):
+            requests.post(
+                f'{self.base_url}/set_reference_audio',
+                json={
+                    'character_name': name,
+                    'audio_path': voice['ref_audio_path'],
+                    'audio_text': voice.get('ref_audio_text', ''),
+                    'language': voice.get('ref_audio_language') or voice['language'],
+                },
+                timeout=60,
+            )
+        self._loaded_voices.add(name)
+
+    def synthesize(self, text: str, voice: dict, timeout: float = 60.0):
+        self.ensure_voice_loaded(voice)
         payload = {
-            'character_name': self.character,
+            'character_name': voice['name'],
             'text': text,
             'split_sentence': True,
         }
@@ -115,7 +149,6 @@ class GenieTtsProvider:
                 raise TtsUnavailableError(
                     f'Genie-TTS 返回 {response.status_code}：{detail}'
                 )
-            content_type = response.headers.get('Content-Type', 'audio/wav')
             chunks = []
             first_byte_ms = None
             for chunk in response.iter_content(chunk_size=8192):
@@ -127,17 +160,16 @@ class GenieTtsProvider:
         # 包上 WAV 头浏览器才能直接 <audio> 播放。
         if not audio.startswith(b'RIFF'):
             audio = _wrap_pcm_as_wav(audio)
-        content_type = 'audio/wav'
         return {
             'audio': audio,
-            'content_type': content_type,
+            'content_type': 'audio/wav',
             'first_byte_ms': first_byte_ms,
             'processing_ms': int((time.perf_counter() - started) * 1000),
         }
 
     def readiness_probe(self) -> tuple[bool, str]:
         try:
-            response = requests.get(f'{self.base_url}/docs', timeout=3)
+            requests.get(f'{self.base_url}/docs', timeout=3)
             return True, ''
         except Exception as exc:
             return False, f'Genie-TTS 服务不可达（{self.base_url}）：{exc.__class__.__name__}'
@@ -155,17 +187,19 @@ class GptSoVitsProvider:
         self.prompt_text = config['gptsovits_prompt_text']
         self.prompt_lang = config['gptsovits_prompt_lang']
 
-    def synthesize(self, text: str, timeout: float = 120.0):
-        if not self.ref_audio_path:
+    def synthesize(self, text: str, voice: dict | None = None, timeout: float = 120.0):
+        ref_audio_path = (voice or {}).get('ref_audio_path') or self.ref_audio_path
+        prompt_text = (voice or {}).get('ref_audio_text') or self.prompt_text
+        if not ref_audio_path:
             raise TtsUnavailableError(
                 'GPT-SoVITS 缺少参考音频配置：请设置 TTS_GPTSOVITS_REF_AUDIO_PATH '
-                '与 TTS_GPTSOVITS_PROMPT_TEXT。'
+                '与 TTS_GPTSOVITS_PROMPT_TEXT（或在该角色的语音模型配置里填写）。'
             )
         params = {
             'text': text,
             'text_lang': self.text_lang,
-            'ref_audio_path': self.ref_audio_path,
-            'prompt_text': self.prompt_text,
+            'ref_audio_path': ref_audio_path,
+            'prompt_text': prompt_text,
             'prompt_lang': self.prompt_lang,
             'streaming_mode': 'false',
             'text_split_method': 'cut5',
@@ -238,16 +272,64 @@ _provider_instances: dict = {}
 def build_provider(provider: str):
     config = get_tts_config()
     if provider == 'genie':
-        return GenieTtsProvider(
-            config['genie_url'],
-            config['genie_character'],
-            config['genie_language'],
-        )
+        return GenieTtsProvider(config['genie_url'])
     if provider == 'gptsovits':
         return GptSoVitsProvider(config)
     if provider == 'indextts':
         return IndexTtsProvider(config)
     raise TtsUnavailableError(f'未知 TTS provider：{provider}')
+
+
+# 角色音色的版本→引擎兼容性：genie 只能加载 v2 / v2ProPlus 转换的模型，
+# v2pro（v2pr）与 v4 必须走官方 api_v2 通道。
+GENIE_SUPPORTED_MODEL_VERSIONS = {'', 'v2', 'v2proplus'}
+
+
+def build_genie_voice(config: dict, character_tts_config: dict | None) -> dict:
+    """合并全局默认与角色级 tts_config，得到一次合成所需的音色描述。"""
+    cfg = character_tts_config or {}
+    language = cfg.get('language') or config['genie_language']
+    return {
+        'name': cfg.get('voice_name') or config['genie_character'],
+        'onnx_model_dir': cfg.get('onnx_model_dir') or _env('TTS_GENIE_ONNX_MODEL_DIR'),
+        'language': language,
+        'ref_audio_path': cfg.get('ref_audio_path') or _env('TTS_GENIE_REF_AUDIO_PATH'),
+        'ref_audio_text': cfg.get('ref_audio_text') or _env('TTS_GENIE_REF_AUDIO_TEXT'),
+        'ref_audio_language': cfg.get('ref_audio_language') or _env('TTS_GENIE_REF_AUDIO_LANGUAGE') or language,
+    }
+
+
+def resolve_provider_and_voice(
+    provider: str | None = None,
+    character_tts_config: dict | None = None,
+) -> tuple[str, dict | None]:
+    """确定本次合成使用的 provider 与音色覆盖（含版本兼容校验）。"""
+    config = get_tts_config()
+    cfg = character_tts_config or {}
+    selected = (cfg.get('provider') or provider or config['provider']).strip().lower()
+    model_version = (cfg.get('model_version') or '').strip().lower()
+
+    voice = None
+    if selected == 'genie':
+        if model_version and model_version not in GENIE_SUPPORTED_MODEL_VERSIONS:
+            raise TtsUnavailableError(
+                f'Genie-TTS 不支持 {model_version} 模型版本（仅 v2/v2proplus）；'
+                f'该角色的音色请改用 gptsovits 通道。'
+            )
+        voice = build_genie_voice(config, cfg)
+    elif cfg.get('ref_audio_path') or cfg.get('ref_audio_text'):
+        # 非 genie 引擎：仅透传角色级参考音频覆盖
+        voice = {key: cfg[key] for key in ('ref_audio_path', 'ref_audio_text') if cfg.get(key)}
+    return selected, voice
+
+
+_provider_instances: dict = {}
+
+
+def get_tts_provider_instance(provider: str):
+    if provider not in _provider_instances:
+        _provider_instances[provider] = build_provider(provider)
+    return _provider_instances[provider]
 
 
 def get_tts_provider(provider: str | None = None):
@@ -257,10 +339,7 @@ def get_tts_provider(provider: str | None = None):
     ok, hint = provider_ready(config, selected)
     if not ok:
         raise TtsUnavailableError(hint)
-    cache_key = selected
-    if cache_key not in _provider_instances:
-        _provider_instances[cache_key] = build_provider(selected)
-    instance = _provider_instances[cache_key]
+    instance = get_tts_provider_instance(selected)
     reachable, reach_hint = instance.readiness_probe()
     if not reachable:
         raise TtsUnavailableError(reach_hint)
@@ -274,7 +353,7 @@ def readiness() -> dict:
     configured_ok, hint = provider_ready(config, provider)
     reachable = False
     if configured_ok:
-        instance = _provider_instances.get(provider) or build_provider(provider)
+        instance = build_provider(provider)
         reachable, reach_hint = instance.readiness_probe()
         hint = hint or reach_hint
     if configured_ok and reachable:
@@ -292,12 +371,18 @@ def readiness() -> dict:
     }
 
 
-def synthesize_speech(text: str, provider: str | None = None) -> dict:
-    """合成一段文本。返回 {audio, content_type, provider, processing_ms, first_byte_ms}。"""
-    config = get_tts_config()
-    selected = (provider or config['provider']).strip().lower()
-    instance = get_tts_provider(selected)
-    result = instance.synthesize(text)
+def synthesize_speech(
+    text: str,
+    provider: str | None = None,
+    character_tts_config: dict | None = None,
+) -> dict:
+    """合成一段文本。角色级 tts_config 优先于全局配置（语音模型的唯一配置入口在角色界面）。"""
+    selected, voice = resolve_provider_and_voice(provider, character_tts_config)
+    instance = get_tts_provider_instance(selected)
+    ok, hint = instance.readiness_probe()
+    if not ok:
+        raise TtsUnavailableError(hint)
+    result = instance.synthesize(text, voice) if voice is not None else instance.synthesize(text)
     result['provider'] = selected
     logger.info(
         "TTS done via %s in %dms (first_byte=%s, chars=%d)",

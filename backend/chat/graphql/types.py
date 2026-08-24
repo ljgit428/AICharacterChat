@@ -1,4 +1,5 @@
 import strawberry
+from strawberry.scalars import JSON
 from typing import List, Optional
 import os
 from asgiref.sync import sync_to_async
@@ -44,6 +45,8 @@ class CharacterInput:
     background_files: Optional[List[CharacterKnowledgeAssetInput]] = None
     # 角色级联网搜索三态开关：None=跟随用户全局设置
     enable_web_search: Optional[bool] = None
+    # 角色级语音模型配置（引擎/模型版本/音色名/ONNX 目录/参考音频）
+    tts_config: Optional[JSON] = None
 
 
 @strawberry.type
@@ -85,6 +88,8 @@ class CharacterType:
     tags: List[str]
     # 角色级联网搜索三态开关（None=跟随用户全局设置）
     enable_web_search: Optional[bool]
+    # 角色级语音模型配置（引擎/模型版本/音色名/ONNX 目录/参考音频）
+    tts_config: Optional[JSON]
 
     @strawberry.field
     async def background_file_url(self) -> Optional[str]:
