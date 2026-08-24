@@ -1,9 +1,35 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { current } from 'immer';
 import { ChatState, Message, Character, ChatSession, ToolCallInfo } from '@/types';
+
+// 会话消息缓存持久化到 sessionStorage：页面刷新、话题/聊天模式切换、
+// 重进聊天页后第一帧仍直接渲染历史钉底，切换过程无感知。SSR 环境跳过。
+const MESSAGES_CACHE_KEY = 'prismate.messagesBySession.v1';
+
+function hydrateMessagesCache(): Record<string, Message[]> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.sessionStorage.getItem(MESSAGES_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, Message[]>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistMessagesCache(cache: Record<string, Message[]>) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(MESSAGES_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    // 配额超限等写入失败不影响主流程（下次历史加载会重写）
+  }
+}
 
 const initialState: ChatState = {
   messages: [],
-  messagesBySession: {},
+  messagesBySession: hydrateMessagesCache(),
   character: null,
   chatSession: null,
   isLoading: false,
@@ -75,9 +101,11 @@ const chatSlice = createSlice({
       state.messages = [];
       state.error = null;
     },
-    // 会话消息缓存（clearChat 不清除）：切回会话时第一帧直接渲染历史。
+    // 会话消息缓存（clearChat 不清除）：切回会话时第一帧直接渲染历史，
+    // 并写穿到 sessionStorage 供刷新/模式切换后使用。
     cacheMessages: (state, action: PayloadAction<{ sessionId: string; messages: Message[] }>) => {
       state.messagesBySession[action.payload.sessionId] = action.payload.messages;
+      persistMessagesCache(current(state.messagesBySession) as Record<string, Message[]>);
     },
   },
 });
