@@ -187,12 +187,12 @@ export default function ImmersiveChatWindow({
     pendingAttachmentsRef.current = pendingAttachments;
   }, [pendingAttachments]);
 
-  // 打开会话/批量加载历史时直接钉在底部（避免从顶部开始显示）；
-  // 仅对逐条追加的新消息平滑滚动。头像等图片晚于滚动加载完成会把内容
-  // 再撑高，所以在下一帧和 250ms 各补钉一次。
+  // 打开会话/批量加载历史时必须用 useLayoutEffect：在浏览器绘制前同步钉底，
+  // 否则会先画出一帧顶部再跳底部（可见闪烁）。逐条新消息仍走平滑滚动。
+  // 头像等图片晚于首帧加载会把内容再撑高，下一帧与 250ms 各补钉一次。
   const lastAnchorIdRef = useRef<string | null>(null);
   const lastCountRef = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const firstId = messages[0]?.id ?? null;
     const isBulkChange =
       firstId !== lastAnchorIdRef.current || messages.length - lastCountRef.current > 1;

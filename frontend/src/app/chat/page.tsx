@@ -132,8 +132,14 @@ function DiscordChatPageContent() {
 
   const handleSelectCharacter = useCallback(
     (characterId: string) => {
-      dispatch(clearChat());
-      setSelectedCharacterId(characterId);
+      // 重复点击已选中的角色不能 clearChat：initialSessionId 不变时历史
+      // 不会重新加载，会把当前会话清成空屏（2026-08-24 修复）。
+      setSelectedCharacterId((prev) => {
+        if (prev !== characterId) {
+          dispatch(clearChat());
+        }
+        return characterId;
+      });
       setSelectedSessionId(latestSessionByCharacter.get(characterId)?.id || null);
       setIsSidebarOpen(false);
     },
