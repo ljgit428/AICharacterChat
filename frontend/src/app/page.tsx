@@ -6,8 +6,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import {
   Zap,
   PlusCircle,
-  KeyRound,
-  UserCircle2,
+  Settings,
   ChevronRight,
   ChevronLeft,
   Menu,
@@ -27,8 +26,6 @@ import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
 import ChatInterface from '@/components/ChatInterface';
 import ModeSwitch from '@/components/ModeSwitch';
-import ModelApiSettingsPanel from '@/components/ModelApiSettingsPanel';
-import UserSettingsPanel from '@/components/UserSettingsPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import ResearchPanel from '@/components/ResearchPanel';
@@ -37,10 +34,10 @@ import { clearChat, updateChatSession } from '@/store/chatSlice';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
 type RightPanelKind = 'soul' | 'memory' | 'research';
-import { ChatSession, ModelConfig, ModelRoleAssignments, UserProfile, WebSearchConfig } from '@/types';
+import { ChatSession, ModelConfig, ModelRoleAssignments, UserProfile } from '@/types';
 import { APP_NAME, APP_VERSION } from '@/constants';
 
-type ViewState = 'home' | 'playground' | 'history_all' | 'create' | 'model_settings' | 'user_settings';
+type ViewState = 'home' | 'playground' | 'history_all' | 'create';
 
 interface ChatHistoryItem {
   id: string;
@@ -65,17 +62,9 @@ function AIStudioLayoutContent() {
   const [recentChats, setRecentChats] = useState<ChatHistoryItem[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [modelRoles, setModelRoles] = useState<ModelRoleAssignments | null>(null);
-  const [loadingModelRoles, setLoadingModelRoles] = useState(true);
   const [loadingChats, setLoadingChats] = useState(true);
-  const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
-  const [loadingUserProfile, setLoadingUserProfile] = useState(true);
-  const [loadingWebSearchConfig, setLoadingWebSearchConfig] = useState(true);
   const [chatError, setChatError] = useState<string | null>(null);
-  const [modelConfigError, setModelConfigError] = useState<string | null>(null);
-  const [userProfileError, setUserProfileError] = useState<string | null>(null);
-  const [webSearchConfigError, setWebSearchConfigError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
   const [authTokenPresent, setAuthTokenPresent] = useState(false);
 
   const [historyPage, setHistoryPage] = useState(1);
@@ -147,90 +136,46 @@ function AIStudioLayoutContent() {
 
   const fetchModelConfigs = useCallback(async () => {
     try {
-      setLoadingModelConfigs(true);
       const response = await apiService.getModelConfigs();
 
-      if (response.error) {
-        setModelConfigError(response.error);
-        return;
+      if (!response.error) {
+        setModelConfigs(response.data || []);
       }
-
-      setModelConfigError(null);
-      setModelConfigs(response.data || []);
     } catch (err) {
       console.error('Failed to fetch model configurations:', err);
-      setModelConfigError(messages.modelApi.failedToLoadModelConfigurations);
-    } finally {
-      setLoadingModelConfigs(false);
     }
-  }, [messages.modelApi.failedToLoadModelConfigurations]);
+  }, []);
 
   const fetchModelRoles = useCallback(async () => {
     try {
-      setLoadingModelRoles(true);
       const response = await apiService.getModelRoles();
 
-      if (response.error) {
-        setModelConfigError(response.error);
-        return;
+      if (!response.error) {
+        setModelRoles(response.data || null);
       }
-
-      setModelRoles(response.data || null);
     } catch (err) {
       console.error('Failed to fetch model role assignments:', err);
-      setModelConfigError(messages.modelApi.failedToLoadRoles);
-    } finally {
-      setLoadingModelRoles(false);
     }
-  }, [messages.modelApi.failedToLoadRoles]);
+  }, []);
 
   const fetchUserProfile = useCallback(async () => {
     try {
-      setLoadingUserProfile(true);
       const response = await apiService.getUserProfile();
 
-      if (response.error) {
-        setUserProfileError(response.error);
-        return;
+      if (!response.error) {
+        setUserProfile(response.data || null);
       }
-
-      setUserProfileError(null);
-      setUserProfile(response.data || null);
     } catch (err) {
       console.error('Failed to fetch user profile:', err);
-      setUserProfileError(messages.user.failedToLoad);
-    } finally {
-      setLoadingUserProfile(false);
     }
-  }, [messages.user.failedToLoad]);
-
-  const fetchWebSearchConfig = useCallback(async () => {
-    try {
-      setLoadingWebSearchConfig(true);
-      const response = await apiService.getWebSearchConfig();
-
-      if (response.error) {
-        setWebSearchConfigError(response.error);
-        return;
-      }
-
-      setWebSearchConfigError(null);
-      setWebSearchConfig(response.data || null);
-    } catch (err) {
-      console.error('Failed to fetch web search configuration:', err);
-      setWebSearchConfigError(messages.modelApi.failedToLoadWebSearchConfiguration);
-    } finally {
-      setLoadingWebSearchConfig(false);
-    }
-  }, [messages.modelApi.failedToLoadWebSearchConfiguration]);
+  }, []);
 
   useEffect(() => {
     fetchChatSessions();
     fetchModelConfigs();
     fetchModelRoles();
     fetchUserProfile();
-    fetchWebSearchConfig();
-  }, [fetchChatSessions, fetchModelConfigs, fetchModelRoles, fetchUserProfile, fetchWebSearchConfig]);
+  }, [fetchChatSessions, fetchModelConfigs, fetchModelRoles, fetchUserProfile]);
 
   useEffect(() => {
     if (userProfile?.interfaceLanguage) {
@@ -363,10 +308,6 @@ function AIStudioLayoutContent() {
     }
   };
 
-  const openModelSettings = () => {
-    setCurrentView('model_settings');
-  };
-
   const normalizedHistorySearchQuery = historySearchQuery.trim().toLowerCase();
   const filteredHistoryItems = recentChats.filter((chat) => {
     if (!normalizedHistorySearchQuery) {
@@ -496,18 +437,12 @@ function AIStudioLayoutContent() {
                 onClick={() => setCurrentView('create')}
               />
               <NavItem
-                icon={<KeyRound size={18} />}
-                label={messages.shell.modelApiSettings}
-                active={currentView === 'model_settings'}
-                onClick={openModelSettings}
+                icon={<Settings size={18} />}
+                label={messages.shell.settings}
+                active={false}
+                onClick={() => router.push('/settings')}
                 badge={hasModelConfigs ? messages.shell.modelApiReady : messages.shell.modelApiRequired}
                 badgeTone={hasModelConfigs ? 'ready' : 'warning'}
-              />
-              <NavItem
-                icon={<UserCircle2 size={18} />}
-                label={messages.shell.userSettings}
-                active={currentView === 'user_settings'}
-                onClick={() => setCurrentView('user_settings')}
               />
               </div>
             </div>
@@ -539,8 +474,6 @@ function AIStudioLayoutContent() {
                 {currentView === 'playground' && messages.shell.playgroundChat}
                 {currentView === 'create' && messages.shell.buildCreateNew}
                 {currentView === 'history_all' && messages.shell.historyAll}
-                {currentView === 'model_settings' && messages.shell.modelApiSettingsHeader}
-                {currentView === 'user_settings' && messages.shell.userSettingsHeader}
                 </div>
                 <div className="text-xs text-slate-400">
                   {selectedCharacterId ? messages.shell.focusedOnOneActiveCharacterSession : messages.shell.browseCharactersSessionsAndSettings}
@@ -736,34 +669,6 @@ function AIStudioLayoutContent() {
               <CreateCharacterSimplifiedForm onCancel={() => setCurrentView('playground')} />
             </div>
           </div>
-        );
-
-      case 'model_settings':
-        return (
-          <ModelApiSettingsPanel
-            modelConfigs={modelConfigs}
-            modelRoles={modelRoles}
-            webSearchConfig={webSearchConfig}
-            loading={loadingModelConfigs}
-            loadingRoles={loadingModelRoles}
-            loadingWebSearchConfig={loadingWebSearchConfig}
-            error={modelConfigError}
-            webSearchError={webSearchConfigError}
-            onRefresh={fetchModelConfigs}
-            onRefreshModelRoles={fetchModelRoles}
-            onRefreshWebSearchConfig={fetchWebSearchConfig}
-          />
-        );
-
-      case 'user_settings':
-        return (
-          <UserSettingsPanel
-            profile={userProfile}
-            loading={loadingUserProfile}
-            error={userProfileError}
-            onRefresh={fetchUserProfile}
-            onOpenModelSettings={openModelSettings}
-          />
         );
 
       case 'history_all':
@@ -981,7 +886,7 @@ function AIStudioLayoutContent() {
                   {messages.shell.goToPlayground}
                 </button>
                 {!hasModelConfigs && (
-                  <button onClick={openModelSettings} className="rounded-xl border border-amber-200 bg-amber-50 px-6 py-3 font-medium text-amber-800 transition-colors hover:bg-amber-100">
+                  <button onClick={() => router.push('/settings')} className="rounded-xl border border-amber-200 bg-amber-50 px-6 py-3 font-medium text-amber-800 transition-colors hover:bg-amber-100">
                     {messages.shell.configureModelApi}
                   </button>
                 )}

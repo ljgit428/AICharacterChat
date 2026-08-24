@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useDispatch } from "react-redux";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Loader2, Menu, MessagesSquare, Search, X } from "lucide-react";
+import { ArrowLeft, Loader2, Menu, MessagesSquare, Search, Settings, X } from "lucide-react";
 import ChatInterface from "@/components/ChatInterface";
 import ModeSwitch from "@/components/ModeSwitch";
 import { useI18n } from "@/i18n/provider";
@@ -329,6 +329,15 @@ function DiscordChatPageContent() {
               {copy.chatPage.online}
             </p>
           </div>
+          <button
+            type="button"
+            onClick={() => router.push("/settings")}
+            className="ml-auto flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
+            title={copy.shell.settings}
+          >
+            <span className="sr-only">{copy.shell.settings}</span>
+            <Settings size={16} />
+          </button>
         </div>
       </aside>
 
