@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Character, Message, MessageAttachment, RootState, ToolCallInfo } from '@/types';
+import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
+import { BrainCircuit, Check, Cpu, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
@@ -24,6 +24,10 @@ interface ImmersiveChatWindowProps {
   memoryNotice?: string;
   /** 联网搜索已开启但未配置 key 时的一次性提示（memory/search v2）。 */
   webSearchHint?: string;
+  /** 可选的主模型（text 角色）快速切换：配置列表 + 当前生效项 + 切换回调。 */
+  modelConfigs?: ModelConfig[];
+  activeTextModel?: ModelConfig | null;
+  onTextModelChange?: (modelId: string) => void | Promise<void>;
 }
 
 export interface PendingAttachment {
@@ -141,12 +145,16 @@ export default function ImmersiveChatWindow({
   pendingQueueTexts,
   memoryNotice,
   webSearchHint,
+  modelConfigs,
+  activeTextModel,
+  onTextModelChange,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const COMPOSER_MAX_HEIGHT = 192; // ~8 lines of leading-6 + py-2.5
   const [draftMessage, setDraftMessage] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -179,7 +187,32 @@ export default function ImmersiveChatWindow({
     pendingAttachmentsRef.current = pendingAttachments;
   }, [pendingAttachments]);
 
+  // 打开会话/批量加载历史时直接钉在底部（避免从顶部开始显示）；
+  // 仅对逐条追加的新消息平滑滚动。头像等图片晚于滚动加载完成会把内容
+  // 再撑高，所以在下一帧和 250ms 各补钉一次。
+  const lastAnchorIdRef = useRef<string | null>(null);
+  const lastCountRef = useRef(0);
   useEffect(() => {
+    const firstId = messages[0]?.id ?? null;
+    const isBulkChange =
+      firstId !== lastAnchorIdRef.current || messages.length - lastCountRef.current > 1;
+    lastAnchorIdRef.current = firstId;
+    lastCountRef.current = messages.length;
+    const container = scrollAreaRef.current;
+    if (isBulkChange) {
+      if (!container) return;
+      container.scrollTop = container.scrollHeight;
+      const raf = requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+      });
+      const timer = window.setTimeout(() => {
+        container.scrollTop = container.scrollHeight;
+      }, 250);
+      return () => {
+        cancelAnimationFrame(raf);
+        window.clearTimeout(timer);
+      };
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
@@ -370,6 +403,49 @@ export default function ImmersiveChatWindow({
     return allGroups;
   }, []);
 
+  // 左侧索引条（minimap）：每个用户发言为一格，预览该轮"用户消息 / 助手回复"。
+  const turns = useMemo(() => {
+    const result: Array<{
+      key: string;
+      anchor: string;
+      userPreview: string;
+      assistantPreview: string;
+    }> = [];
+    groups.forEach((group, index) => {
+      if (group.role !== 'user') return;
+      const userPreview = group.messages
+        .map((message) => message.content)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      let assistantPreview = '';
+      for (let next = index + 1; next < groups.length; next += 1) {
+        if (groups[next].role === 'user') break;
+        if (groups[next].role === 'assistant') {
+          assistantPreview = groups[next].messages
+            .map((message) => message.content)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          break;
+        }
+      }
+      result.push({
+        key: group.messages[0].id,
+        anchor: `${group.senderKey}-${group.messages[0].id}`,
+        userPreview,
+        assistantPreview,
+      });
+    });
+    return result;
+  }, [groups]);
+
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const jumpToTurn = (anchor: string) => {
+    const target = scrollAreaRef.current?.querySelector<HTMLElement>(`[data-chat-anchor="${anchor}"]`);
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(243,247,250,0.95))] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
       <div className="border-b border-slate-200/70 bg-[radial-gradient(circle_at_top,#ffffff_0%,#f7fafc_100%)] px-5 py-4">
@@ -387,7 +463,32 @@ export default function ImmersiveChatWindow({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-5 md:px-6">
+      <div className="relative min-h-0 flex-1">
+        {turns.length > 1 && (
+          <div className="absolute left-1 top-1/2 z-10 hidden -translate-y-1/2 flex-col items-center gap-1 md:flex">
+            {turns.map((turn) => (
+              <div key={turn.key} className="group/tick relative flex items-center">
+                <button
+                  type="button"
+                  onClick={() => jumpToTurn(turn.anchor)}
+                  className="flex h-3 w-5 items-center justify-center"
+                  title={turn.userPreview}
+                >
+                  <span className="h-0.5 w-2.5 rounded-full bg-slate-400/60 transition-all group-hover/tick:h-1 group-hover/tick:w-4 group-hover/tick:bg-slate-700" />
+                </button>
+                <div className="pointer-events-none absolute left-6 z-20 hidden w-64 rounded-2xl border border-white/10 bg-slate-950/90 px-4 py-3 shadow-[0_18px_50px_rgba(15,23,42,0.4)] backdrop-blur group-hover/tick:block">
+                  <p className="line-clamp-2 text-sm font-medium leading-6 text-white">
+                    {turn.userPreview || copy.immersiveChat.minimapNoText}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
+                    {turn.assistantPreview || copy.immersiveChat.minimapNoReply}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div ref={scrollAreaRef} className="h-full overflow-y-auto px-4 py-5 md:px-6">
         {messages.length === 0 ? (
           <div className="flex h-full items-center justify-center">
             <div className="max-w-xl rounded-[2rem] border border-white/80 bg-white/80 px-6 py-8 text-center shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
@@ -429,7 +530,11 @@ export default function ImmersiveChatWindow({
               );
 
               return (
-                <div key={`${group.senderKey}-${group.messages[0].id}`} className="space-y-3">
+                <div
+                  key={`${group.senderKey}-${group.messages[0].id}`}
+                  data-chat-anchor={`${group.senderKey}-${group.messages[0].id}`}
+                  className="space-y-3"
+                >
                   {metaMessages.length > 0 && (
                     <div className="max-w-[min(48rem,86vw)] space-y-2">
                       {metaMessages.map((message) => (
@@ -522,6 +627,7 @@ export default function ImmersiveChatWindow({
         )}
 
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       <div className="border-t border-slate-200/70 bg-white/80 p-4 backdrop-blur">
@@ -661,6 +767,54 @@ export default function ImmersiveChatWindow({
                     },
                   ]}
                 />
+              )}
+              {modelConfigs && modelConfigs.length > 0 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setModelMenuOpen((open) => !open)}
+                    title={copy.immersiveChat.mainModelTitle}
+                    className="flex h-9 max-w-[11rem] items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                  >
+                    <Cpu className="h-3.5 w-3.5 flex-shrink-0 text-slate-400" />
+                    <span className="truncate">{activeTextModel?.name || copy.immersiveChat.mainModelNone}</span>
+                  </button>
+                  {modelMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setModelMenuOpen(false)} />
+                      <div className="absolute bottom-11 left-0 z-20 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.18)]">
+                        <p className="px-3 pb-1 pt-2.5 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
+                          {copy.immersiveChat.mainModel}
+                        </p>
+                        <div className="max-h-56 overflow-y-auto pb-1">
+                          {modelConfigs.map((config) => (
+                            <button
+                              key={config.id}
+                              type="button"
+                              onClick={() => {
+                                setModelMenuOpen(false);
+                                void onTextModelChange?.(config.id);
+                              }}
+                              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                config.id === activeTextModel?.id
+                                  ? 'bg-sky-50 text-sky-700'
+                                  : 'text-slate-700 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{config.name}</span>
+                              <span className="flex-shrink-0 text-[10px] uppercase tracking-wide text-slate-400">
+                                {config.provider}
+                              </span>
+                              {config.id === activeTextModel?.id && (
+                                <Check className="h-3.5 w-3.5 flex-shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
             </div>
             {isLoading ? (

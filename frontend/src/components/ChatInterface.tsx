@@ -151,6 +151,9 @@ export default function ChatInterface({
   const [realtimeNotice, setRealtimeNotice] = useState<string | null>(null);
   const [asrReady, setAsrReady] = useState<{ available: boolean; hint: string } | null>(null);
   const [lastTurnLatency, setLastTurnLatency] = useState<{ firstMs: number | null; totalMs: number } | null>(null);
+  // 主模型快速切换：记录本会话内最近一次切换（PUT /model-roles 已同步服务端），
+  // 未切换时回退到角色分配 / 默认配置。
+  const [textModelOverrideId, setTextModelOverrideId] = useState<string | null>(null);
   // frameGrabberRef 挂摄像头抓帧、screenGrabberRef 挂屏幕抓帧；同轮附帧时屏幕优先。
   const frameGrabberRef = useRef<(() => File | null) | null>(null);
   const screenGrabberRef = useRef<(() => File | null) | null>(null);
@@ -789,7 +792,19 @@ export default function ChatInterface({
     );
   }, [subtitleAssistantText, subtitleUserText]);
 
+  const handleTextModelChange = async (modelId: string) => {
+    const response = await apiService.updateModelRoles({ text: modelId });
+    if (response.error) {
+      dispatch(setError(response.error));
+      return;
+    }
+    setTextModelOverrideId(modelId);
+  };
+
   const activeModelConfig =
+    (textModelOverrideId
+      ? modelConfigs.find((config) => config.id === textModelOverrideId)
+      : null) ||
     modelRoles?.text ||
     modelConfigs.find((config) => config.id === defaultModelConfigId) ||
     null;
@@ -970,6 +985,9 @@ export default function ChatInterface({
           webSearchHint={
             webSearchMissingKey ? copy.immersiveChat.webSearchMissingKey : undefined
           }
+          modelConfigs={modelConfigs}
+          activeTextModel={activeModelConfig}
+          onTextModelChange={handleTextModelChange}
         />
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (
