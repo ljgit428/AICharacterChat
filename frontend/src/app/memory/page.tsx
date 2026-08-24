@@ -4,13 +4,14 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/i18n/provider";
 import { apiService } from "@/utils/api";
-import { Character, MemoryEntry, MemorySectionGroup } from "@/types";
+import { Character, MemoryEntry, MemoryNarrative, MemorySectionGroup } from "@/types";
 import {
   ArrowLeft,
   Database,
   Eye,
   EyeOff,
   GitMerge,
+  Heart,
   Loader2,
   PlusCircle,
   RefreshCw,
@@ -18,6 +19,10 @@ import {
   Trash2,
   Wand2,
 } from "lucide-react";
+
+// Section names the extraction agent is trained to use (memory v2 §4).
+const RELATIONSHIP_SECTION = "关系";
+const MILESTONE_SECTION = "里程碑";
 
 interface CreatedState {
   section: string;
@@ -65,6 +70,9 @@ function MemoryBrowserContent() {
   const [merging, setMerging] = useState<MergeState | null>(null);
   const [busy, setBusy] = useState<"create" | "edit" | "delete" | "merge" | "wipe" | null>(null);
   const [expansion, setExpansion] = useState<Record<string, boolean>>({});
+  // Memory v2 §5.2: growth cards + AI-view preview.
+  const [narrative, setNarrative] = useState<MemoryNarrative | null>(null);
+  const [showAiView, setShowAiView] = useState(false);
 
   const loadCharacters = useCallback(async () => {
     setLoadingCharacters(true);
@@ -103,6 +111,15 @@ function MemoryBrowserContent() {
       setError(safeError(loadError, copy.memory.failedToLoadMemory));
     } finally {
       setLoadingMemory(false);
+    }
+
+    try {
+      const narrativeResponse = await apiService.getMemoryNarrative(characterId);
+      if (narrativeResponse.data) {
+        setNarrative(narrativeResponse.data);
+      }
+    } catch {
+      // Preview is best-effort; the page works without it.
     }
   }, [copy.memory.failedToLoadMemory]);
 
@@ -470,6 +487,15 @@ function MemoryBrowserContent() {
                         {busy === "merge" ? <Loader2 size={12} className="animate-spin" /> : <GitMerge size={12} />}
                         <span>{copy.memory.merge}</span>
                       </button>
+                      <button
+                        type="button"
+                        disabled={!narrative}
+                        onClick={() => setShowAiView(true)}
+                        className="inline-flex items-center gap-2 rounded-full bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Eye size={12} />
+                        <span>{copy.memory.aiView}</span>
+                      </button>
                     </div>
                   </div>
 
@@ -480,6 +506,58 @@ function MemoryBrowserContent() {
                   )}
 
                   <div className="space-y-6">
+                    {(() => {
+                      const relationshipGroup = sections.find((group) => group.section === RELATIONSHIP_SECTION);
+                      const milestoneGroup = sections.find((group) => group.section === MILESTONE_SECTION);
+                      if (!relationshipGroup && !milestoneGroup) return null;
+                      return (
+                        <div className="grid gap-4 lg:grid-cols-2">
+                          {relationshipGroup && (
+                            <div className="rounded-2xl border border-rose-100 bg-gradient-to-br from-rose-50/80 to-white p-4 shadow-[0_12px_40px_rgba(15,23,42,0.05)]">
+                              <div className="flex items-center gap-2 border-b border-rose-100 pb-2">
+                                <Heart size={16} className="text-rose-500" />
+                                <h3 className="text-sm font-semibold text-slate-900">{copy.memory.relationshipCard}</h3>
+                              </div>
+                              {relationshipGroup.items.map((entry) => (
+                                <div key={entry.shortId} className="pt-3">
+                                  <p className="text-sm text-slate-900">{entry.description}</p>
+                                  {(entry.descriptionHistory?.length ?? 0) > 0 && (
+                                    <ol className="mt-3 space-y-2 border-l-2 border-rose-200 pl-3">
+                                      {entry.descriptionHistory!.slice().reverse().map((change, index) => (
+                                        <li key={index} className="text-xs text-slate-600">
+                                          <span>{change.old_desc}</span>
+                                          {" → "}
+                                          <span className="font-medium text-rose-600">{change.new_desc}</span>
+                                          {change.reason && (
+                                            <p className="mt-0.5 text-slate-400">{change.reason}</p>
+                                          )}
+                                        </li>
+                                      ))}
+                                    </ol>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {milestoneGroup && (
+                            <div className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/80 to-white p-4 shadow-[0_12px_40px_rgba(15,23,42,0.05)]">
+                              <div className="flex items-center gap-2 border-b border-indigo-100 pb-2">
+                                <Sparkles size={16} className="text-indigo-500" />
+                                <h3 className="text-sm font-semibold text-slate-900">{copy.memory.milestoneTimeline}</h3>
+                              </div>
+                              <ol className="mt-3 space-y-2">
+                                {milestoneGroup.items.map((entry) => (
+                                  <li key={entry.shortId} className="flex gap-2 text-sm text-slate-800">
+                                    <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-indigo-400" />
+                                    <span>{entry.description}</span>
+                                  </li>
+                                ))}
+                              </ol>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {sections.map((section) => (
                       <div key={section.section} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_12px_40px_rgba(15,23,42,0.05)]">
                         <div className="flex items-center justify-between border-b border-slate-100 pb-2">
@@ -702,6 +780,20 @@ function MemoryBrowserContent() {
               onSave={submitMerge}
               onCancel={() => setMerging(null)}
             />
+          </Modal>
+        )}
+
+        {showAiView && narrative && (
+          <Modal title={copy.memory.aiViewTitle} busy={false} onClose={() => setShowAiView(false)}>
+            {narrative.truncated && (
+              <p className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                {copy.memory.truncatedWarning}
+              </p>
+            )}
+            <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap rounded-2xl bg-slate-900 p-4 text-xs leading-6 text-slate-100">
+              {narrative.narrative}
+            </pre>
+            <p className="mt-2 text-xs text-slate-500">{copy.memory.aiViewCount(narrative.count)}</p>
           </Modal>
         )}
       </div>

@@ -64,7 +64,7 @@ class CharacterMemoryModelTests(TestCase):
         self.assertEqual(item.section, 'identity')
 
         rows = list(
-            MemoryAuditLog.objects.filter(character=self.character).order_by('created_at')
+            MemoryAuditLog.objects.filter(character=self.character).order_by('created_at', 'id')
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].action, MemoryAuditAction.CREATE)
@@ -111,7 +111,7 @@ class CharacterMemoryModelTests(TestCase):
         self.assertEqual(history_entry['new_desc'], 'Uses Clojure at work.')
         self.assertEqual(history_entry['reason'], 'Refined wording.')
 
-        audit_rows = list(MemoryAuditLog.objects.filter(character=self.character).order_by('created_at'))
+        audit_rows = list(MemoryAuditLog.objects.filter(character=self.character).order_by('created_at', 'id'))
         self.assertEqual([row.action for row in audit_rows], [MemoryAuditAction.CREATE, MemoryAuditAction.UPDATE])
         update_row = audit_rows[-1]
         self.assertEqual(update_row.before_description, 'Writes in Clojure.')
@@ -138,7 +138,7 @@ class CharacterMemoryModelTests(TestCase):
         self.assertFalse(CharacterMemoryItem.objects.filter(short_id=secondary.short_id).exists())
 
         actions = list(
-            self.character.memory_audit_log.order_by('created_at').values_list('action', flat=True)
+            self.character.memory_audit_log.order_by('created_at', 'id').values_list('action', flat=True)
         )
         self.assertEqual(actions, ['create', 'create', 'merge'])
 
@@ -263,7 +263,7 @@ class CharacterMemoryRestTests(TestCase):
                 data=json.dumps({'section': 'taste', 'description': desc}),
                 content_type='application/json',
             )
-        ids = [item.short_id for item in self.character.memory_items.order_by('created_at')]
+        ids = [item.short_id for item in self.character.memory_items.order_by('created_at', 'id')]
         self.assertEqual(len(ids), 2)
         response = self.client.post(
             f'/api/characters/{self.character.id}/memory/merge/',
@@ -509,8 +509,559 @@ class SyncLongTermMemoryTaskTests(TestCase):
         self.assertEqual(items[0].section, 'identity')
         self.assertEqual(items[0].description, 'Prefers warm drinks.')
 
-        rows = list(MemoryAuditLog.objects.filter(character=self.character).order_by('created_at'))
+        rows = list(MemoryAuditLog.objects.filter(character=self.character).order_by('created_at', 'id'))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].action, MemoryAuditAction.CREATE)
         self.assertEqual(rows[0].source, MemoryAuditSource.CELERY_WORKER)
         self.assertEqual(rows[0].after_description, 'Prefers warm drinks.')
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryPromptInjectionTests(TestCase):
+    """memory v2 §3.2: budget-aware injection with priority sections."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='inject-owner', password='password123')
+        from chat.models import Character, CharacterMemoryItem
+        from chat.memory.manager import MemoryManager
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Inject Character',
+            avatar_url='',
+            description='Injection trimming tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.manager = MemoryManager(self.character)
+        # Insertion order = recency order (updated_at auto_now).
+        self.manager.create_item(section='工作', description='Item A1 (oldest work).')
+        self.manager.create_item(section='工作', description='Item A2.')
+        self.manager.create_item(section='工作', description='Item A3.')
+        self.manager.create_item(section='工作', description='Item A4 (newest work).')
+        self.manager.create_item(section='关系', description='关系正在升温，开始互相开玩笑。')
+        self.manager.create_item(section='里程碑', description='2026-08-23 第一次一起看了流星雨。')
+        # 固定确定性的新旧顺序（同毫秒创建会让 updated_at 排序不稳定）
+        from django.utils import timezone as dj_tz
+        import datetime as _dt
+        now = dj_tz.now()
+        work_items = list(
+            self.character.memory_items.filter(section='工作').order_by('id')
+        )
+        for offset, item in enumerate(work_items):
+            CharacterMemoryItem.objects.filter(pk=item.pk).update(
+                updated_at=now - _dt.timedelta(minutes=(len(work_items) - offset)),
+            )
+
+    def test_unlimited_budget_returns_everything_and_not_truncated(self):
+        narrative, truncated = self.manager.get_prompt_memory()
+        self.assertFalse(truncated)
+        for needle in ('Item A1', 'Item A4', '关系', '里程碑'):
+            self.assertIn(needle, narrative)
+        # Priority sections come first regardless of creation order.
+        self.assertLess(narrative.index('## 关系'), narrative.index('## 工作'))
+
+    def test_tight_budget_keeps_priority_sections_drops_oldest_work_items(self):
+        # Header(31) + priority blocks(~54) leaves room for the newest work
+        # items but not the oldest one (total-without-A1 = 137 <= 140 < 162).
+        narrative, truncated = self.manager.get_prompt_memory(budget_chars=140)
+
+        self.assertTrue(truncated)
+        # Priority sections survive in full.
+        self.assertIn('关系正在升温', narrative)
+        self.assertIn('第一次一起看了流星雨', narrative)
+        # Newest non-priority items are kept, oldest dropped whole.
+        self.assertIn('Item A4', narrative)
+        self.assertIn('Item A3', narrative)
+        self.assertIn('Item A2', narrative)
+        self.assertNotIn('Item A1', narrative)
+
+    def test_zero_budget_still_keeps_priority_sections(self):
+        narrative, truncated = self.manager.get_prompt_memory(budget_chars=1)
+
+        self.assertTrue(truncated)
+        self.assertIn('关系正在升温', narrative)
+        self.assertIn('第一次一起看了流星雨', narrative)
+        self.assertNotIn('## 工作', narrative)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryToolRejectionTests(TestCase):
+    """memory v2 §3.4: invalid model input is rejected, not fatal."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='reject-owner', password='password123')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+        from chat.tasks import _execute_memory_crud_tool
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Reject Character',
+            avatar_url='',
+            description='Tool rejection tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.manager = MemoryManager(self.character)
+        self.execute = _execute_memory_crud_tool
+
+    def test_missing_description_is_rejected_not_raised(self):
+        result = self.execute(self.character, self.manager, None, 'create_memory', json.dumps({'section': '身份'}))
+        self.assertEqual(result['status'], 'rejected')
+        self.assertEqual(self.character.memory_items.count(), 0)
+
+    def test_unknown_short_id_update_is_rejected_not_raised(self):
+        result = self.execute(
+            self.character, self.manager, None, 'update_memory',
+            json.dumps({'id': 'zzzzzzzz', 'description': 'whatever', 'reason': 'test'}),
+        )
+        self.assertEqual(result['status'], 'rejected')
+
+    def test_overlong_description_is_rejected_then_valid_create_succeeds(self):
+        rejected = self.execute(
+            self.character, self.manager, None, 'create_memory',
+            json.dumps({'section': '身份', 'description': 'x' * 500}),
+        )
+        self.assertEqual(rejected['status'], 'rejected')
+
+        ok = self.execute(
+            self.character, self.manager, None, 'create_memory',
+            json.dumps({'section': '身份', 'description': 'Prefers tea.'}),
+        )
+        self.assertEqual(ok['status'], 'created')
+        self.assertEqual(self.character.memory_items.count(), 1)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class DispatchMemorySyncFallbackTests(TestCase):
+    """memory v2 §3.1: broker failure degrades to inline execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='dispatch-owner', password='password123')
+        from chat.models import Character, ChatSession, Message
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Dispatch Character',
+            avatar_url='',
+            description='Dispatch fallback tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.session = ChatSession.objects.create(user=self.user, character=self.character, title='t')
+        self.message = Message.objects.create(
+            chat_session=self.session, role='assistant', content='hello', character=self.character,
+        )
+
+    def test_broker_failure_runs_task_inline_when_fallback_enabled(self):
+        from chat.tasks import _dispatch_memory_sync, sync_long_term_memory
+
+        with override_settings(MEMORY_SYNC_INLINE_FALLBACK=True), \
+             patch.object(sync_long_term_memory, 'delay', side_effect=Exception('broker down')) as mock_delay, \
+             patch.object(sync_long_term_memory, 'apply', return_value=None) as mock_apply:
+            _dispatch_memory_sync(self.session, self.message, self.character)
+
+        mock_delay.assert_called_once()
+        mock_apply.assert_called_once()
+
+    def test_broker_failure_skips_inline_when_fallback_disabled(self):
+        from chat.tasks import _dispatch_memory_sync, sync_long_term_memory
+
+        with override_settings(MEMORY_SYNC_INLINE_FALLBACK=False), \
+             patch.object(sync_long_term_memory, 'delay', side_effect=Exception('broker down')) as mock_delay, \
+             patch.object(sync_long_term_memory, 'apply', return_value=None) as mock_apply:
+            _dispatch_memory_sync(self.session, self.message, self.character)
+
+        mock_delay.assert_called_once()
+        mock_apply.assert_not_called()
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class GrowthSectionConstraintTests(TestCase):
+    """memory v2 §4: 「关系」single-entry constraint + 「里程碑」 conventions."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='growth-owner', password='password123')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Growth Character',
+            avatar_url='',
+            description='Growth section tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        self.manager = MemoryManager(self.character)
+
+    def test_second_relationship_create_redirects_into_update(self):
+        first = self.manager.create_item(section='关系', description='初识阶段，还比较生疏。')
+        second = self.manager.create_item(
+            section='关系', description='已经变得亲近，开始互相开玩笑。', reason='聊得很热络',
+        )
+
+        items = list(self.character.memory_items.filter(section='关系'))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].short_id, first.short_id)
+        self.assertEqual(items[0].description, '已经变得亲近，开始互相开玩笑。')
+        # The redirect is recorded inside the version chain.
+        last = items[0].description_history[-1]
+        self.assertIn('auto-redirect', last['reason'])
+        self.assertEqual(last['old_desc'], '初识阶段，还比较生疏。')
+
+    def test_update_renaming_foreign_entry_into_relationship_is_rejected(self):
+        self.manager.create_item(section='关系', description='初识阶段。')
+        work = self.manager.create_item(section='工作', description='用户是护士。')
+
+        with self.assertRaises(ValueError):
+            self.manager.update_item(
+                short_id=work.short_id,
+                description=work.description,
+                reason='should not be allowed',
+                section='关系',
+            )
+        # Nothing changed.
+        work.refresh_from_db()
+        self.assertEqual(work.section, '工作')
+
+    def test_merge_producing_second_relationship_entry_is_rejected(self):
+        rel = self.manager.create_item(section='关系', description='初识阶段。')
+        a = self.manager.create_item(section='工作', description='用户是护士。')
+        b = self.manager.create_item(section='爱好', description='用户喜欢喝冰美式。')
+
+        with self.assertRaises(ValueError):
+            self.manager.merge_items(
+                id1=a.short_id, id2=b.short_id,
+                content='合并后的内容。', section='关系', reason='test',
+            )
+        rel.refresh_from_db()
+        self.assertTrue(self.character.memory_items.filter(short_id=rel.short_id).exists())
+
+    def test_extraction_prompts_carry_special_section_rules(self):
+        from chat.memory.prompts import COLD_START_SYSTEM, UPDATE_SYSTEM
+
+        for prompt in (COLD_START_SYSTEM, UPDATE_SYSTEM):
+            self.assertIn('特殊分区', prompt)
+            self.assertIn('「关系」', prompt)
+            self.assertIn('「里程碑」', prompt)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryNarrativeEndpointTests(TestCase):
+    """memory v2 §5.3: GET /characters/{id}/memory/narrative/."""
+
+    def setUp(self):
+        from django.urls import reverse
+        from rest_framework.authtoken.models import Token
+        from rest_framework.test import APIClient
+
+        self.user = User.objects.create_user(username='narrative-owner', password='password123')
+        self.token = Token.objects.create(user=self.user)
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {self.token.key}')
+        from chat.models import Character
+        from chat.memory.manager import MemoryManager
+
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Narrative Character',
+            avatar_url='',
+            description='Narrative endpoint tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Archive',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+        manager = MemoryManager(self.character)
+        manager.create_item(section='关系', description='初识阶段，还在互相了解。')
+        manager.create_item(section='身份', description='用户是一名护士。')
+        self.reverse = reverse
+
+    def _url(self):
+        return self.reverse('character-memory-narrative', args=[self.character.pk])
+
+    def test_narrative_lists_priority_sections_first(self):
+        response = self.client.get(f'/api/characters/{self.character.pk}/memory/narrative/')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload['truncated'])
+        self.assertEqual(payload['count'], 2)
+        self.assertIn('初识阶段', payload['narrative'])
+        # 关系 (priority) appears before 身份 regardless of insertion order.
+        self.assertLess(payload['narrative'].index('## 关系'), payload['narrative'].index('## 身份'))
+
+    def test_narrative_requires_ownership(self):
+        from django.contrib.auth.models import User
+        from rest_framework.authtoken.models import Token
+        from rest_framework.test import APIClient
+
+        stranger = User.objects.create_user(username='narrative-stranger', password='password123')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=stranger).key}")
+        response = client.get(f'/api/characters/{self.character.pk}/memory/narrative/')
+        self.assertEqual(response.status_code, 404)
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class ReducePipelineHelperTests(TestCase):
+    """memory v2 GUI-test regressions (2026-08-24 folder-import test)."""
+
+    def test_target_name_keeps_multi_word_names(self):
+        from chat.character_reduce import _normalize_target_name
+
+        # A name containing spaces used to truncate at the first space.
+        self.assertEqual(
+            _normalize_target_name("目标角色名: Mika Suenaga\n角色简介:\n"),
+            "Mika Suenaga",
+        )
+        self.assertEqual(
+            _normalize_target_name("目标角色名: 玛丽\n角色简介:\n"),
+            "玛丽",
+        )
+        self.assertEqual(_normalize_target_name(""), "")
+        self.assertEqual(_normalize_target_name(None), "")
+
+    def test_speaker_count_matches_prefixed_lines(self):
+        from chat.character_reduce import _speaker_line_count
+
+        content = "玛丽: 你好\n老师: 早安\n玛丽（啦啦队服）: 加油\n旁白: 安静"
+        self.assertEqual(_speaker_line_count(content, "玛丽"), 2)
+
+    def test_reduce_result_coerces_non_string_llm_fields(self):
+        from chat.character_reduce import reduce_result_to_draft
+
+        pipeline_result = {
+            "result": {
+                "profile_summary": {
+                    "name": ["玛丽"],  # LLM returned a list — used to crash
+                    "description": "一段简介。",
+                    "personality": None,
+                    "appearance": {"k": "v"},  # dict must not explode
+                    "affiliation": " 三一 ",
+                    "tags": ["元气", 3, "", None],
+                },
+                "dialogue_library": {
+                    "日常": [
+                        {"quote": ["列表台词"], "file": "a.txt"},
+                        {"quote": "正常台词", "file": "b.txt"},
+                        "not-a-dict",
+                    ],
+                    "提问": "not-a-list",
+                },
+            }
+        }
+
+        draft = reduce_result_to_draft(pipeline_result)
+        self.assertEqual(draft["name"], "玛丽")
+        self.assertEqual(draft["affiliation"], "三一")
+        self.assertEqual(draft["personality"], "")
+        self.assertEqual(draft["appearance"], "")
+        self.assertEqual(draft["tags"], ["元气"])
+        self.assertIn("正常台词", draft["example_dialogue"])
+        # List-typed quotes are joined into usable text instead of crashing.
+        self.assertIn("列表台词", draft["example_dialogue"])
+        self.assertNotIn("not-a-dict", draft["example_dialogue"])
+        self.assertNotIn("not-a-list", draft["example_dialogue"])
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class WebSearchGatingTests(TestCase):
+    """角色级联网搜索三态开关（2026-08-24 联网搜索功能补全）。"""
+
+    def setUp(self):
+        from chat.models import Character, ChatSession, UserProfile
+
+        self.user = User.objects.create_user(username='search-owner', password='password123')
+        UserProfile.objects.update_or_create(
+            user=self.user, defaults={'default_enable_web_search': True},
+        )
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Search Character',
+            avatar_url='',
+            description='Web search gating tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Lab',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['search'],
+        )
+        self.session = ChatSession.objects.create(user=self.user, character=self.character)
+
+    def _enabled(self):
+        from chat.tasks import _web_search_enabled
+        return _web_search_enabled(self.session)
+
+    def test_null_follows_user_default(self):
+        self.character.enable_web_search = None
+        self.character.save(update_fields=['enable_web_search'])
+        self.assertTrue(self._enabled())
+
+    def test_character_false_overrides_user_true(self):
+        self.character.enable_web_search = False
+        self.character.save(update_fields=['enable_web_search'])
+        self.assertFalse(self._enabled())
+
+    def test_character_true_overrides_user_false(self):
+        from chat.models import UserProfile
+        self.character.enable_web_search = True
+        self.character.save(update_fields=['enable_web_search'])
+        UserProfile.objects.update_or_create(
+            user=self.user, defaults={'default_enable_web_search': False},
+        )
+        self.assertTrue(self._enabled())
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class MemoryResearchPromptTests(TestCase):
+    """搜索结果注入记忆提取 prompt（联网搜索 × 记忆打通）。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='research-mem-owner', password='password123')
+        from chat.models import Character
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Research Memory Character',
+            avatar_url='',
+            description='Research memory tests.',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Lab',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['memory'],
+        )
+
+    def _build(self, payload):
+        from chat.memory.prompts import build_memory_extraction_prompt
+        return build_memory_extraction_prompt(
+            character_name=self.character.name,
+            items=[],
+            chat_session=None,
+            new_message=None,
+            research_payload=payload,
+        )
+
+    def test_research_payload_renders_into_prompt(self):
+        result = self._build({
+            'query': '附近咖啡店',
+            'items': [{'title': '标题一', 'snippet': '一家很棒的咖啡店'}],
+        })
+        self.assertIn('WEB RESEARCH THIS TURN', result['user'])
+        self.assertIn('附近咖啡店', result['user'])
+        self.assertIn('标题一', result['user'])
+
+    def test_empty_or_error_payload_stays_quiet(self):
+        # 错误细节绝不进入提取 prompt（平台故障不是事实，2026-08-24 玛丽案例）
+        result = self._build({'query': '', 'items': [], 'error': ''})
+        self.assertNotIn('WEB RESEARCH THIS TURN', result['user'])
+
+        failed = self._build({'query': 'q', 'items': [], 'error': 'tavily down'})
+        self.assertNotIn('WEB RESEARCH THIS TURN', failed['user'])
+        self.assertNotIn('tavily down', failed['user'])
+        # 提取规则里有平台故障禁令兜底
+        self.assertIn('平台故障不是事实', result['system'])
+
+
+@override_settings(DATABASES=SQLITE_TEST_DATABASES)
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class WebSearchReadinessEndpointTests(TestCase):
+    """GET /api/web-search-config/readiness/（联网搜索配置缺失提示）。"""
+
+    def setUp(self):
+        from django.urls import reverse
+        from rest_framework.authtoken.models import Token
+        from rest_framework.test import APIClient
+
+        self.user = User.objects.create_user(username='ready-owner', password='password123')
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=self.user).key}")
+        from chat.models import Character, ChatSession, UserProfile, WebSearchConfiguration
+
+        UserProfile.objects.update_or_create(
+            user=self.user, defaults={'default_enable_web_search': True},
+        )
+        self.character = Character.objects.create(
+            created_by=self.user,
+            name='Ready Character',
+            avatar_url='',
+            description='readiness tests',
+            personality='Calm',
+            appearance='Grey coat',
+            scenario='Lab',
+            example_dialogue='',
+            affiliation='Lab',
+            tags=['search'],
+        )
+        ChatSession.objects.create(user=self.user, character=self.character)
+
+    def _get(self, character_id=None):
+        suffix = f'?character={character_id}' if character_id else ''
+        return self.client.get(f'/api/web-search-config/readiness/{suffix}')
+
+    def test_unconfigured_key_flags_missing(self):
+        response = self._get(self.character.pk)
+        payload = response.json()
+        self.assertTrue(payload['enabled'])
+        self.assertFalse(payload['configured'])
+
+    def test_character_off_overrides_enabled_profile(self):
+        self.character.enable_web_search = False
+        self.character.save(update_fields=['enable_web_search'])
+        WebSearchConfiguration = __import__('chat.models', fromlist=['WebSearchConfiguration']).WebSearchConfiguration
+        WebSearchConfiguration.objects.update_or_create(
+            user=self.user,
+            defaults={'provider': 'tavily', 'api_key': 'tvly_x'},
+        )
+        response = self._get(self.character.pk)
+        payload = response.json()
+        self.assertFalse(payload['enabled'])
+        self.assertTrue(payload['configured'])
+
+    def test_configured_key_reports_ready(self):
+        WebSearchConfigurationModel = __import__('chat.models', fromlist=['WebSearchConfiguration']).WebSearchConfiguration
+        WebSearchConfigurationModel.objects.update_or_create(
+            user=self.user,
+            defaults={'provider': 'tavily', 'api_key': 'tvly_x'},
+        )
+        response = self._get()
+        payload = response.json()
+        self.assertTrue(payload['enabled'])
+        self.assertTrue(payload['configured'])
+
+    def test_neutral_chat_prompt_line_hides_raw_error(self):
+        from chat.tasks import _format_research_context
+
+        line = _format_research_context({
+            'query': 'q', 'items': [], 'error': 'Tavily search failed: 401 Client Error',
+        })
+        self.assertIn('temporarily unavailable', line)
+        self.assertNotIn('401', line)

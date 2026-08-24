@@ -3,6 +3,11 @@
 > Status: **Spec only — no code changes yet.** This document is the
 > authoritative reference for the upcoming implementation. Any
 > non-trivial deviation must revise this doc first.
+>
+> **版本标注：** 起草于 v0.1 开发周期（提交 `ed67f29`，2026-06-30，随 v0.1.1
+> 合入 main）。核心设计——结构化条目存储、Celery 每轮提取 worker、CRUD 工具——
+> 已随后实现并经 v0.1.1、v0.1.2 持续演进；上方 "Spec only" 为起草时的原始状态。
+> 增量设计与现状问题清单见 [`memory-system-v2.md`](memory-system-v2.md)。
 
 > **Naming convention.** Backend identifiers in this spec follow
 > [`Miso2233/SonettoHere`](https://github.com/Miso2233/SonettoHere) so

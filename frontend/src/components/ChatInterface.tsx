@@ -1,16 +1,16 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, removeMessage, updateChatSession } from '@/store/chatSlice';
+import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
-import { apiService, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
+import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
-import { FolderTree, Brain, Globe } from 'lucide-react';
+import { FolderTree, Brain, Globe, Pencil } from 'lucide-react';
 import { useI18n } from '@/i18n/provider';
 
 interface ChatInterfaceProps {
@@ -20,6 +20,7 @@ interface ChatInterfaceProps {
   modelRoles?: ModelRoleAssignments | null;
   defaultModelConfigId?: string | null;
   userProfile?: UserProfile | null;
+  sessionOrigin?: 'topic' | 'chat';
   onBack?: () => void;
   onSessionUpdate?: () => void;
   onSoulRefreshKeyChange?: (value: string) => void;
@@ -36,6 +37,11 @@ function normalizeStreamMessage(apiMessage: {
   content: string;
   role: 'user' | 'assistant';
   timestamp: string;
+  thinking?: string | null;
+  tool_calls?: Array<{
+    tool: string;
+    arguments?: Record<string, unknown>;
+  }>;
   file_uri?: string | null;
   file_name?: string | null;
   file_preview_url?: string | null;
@@ -73,6 +79,13 @@ function normalizeStreamMessage(apiMessage: {
     content: apiMessage.content || '',
     role: apiMessage.role,
     timestamp: apiMessage.timestamp,
+    thinking: apiMessage.thinking || '',
+    toolCalls: (apiMessage.tool_calls || [])
+      .filter((call) => call?.tool)
+      .map((call) => ({
+        tool: call.tool,
+        arguments: call.arguments || {},
+      })),
     attachments,
     fileUri: primaryAttachment?.fileUri || apiMessage.file_uri || undefined,
     fileName: primaryAttachment?.fileName || apiMessage.file_name || undefined,
@@ -88,6 +101,7 @@ export default function ChatInterface({
   modelConfigs,
   modelRoles,
   defaultModelConfigId,
+  sessionOrigin,
   onSessionUpdate,
   onSoulRefreshKeyChange,
 }: ChatInterfaceProps) {
@@ -100,12 +114,62 @@ export default function ChatInterface({
   const [showMemoryPanel, setShowMemoryPanel] = useState(false);
   const [hasStartedConversation, setHasStartedConversation] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(initialSessionId || null);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
 
   const dispatch = useDispatch();
   const character = useSelector((state: RootState) => state.chat.character);
   const chatSession = useSelector((state: RootState) => state.chat.chatSession);
   const isLoading = useSelector((state: RootState) => state.chat.isLoading);
   const messages = useSelector((state: RootState) => state.chat.messages);
+
+  // Natural-chat spec §2/§3.3: abortable streaming + queued sends.
+  const abortRef = useRef<AbortController | null>(null);
+  const pendingQueueRef = useRef<Array<{ text: string; attachments: PendingAttachment[] }>>([]);
+  const [pendingQueueTexts, setPendingQueueTexts] = useState<string[]>([]);
+  const handleSendMessageRef = useRef<(message: string, attachments: PendingAttachment[]) => void>(() => {});
+  // Memory-growth chip (memory v2 §5.1): poll count after each turn.
+  const lastMemoryCountRef = useRef<number | null>(null);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  // 联网搜索配置缺失提示（2026-08-24：开启但未配 key 时提醒用户）
+  const [webSearchMissingKey, setWebSearchMissingKey] = useState(false);
+  const characterIdForMemory = character?.id;
+
+  useEffect(() => {
+    if (!characterIdForMemory) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiService.getWebSearchReadiness(characterIdForMemory);
+        if (!cancelled && response.data) {
+          setWebSearchMissingKey(Boolean(response.data.enabled && !response.data.configured));
+        }
+      } catch {
+        // readiness is best-effort
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [characterIdForMemory]);
+
+  useEffect(() => {
+    if (!characterIdForMemory) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiService.getCharacterMemory(characterIdForMemory);
+        if (!cancelled && response.data && response.data.count != null) {
+          lastMemoryCountRef.current = response.data.count;
+        }
+      } catch {
+        // Baseline is best-effort; the chip simply stays quiet on failure.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [characterIdForMemory]);
 
   useEffect(() => {
 
@@ -196,8 +260,42 @@ export default function ChatInterface({
     }
   };
 
+  const startEditTitle = () => {
+    setTitleDraft(chatSession?.title || '');
+    setIsEditingTitle(true);
+  };
+
+  const handleSaveTitle = async () => {
+    const trimmed = titleDraft.trim();
+    setIsEditingTitle(false);
+
+    if (!chatSessionId || !trimmed || trimmed === (chatSession?.title || '')) {
+      return;
+    }
+
+    try {
+      const response = await apiService.updateChatSession(chatSessionId, { title: trimmed });
+      if (response.data) {
+        dispatch(updateChatSession({ title: response.data.title }));
+        onSessionUpdate?.();
+      }
+    } catch (error) {
+      console.error('Failed to update session title:', error);
+    }
+  };
+
   const handleSendMessage = async (userInput: string, attachments: PendingAttachment[] = []) => {
     if (!character) return;
+
+    // While a reply is streaming, submissions are queued and auto-sent when
+    // the current turn finishes (natural-chat spec §2) instead of being blocked.
+    if (isLoading) {
+      const queuedText = userInput.trim();
+      if (!queuedText && attachments.length === 0) return;
+      pendingQueueRef.current = [...pendingQueueRef.current, { text: queuedText, attachments }];
+      setPendingQueueTexts(pendingQueueRef.current.map((item) => item.text));
+      return;
+    }
 
     const isFirstMessage = !hasStartedConversation;
     const trimmedInput = userInput.trim();
@@ -254,18 +352,25 @@ export default function ChatInterface({
     dispatch(setLoading(true));
     dispatch(setError(null));
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let streamedContent = '';
+
     try {
       const requestData: SendMessageRequest = {
-        message: isFirstMessage ? '' : trimmedInput,
+        message: trimmedInput,
         character_id: character.id,
         chat_session_id: chatSessionId || undefined,
-        start_conversation: isFirstMessage,
+        // Greeting only fires for an explicit empty-composer start on a fresh
+        // session; a typed first message is a real turn and must be saved and
+        // answered (memory v2 spec §3.3).
+        start_conversation: isFirstMessage && !trimmedInput && attachments.length === 0,
+        origin: sessionOrigin,
         attachments: attachments.map((attachment) => attachment.file),
       };
 
       const response = await apiService.streamMessage(requestData, {
-        onEvent: (event: StreamMessageEvent) => {
-          if (event.type === 'session') {
+        onEvent: (event: StreamMessageEvent) => {          if (event.type === 'session') {
             setChatSessionId(String(event.chat_session_id));
             if (event.user_message) {
               optimisticAttachments.forEach((attachment) => {
@@ -285,9 +390,29 @@ export default function ChatInterface({
           }
 
           if (event.type === 'delta') {
+            streamedContent += event.content;
             dispatch(appendToMessage({
               id: streamingAssistantId,
               content: event.content,
+            }));
+            return;
+          }
+
+          if (event.type === 'thinking') {
+            dispatch(appendToMessageThinking({
+              id: streamingAssistantId,
+              content: event.content,
+            }));
+            return;
+          }
+
+          if (event.type === 'tool') {
+            dispatch(appendToMessageToolCall({
+              id: streamingAssistantId,
+              toolCall: {
+                tool: event.tool,
+                arguments: event.arguments || {},
+              },
             }));
             return;
           }
@@ -303,6 +428,14 @@ export default function ChatInterface({
               senderName: character.name,
               senderAvatarUrl: character.avatarUrl,
               senderType: 'character',
+              thinking: event.thinking || '',
+              toolCalls: (event.tool_calls || [])
+                .filter((call) => call?.tool)
+                .map((call) => ({
+                  tool: call.tool,
+                  arguments: call.arguments || {},
+                })),
+              tokenUsage: normalizeTokenUsage(event.token_usage),
               researchPayload: event.research_payload ? {
                 query: event.research_payload.query || '',
                 provider: event.research_payload.provider || '',
@@ -323,7 +456,27 @@ export default function ChatInterface({
             throw new Error(event.error);
           }
         },
-      });
+      }, { signal: controller.signal });
+
+      if (controller.signal.aborted || (response as { aborted?: boolean }).aborted) {
+        // Stopped by the user: keep whatever partial content streamed in as a
+        // regular bubble. The backend does not persist interrupted replies.
+        dispatch(removeMessage(streamingAssistantId));
+        const partial = streamedContent.trim();
+        if (partial) {
+          dispatch(addMessage({
+            id: `${streamingAssistantId}-stopped`,
+            content: partial,
+            role: 'assistant',
+            timestamp: new Date().toISOString(),
+            senderId: character.id,
+            senderName: character.name,
+            senderAvatarUrl: character.avatarUrl,
+            senderType: 'character',
+          }));
+        }
+        return;
+      }
 
       if (response.error) {
         throw new Error(response.error);
@@ -369,8 +522,47 @@ export default function ChatInterface({
       dispatch(addMessage(errorMessage));
     } finally {
       dispatch(setLoading(false));
+      abortRef.current = null;
+
+      // Auto-send queued submissions (natural-chat spec §2). The short delay
+      // absorbs stragglers so a burst of messages becomes one merged turn.
+      const queued = pendingQueueRef.current;
+      if (queued.length > 0) {
+        pendingQueueRef.current = [];
+        setPendingQueueTexts([]);
+        const mergedText = queued.map((item) => item.text).filter(Boolean).join('\n\n');
+        const mergedAttachments = queued.flatMap((item) => item.attachments);
+        window.setTimeout(() => {
+          handleSendMessageRef.current(mergedText, mergedAttachments);
+        }, 800);
+      }
+
+      // Memory-growth chip (memory v2 §5.1): compare entry count after the turn.
+      if (character) {
+        void (async () => {
+          try {
+            const memoryResponse = await apiService.getCharacterMemory(character.id);
+            const count = memoryResponse.data?.count ?? null;
+            if (count != null && lastMemoryCountRef.current != null && count > lastMemoryCountRef.current) {
+              setMemoryNotice(copy.immersiveChat.memoryGrew(count - lastMemoryCountRef.current));
+              window.setTimeout(() => setMemoryNotice(null), 6000);
+            }
+            if (count != null) {
+              lastMemoryCountRef.current = count;
+            }
+          } catch {
+            // Chip is best-effort; ignore polling failures.
+          }
+        })();
+      }
     }
   };
+
+  const handleStopStreaming = () => {
+    abortRef.current?.abort();
+  };
+
+  handleSendMessageRef.current = handleSendMessage;
 
   const activeModelConfig =
     modelRoles?.text ||
@@ -406,9 +598,42 @@ export default function ChatInterface({
               </span>
             )}
           </div>
-          <h2 className="truncate text-base font-semibold tracking-tight text-slate-900">
-            {character?.name || copy.chat.loadingCharacter}
-          </h2>
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold tracking-tight text-slate-900">
+              {character?.name || copy.chat.loadingCharacter}
+            </h2>
+            {sessionOrigin !== 'chat' && chatSessionId && isEditingTitle && (
+              <input
+                type="text"
+                value={titleDraft}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    void handleSaveTitle();
+                  } else if (event.key === 'Escape') {
+                    setIsEditingTitle(false);
+                  }
+                }}
+                onBlur={() => void handleSaveTitle()}
+                autoFocus
+                placeholder={copy.chat.titlePlaceholder}
+                className="mt-0.5 w-56 max-w-full rounded-lg border border-sky-200 bg-white px-2 py-0.5 text-xs text-slate-700 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+              />
+            )}
+            {sessionOrigin !== 'chat' && chatSessionId && !isEditingTitle && (
+              <button
+                type="button"
+                onClick={startEditTitle}
+                className="group mt-0.5 flex max-w-full items-center gap-1 text-left"
+                title={copy.chat.editTitle}
+              >
+                <span className="truncate text-xs text-slate-400 transition-colors group-hover:text-slate-600">
+                  {chatSession?.title || copy.chat.untitled}
+                </span>
+                <Pencil size={11} className="flex-shrink-0 text-slate-400 opacity-60 transition-opacity group-hover:opacity-100" />
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2 lg:hidden">
           <button
@@ -455,6 +680,13 @@ export default function ChatInterface({
           currentUserLabel={copy.chat.you}
           attachmentSupport={attachmentSupport}
           localizedMediaMode={localizedMediaMode}
+          contextWindowTokens={activeModelConfig?.contextWindow || null}
+          onStop={handleStopStreaming}
+          pendingQueueTexts={pendingQueueTexts}
+          memoryNotice={memoryNotice ?? undefined}
+          webSearchHint={
+            webSearchMissingKey ? copy.immersiveChat.webSearchMissingKey : undefined
+          }
         />
       </div>
 

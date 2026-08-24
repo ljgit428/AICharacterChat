@@ -184,6 +184,15 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
+# Memory v2 §3.1: dev ergonomics for the per-turn long-term-memory task.
+# ALWAYS_EAGER (DEBUG default): .delay() executes in-process, so chatting
+#   without a Celery worker still writes memory.
+# MEMORY_SYNC_INLINE_FALLBACK: when eager is off and the broker rejects the
+#   enqueue, run the task body in-process instead of dropping it silently.
+#   Keep False in production so a dead broker never blocks reply finalization.
+CELERY_TASK_ALWAYS_EAGER = env.bool('CELERY_TASK_ALWAYS_EAGER', default=DEBUG)
+MEMORY_SYNC_INLINE_FALLBACK = env.bool('MEMORY_SYNC_INLINE_FALLBACK', default=False)
+
 DEV_AUTO_LOGIN_ENABLED = env.bool('DEV_AUTO_LOGIN_ENABLED', default=DEBUG)
 DEV_AUTO_LOGIN_USERNAME = env('DEV_AUTO_LOGIN_USERNAME', default='demo_user')
 DEV_AUTO_LOGIN_EMAIL = env('DEV_AUTO_LOGIN_EMAIL', default='demo@example.com')

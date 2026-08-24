@@ -21,6 +21,7 @@ from ..models import (
     MemoryAuditSource,
     Message,
 )
+from .constants import PRIORITY_SECTIONS, RELATIONSHIP_SECTION
 
 
 class MemoryItemNotFoundError(Exception):
@@ -81,6 +82,26 @@ class MemoryManager:
                 f"description exceeds {self.description_limit} characters (got {len(description)}); "
                 "split into multiple shorter entries instead."
             )
+        # Memory v2 §4.2 hard constraint: 「关系」 holds exactly one entry. If the
+        # extraction model ignores the prompt rule and creates a second one,
+        # silently redirect this call into an update of the existing entry so
+        # the version history (and thus the growth timeline) stays in one place.
+        if section == RELATIONSHIP_SECTION:
+            existing = (
+                CharacterMemoryItem.objects
+                .filter(character=self.character, section=RELATIONSHIP_SECTION)
+                .order_by("-updated_at", "-id")
+                .first()
+            )
+            if existing is not None:
+                redirect_reason = (reason or "").strip() or "关系更新"
+                return self.update_item(
+                    short_id=existing.short_id,
+                    description=description,
+                    reason=f"{redirect_reason}（auto-redirect: single-entry section）",
+                    source_message=source_message,
+                    source=source,
+                )
         with transaction.atomic():
             short_id = self._unique_short_id()
             item = CharacterMemoryItem.objects.create(
@@ -127,6 +148,18 @@ class MemoryManager:
             item = self.get_item(short_id)
             old_desc, old_section, old_time = item.description, item.section, _now_iso()
             new_section = (section or item.section).strip()[:64] or item.section
+            if new_section == RELATIONSHIP_SECTION and old_section != RELATIONSHIP_SECTION:
+                clash = (
+                    CharacterMemoryItem.objects
+                    .filter(character=self.character, section=RELATIONSHIP_SECTION)
+                    .exclude(short_id=short_id)
+                    .exists()
+                )
+                if clash:
+                    raise ValueError(
+                        "「关系」 section already holds its single entry; update that entry "
+                        "instead of moving another one into it."
+                    )
             history = list(item.description_history or [])
             history.append({
                 "old_desc": old_desc,
@@ -205,6 +238,19 @@ class MemoryManager:
             )
         if id1 == id2:
             raise ValueError("merge requires two distinct ids")
+        if section == RELATIONSHIP_SECTION:
+            clash = (
+                CharacterMemoryItem.objects
+                .filter(character=self.character, section=RELATIONSHIP_SECTION)
+                .exclude(short_id=id1)
+                .exclude(short_id=id2)
+                .exists()
+            )
+            if clash:
+                raise ValueError(
+                    "「关系」 section already holds its single entry; merge into that "
+                    "entry instead of producing a second one."
+                )
         with transaction.atomic():
             primary = self.get_item(id1)
             secondary = self.get_item(id2)
@@ -243,19 +289,59 @@ class MemoryManager:
     def render_narrative(self) -> str:
         """Compose a single markdown blob for prompt injection (mirror of
         SonettoHer's ``_format_narrative``)."""
+        narrative, _truncated = self.get_prompt_memory()
+        return narrative
+
+    def get_prompt_memory(self, *, budget_chars: int | None = None) -> tuple[str, bool]:
+        """Single entry point for prompt-side memory (memory v2 §3.2).
+
+        Returns ``(narrative, truncated)``. Priority sections
+        (:data:`~.constants.PRIORITY_SECTIONS`) are always included in full;
+        remaining sections contribute newest-first until ``budget_chars`` is
+        exhausted — items that no longer fit are dropped whole, never cut
+        mid-sentence. ``budget_chars=None`` means unlimited.
+        """
+        from django.utils import timezone as django_timezone
+
         items = self.list_items()
         if not items:
-            return ""
+            return "", False
+
         by_section: dict[str, list[CharacterMemoryItem]] = {}
         for item in items:
             by_section.setdefault(item.section, []).append(item)
-        lines = ["# Long-Term Memory (User Model)"]
-        for section, section_items in by_section.items():
-            lines.append("")
-            lines.append(f"## {section}")
-            for item in section_items:
-                lines.append(f"- {item.description}")
-        return "\n".join(lines).strip() + "\n"
+
+        def _recency(item: CharacterMemoryItem):
+            return item.updated_at or item.created_at or django_timezone.now()
+
+        priority_present = [s for s in PRIORITY_SECTIONS if s in by_section]
+        remaining_sections = sorted(
+            (s for s in by_section if s not in PRIORITY_SECTIONS),
+            key=lambda s: max(_recency(i) for i in by_section[s]),
+            reverse=True,
+        )
+
+        header = "# Long-Term Memory (User Model)"
+        lines: list[str] = [header]
+        used = len(header)
+        truncated = False
+
+        for section in priority_present + remaining_sections:
+            section_lines = ["", f"## {section}"]
+            section_cost = sum(len(line) for line in section_lines)
+            for item in sorted(by_section[section], key=_recency, reverse=True):
+                entry = f"- {item.description}"
+                projected = used + section_cost + len(entry) + 1
+                if budget_chars is not None and section not in PRIORITY_SECTIONS and projected > budget_chars:
+                    truncated = True
+                    continue
+                section_lines.append(entry)
+                section_cost += len(entry) + 1
+            if len(section_lines) > 2:
+                lines.extend(section_lines)
+                used += section_cost
+
+        return "\n".join(lines).strip() + "\n", truncated
 
     def render_wiki_markdown(self) -> str:
         """Render ``wiki/memory.md`` for the existing MemoryExplorer VFS."""

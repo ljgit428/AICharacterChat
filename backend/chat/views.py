@@ -1,7 +1,5 @@
 import json
-import os
 
-from django.core.files import File
 from django.http import StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -45,25 +43,6 @@ from .soul import list_memory_explorer_path, read_memory_explorer_file
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _sync_character_primary_reference_file(character):
-    primary_text_asset = character.knowledge_assets.filter(
-        attachment_kind=AttachmentKind.TEXT,
-    ).order_by('sort_order', 'id').first()
-
-    if primary_text_asset and getattr(primary_text_asset, 'file', None):
-        with primary_text_asset.file.open('rb') as source_file:
-            character.file.save(
-                primary_text_asset.attachment_name or os.path.basename(primary_text_asset.file.name or ''),
-                File(source_file),
-                save=False,
-            )
-    elif character.file:
-        character.file.delete(save=False)
-        character.file = None
-
-    character.save(update_fields=['file', 'updated_at'])
 
 
 def _message_serializer(message, request):
@@ -170,7 +149,6 @@ class CharacterViewSet(viewsets.ModelViewSet):
                 )
             )
 
-        _sync_character_primary_reference_file(character)
         serializer = CharacterKnowledgeAssetSerializer(created_assets, many=True, context={'request': request})
         return Response({'assets': serializer.data}, status=status.HTTP_201_CREATED)
 
@@ -184,7 +162,6 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
         asset.file.delete(save=False)
         asset.delete()
-        _sync_character_primary_reference_file(character)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='memory')
@@ -214,6 +191,13 @@ class CharacterViewSet(viewsets.ModelViewSet):
         view.permission_classes = self.permission_classes
         view.request = request
         return view.merge(request=request, pk=pk)
+
+    @action(detail=True, methods=['get'], url_path='memory/narrative')
+    def memory_narrative(self, request, pk=None):
+        view = CharacterMemoryViewSet()
+        view.permission_classes = self.permission_classes
+        view.request = request
+        return view.narrative(request=request, pk=pk)
 
     @action(
         detail=True,
@@ -387,6 +371,29 @@ class UserProfileViewSet(viewsets.ViewSet):
 class WebSearchConfigurationViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
+    @action(detail=False, methods=['get'])
+    def readiness(self, request):
+        """前端提示用：联网搜索是否开启、Tavily key 是否已配置。
+
+        enabled 解析与聊天门控一致：角色三态覆盖优先，否则回退用户全局默认。
+        """
+        enabled = None
+        character_id = request.query_params.get('character')
+        if character_id:
+            try:
+                character = Character.objects.get(pk=character_id, created_by=request.user)
+                if character.enable_web_search is not None:
+                    enabled = bool(character.enable_web_search)
+            except Character.DoesNotExist:
+                pass
+        if enabled is None:
+            profile = getattr(request.user, 'profile', None)
+            enabled = bool(getattr(profile, 'default_enable_web_search', False))
+
+        config = WebSearchConfiguration.get_for_user(request.user)
+        configured = bool(config and (config.api_key or '').strip())
+        return Response({'enabled': enabled, 'configured': configured})
+
     @action(detail=False, methods=['get', 'patch'])
     def me(self, request):
         config = WebSearchConfiguration.get_for_user(request.user)
@@ -436,6 +443,10 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         if character_id:
             queryset = queryset.filter(character_id=character_id)
 
+        origin = self.request.query_params.get('origin')
+        if origin in dict(ChatSession.ORIGIN_CHOICES):
+            queryset = queryset.filter(origin=origin)
+
         return queryset.order_by('-updated_at')
 
     def perform_create(self, serializer):
@@ -448,14 +459,24 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         """Allow toggling ``is_private_mode`` from the chat composer without
-        sending every other field."""
+        sending every other field. A manually patched ``title`` marks the
+        session so the auto title generator will not overwrite it."""
         instance = self.get_object()
         if 'is_private_mode' in request.data:
             is_private_mode = self._parse_bool(request.data.get('is_private_mode'))
             instance.is_private_mode = is_private_mode
             instance.save(update_fields=['is_private_mode', 'updated_at'])
             return Response(ChatSessionSerializer(instance).data)
-        return super().partial_update(request, *args, **kwargs)
+
+        if 'title' in request.data and (request.data.get('title') or '').strip():
+            # Set the manual flag before the generic update so the auto
+            # generator can never race a just-renamed session.
+            instance.is_title_manual = True
+            instance.save(update_fields=['is_title_manual'])
+
+        super().partial_update(request, *args, **kwargs)
+        instance.refresh_from_db()
+        return Response(ChatSessionSerializer(instance, context={'request': request}).data)
 
     @staticmethod
     def _parse_bool(value):
@@ -500,6 +521,24 @@ class CharacterMemoryViewSet(viewsets.ViewSet):
             'sections': snapshot['sections'],
             'wiki_markdown': manager.render_wiki_markdown(),
             'count': sum(len(section['items']) for section in snapshot['sections']),
+        })
+
+    def narrative(self, request, pk=None):
+        """AI-view preview: the exact text injected into the system prompt
+        (memory v2 §5.3), plus whether budget trimming kicked in."""
+        from .memory.constants import STREAM_MEMORY_SECTION_LIMIT
+
+        character, manager = self._memory(request, pk)
+        narrative, truncated = manager.get_prompt_memory(
+            budget_chars=STREAM_MEMORY_SECTION_LIMIT,
+        )
+        items = manager.list_items()
+        last_updated = max((item.updated_at for item in items), default=None)
+        return Response({
+            'narrative': narrative,
+            'truncated': truncated,
+            'count': len(items),
+            'last_updated': last_updated.isoformat() if last_updated else None,
         })
 
     def create(self, request, pk=None):
@@ -704,6 +743,9 @@ class ChatViewSet(viewsets.ViewSet):
         character_id = request.data.get('character_id')
         chat_session_id = request.data.get('chat_session_id')
         start_conversation = self._parse_bool(request.data.get('start_conversation', False))
+        origin = request.data.get('origin')
+        if origin not in dict(ChatSession.ORIGIN_CHOICES):
+            origin = 'topic'
         attachments = list(request.FILES.getlist('attachments'))
         if not attachments:
             legacy_attachment = request.FILES.get('attachment')
@@ -746,13 +788,24 @@ class ChatViewSet(viewsets.ViewSet):
                 user=user,
                 character=character,
                 title=f"Chat with {character.name}",
+                origin=origin,
             )
 
         has_existing_messages = chat_session.messages.exists()
         if start_conversation and has_existing_messages:
             raise ValueError('This conversation has already started')
 
-        generate_greeting = start_conversation or not has_existing_messages
+        # A greeting is generated ONLY for an explicit start request carrying no
+        # user content. Any non-empty message/attachment is a real first turn and
+        # must be saved and answered (memory v2 §3.3: the first typed message used
+        # to be silently swallowed here, so it never reached chat history or the
+        # long-term memory extractor).
+        generate_greeting = (
+            start_conversation
+            and not message_content
+            and not attachment_payloads
+            and not has_existing_messages
+        )
         user_message = None
         if not generate_greeting:
             user_message = Message.objects.create(

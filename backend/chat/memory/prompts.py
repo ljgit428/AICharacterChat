@@ -13,6 +13,16 @@ from zoneinfo import ZoneInfo
 from ..models import CharacterMemoryItem, ChatSession, Message
 
 
+SPECIAL_SECTION_RULES = """
+特殊分区:
+- 「关系」: 此分区永远只允许一条记忆，描述用户与角色当前关系的阶段与氛围
+  （例: 已从陌生变得亲近，开始互相开玩笑）。关系发生变化时必须用 update_memory
+  更新那一条并说明原因，禁止新建第二条「关系」。
+- 「里程碑」: 只追加以绝对日期开头的共同经历（例: 2026-08-23 第一次一起看了流星雨）。
+  这是只增不减的回忆册：不得因为时间久远而删除；仅当两条确实描述同一事件时才允许 merge。
+""".strip() + "\n\n"
+
+
 CORE_PRINCIPLES = """\
 核心原则:
 0. 对于记忆来讲，主观印象第一，客观事实第二。科技、事实等固定的客观事实必须简洁简练；用户的喜好等主观印象可以相对正常地描写。每条描述最长不超过 200 字符（含标点）。
@@ -22,6 +32,7 @@ CORE_PRINCIPLES = """\
 4. 用第三人称自然语言描述。
 5. 禁止使用"今天""明天""昨天""下周"等相对时间词汇，必须使用绝对日期写入记忆。已提供当前日期。
 6. 少即是多。任何条目不能过长。被系统驳回的过长条目请主动拆分。
+7. 平台故障不是事实：网络检索失败、接口报错、功能未配置等只是临时的技术状态，与用户和剧情无关，绝对不要为它们创建或更新任何记忆条目。
 """.strip()
 
 
@@ -33,7 +44,7 @@ COLD_START_SYSTEM = """\
 - 无需调用 update_memory 或 delete_memory（冷启动时没有旧记忆）
 
 由于当前记忆为空，你必须创建新分区（1-4 字中文名词，例: 身份, 品味, 瞬间, 工作）。
-""" + CORE_PRINCIPLES
+""" + SPECIAL_SECTION_RULES + CORE_PRINCIPLES
 
 
 UPDATE_SYSTEM = """\
@@ -46,7 +57,7 @@ UPDATE_SYSTEM = """\
 - 相似条目用 merge_memories 合并（id1 + id2 → id1 保留，合并两边的 history）
 
 记忆分区：优先使用已有分区；若记忆不适合任何已有分区或用户明确要求新建，可创建新分区（1-4 字中文名词）。
-""" + CORE_PRINCIPLES
+""" + SPECIAL_SECTION_RULES + CORE_PRINCIPLES
 
 
 def _format_current_items(items: Iterable[CharacterMemoryItem]) -> str:
@@ -95,6 +106,30 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _format_research_for_prompt(research_payload: dict | None) -> str:
+    """把本轮联网检索结果压缩成记忆提取可读的段落（memory v2 §搜索×记忆）。"""
+    if not research_payload:
+        return ""
+    items = research_payload.get("items") or []
+    query = (research_payload.get("query") or "").strip()
+    error = (research_payload.get("error") or "").strip()
+    if error or not items:
+        # 检索失败属于平台临时状态。错误细节一旦进入提取 prompt，就会被
+        # 误存成"角色的功能坏了"这类伪事实（2026-08-24 玛丽实测案例），
+        # 所以这里选择整段省略，交给核心原则里的平台故障禁令兜底。
+        return ""
+    lines = ["### WEB RESEARCH THIS TURN"]
+    if query:
+        lines.append(f"检索词: {query}")
+    for index, item in enumerate(items[:3], start=1):
+        title = (item.get("title") or "Untitled").strip()
+        snippet = (item.get("snippet") or "").strip()
+        lines.append(f"{index}. {title} — {snippet[:160]}")
+    lines.append("若检索内容揭示了用户的持久事实（喜好、计划、身份等），可按核心原则记录；"
+                 "纯时效性新闻或与用户无关的内容应丢弃。")
+    return "\n".join(lines)
+
+
 def build_memory_extraction_prompt(
     *,
     character_name: str,
@@ -102,6 +137,7 @@ def build_memory_extraction_prompt(
     chat_session: ChatSession | None,
     new_message: Message | None,
     timezone_name: str = "UTC",
+    research_payload: dict | None = None,
 ) -> dict[str, str]:
     """Build the (system, user) tuple for the extraction call."""
     items_list = list(items)
@@ -110,6 +146,10 @@ def build_memory_extraction_prompt(
 
     user_sections: list[str] = ["### CURRENT MEMORY (read-only snapshot)"]
     user_sections.append(_format_current_items(items_list))
+    research_section = _format_research_for_prompt(research_payload)
+    if research_section:
+        user_sections.append("")
+        user_sections.append(research_section)
     if chat_session:
         user_sections.append("")
         user_sections.append("### NEW TURN")

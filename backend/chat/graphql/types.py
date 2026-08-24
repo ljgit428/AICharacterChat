@@ -3,7 +3,7 @@ from typing import List, Optional
 import os
 from asgiref.sync import sync_to_async
 import strawberry_django
-from chat.models import Character, ChatSession, CharacterKnowledgeAsset
+from chat.models import AttachmentKind, Character, ChatSession, CharacterKnowledgeAsset
 
 
 @strawberry.type
@@ -26,7 +26,9 @@ class CharacterKnowledgeAssetInput:
 @strawberry.input
 class CharacterInput:
     name: str
-    avatar_url: str
+    # 头像在 UI 上是可选项（“可选，但强烈建议添加”）；之前是必填 String!，
+    # 与产品文案矛盾（2026-08-24 GUI 导入实测发现）。
+    avatar_url: Optional[str] = ""
     description: str
     user_address: Optional[str] = ""
     personality: Optional[str] = ""
@@ -40,6 +42,8 @@ class CharacterInput:
     background_file_url: Optional[str] = ""
     background_file_name: Optional[str] = ""
     background_files: Optional[List[CharacterKnowledgeAssetInput]] = None
+    # 角色级联网搜索三态开关：None=跟随用户全局设置
+    enable_web_search: Optional[bool] = None
 
 
 @strawberry.type
@@ -58,6 +62,12 @@ def _serialize_character_knowledge_asset(asset: CharacterKnowledgeAsset) -> Char
         file_mime_type=asset.attachment_mime_type or "",
     )
 
+
+def _primary_text_knowledge_asset(character: Character) -> Optional[CharacterKnowledgeAsset]:
+    return character.knowledge_assets.filter(
+        attachment_kind=AttachmentKind.TEXT,
+    ).order_by('sort_order', 'id').first()
+
 @strawberry_django.type(Character)
 class CharacterType:
     id: strawberry.ID
@@ -73,21 +83,35 @@ class CharacterType:
     affiliation: str
     system_prompt_preview: str
     tags: List[str]
+    # 角色级联网搜索三态开关（None=跟随用户全局设置）
+    enable_web_search: Optional[bool]
 
     @strawberry.field
-    def background_file_url(self) -> Optional[str]:
-        if not self.file:
-            return None
-        try:
-            return self.file.url
-        except ValueError:
-            return None
+    async def background_file_url(self) -> Optional[str]:
+        asset = await sync_to_async(_primary_text_knowledge_asset)(self)
+        if asset and asset.file:
+            try:
+                return asset.file.url
+            except ValueError:
+                return None
+
+        # Legacy fallback for characters that only carry a `Character.file` row.
+        if self.file:
+            try:
+                return self.file.url
+            except ValueError:
+                return None
+        return None
 
     @strawberry.field
-    def background_file_name(self) -> Optional[str]:
-        if not self.file:
-            return None
-        return os.path.basename(self.file.name or "")
+    async def background_file_name(self) -> Optional[str]:
+        asset = await sync_to_async(_primary_text_knowledge_asset)(self)
+        if asset and asset.file:
+            return asset.attachment_name or os.path.basename(asset.file.name or "")
+
+        if self.file:
+            return os.path.basename(self.file.name or "")
+        return None
 
     @strawberry.field
     async def knowledge_assets(self) -> List[CharacterKnowledgeAssetType]:

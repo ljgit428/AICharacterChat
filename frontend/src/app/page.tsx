@@ -4,11 +4,9 @@ import { Suspense, useState, useEffect, useCallback } from 'react';
 import { useDispatch } from 'react-redux';
 import { useSearchParams, useRouter } from 'next/navigation';
 import {
-  Home,
   Zap,
   PlusCircle,
-  KeyRound,
-  UserCircle2,
+  Settings,
   ChevronRight,
   ChevronLeft,
   Menu,
@@ -22,24 +20,24 @@ import {
   Brain,
   Globe,
   LogOut,
+  Pencil,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
 import ChatInterface from '@/components/ChatInterface';
-import ModelApiSettingsPanel from '@/components/ModelApiSettingsPanel';
-import UserSettingsPanel from '@/components/UserSettingsPanel';
+import ModeSwitch from '@/components/ModeSwitch';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import ResearchPanel from '@/components/ResearchPanel';
 import { useI18n } from '@/i18n/provider';
-import { clearChat } from '@/store/chatSlice';
+import { clearChat, updateChatSession } from '@/store/chatSlice';
 import { apiService, getAuthToken, removeAuthToken } from '@/utils/api';
 
 type RightPanelKind = 'soul' | 'memory' | 'research';
-import { ChatSession, ModelConfig, ModelRoleAssignments, UserProfile, WebSearchConfig } from '@/types';
+import { ChatSession, ModelConfig, ModelRoleAssignments, UserProfile } from '@/types';
 import { APP_NAME, APP_VERSION } from '@/constants';
 
-type ViewState = 'home' | 'playground' | 'history_all' | 'create' | 'model_settings' | 'user_settings';
+type ViewState = 'home' | 'playground' | 'history_all' | 'create';
 
 interface ChatHistoryItem {
   id: string;
@@ -64,21 +62,16 @@ function AIStudioLayoutContent() {
   const [recentChats, setRecentChats] = useState<ChatHistoryItem[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [modelRoles, setModelRoles] = useState<ModelRoleAssignments | null>(null);
-  const [loadingModelRoles, setLoadingModelRoles] = useState(true);
   const [loadingChats, setLoadingChats] = useState(true);
-  const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
-  const [loadingUserProfile, setLoadingUserProfile] = useState(true);
-  const [loadingWebSearchConfig, setLoadingWebSearchConfig] = useState(true);
   const [chatError, setChatError] = useState<string | null>(null);
-  const [modelConfigError, setModelConfigError] = useState<string | null>(null);
-  const [userProfileError, setUserProfileError] = useState<string | null>(null);
-  const [webSearchConfigError, setWebSearchConfigError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
   const [authTokenPresent, setAuthTokenPresent] = useState(false);
 
   const [historyPage, setHistoryPage] = useState(1);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
+  const [renamingChat, setRenamingChat] = useState<ChatHistoryItem | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 10;
 
   const dispatch = useDispatch();
@@ -122,7 +115,7 @@ function AIStudioLayoutContent() {
   const fetchChatSessions = useCallback(async () => {
     try {
       setLoadingChats(true);
-      const response = await apiService.getChatSessions();
+      const response = await apiService.getChatSessions(undefined, 'topic');
 
       if (response.error) {
         setChatError(response.error);
@@ -143,90 +136,46 @@ function AIStudioLayoutContent() {
 
   const fetchModelConfigs = useCallback(async () => {
     try {
-      setLoadingModelConfigs(true);
       const response = await apiService.getModelConfigs();
 
-      if (response.error) {
-        setModelConfigError(response.error);
-        return;
+      if (!response.error) {
+        setModelConfigs(response.data || []);
       }
-
-      setModelConfigError(null);
-      setModelConfigs(response.data || []);
     } catch (err) {
       console.error('Failed to fetch model configurations:', err);
-      setModelConfigError(messages.modelApi.failedToLoadModelConfigurations);
-    } finally {
-      setLoadingModelConfigs(false);
     }
-  }, [messages.modelApi.failedToLoadModelConfigurations]);
+  }, []);
 
   const fetchModelRoles = useCallback(async () => {
     try {
-      setLoadingModelRoles(true);
       const response = await apiService.getModelRoles();
 
-      if (response.error) {
-        setModelConfigError(response.error);
-        return;
+      if (!response.error) {
+        setModelRoles(response.data || null);
       }
-
-      setModelRoles(response.data || null);
     } catch (err) {
       console.error('Failed to fetch model role assignments:', err);
-      setModelConfigError(messages.modelApi.failedToLoadRoles);
-    } finally {
-      setLoadingModelRoles(false);
     }
-  }, [messages.modelApi.failedToLoadRoles]);
+  }, []);
 
   const fetchUserProfile = useCallback(async () => {
     try {
-      setLoadingUserProfile(true);
       const response = await apiService.getUserProfile();
 
-      if (response.error) {
-        setUserProfileError(response.error);
-        return;
+      if (!response.error) {
+        setUserProfile(response.data || null);
       }
-
-      setUserProfileError(null);
-      setUserProfile(response.data || null);
     } catch (err) {
       console.error('Failed to fetch user profile:', err);
-      setUserProfileError(messages.user.failedToLoad);
-    } finally {
-      setLoadingUserProfile(false);
     }
-  }, [messages.user.failedToLoad]);
-
-  const fetchWebSearchConfig = useCallback(async () => {
-    try {
-      setLoadingWebSearchConfig(true);
-      const response = await apiService.getWebSearchConfig();
-
-      if (response.error) {
-        setWebSearchConfigError(response.error);
-        return;
-      }
-
-      setWebSearchConfigError(null);
-      setWebSearchConfig(response.data || null);
-    } catch (err) {
-      console.error('Failed to fetch web search configuration:', err);
-      setWebSearchConfigError(messages.modelApi.failedToLoadWebSearchConfiguration);
-    } finally {
-      setLoadingWebSearchConfig(false);
-    }
-  }, [messages.modelApi.failedToLoadWebSearchConfiguration]);
+  }, []);
 
   useEffect(() => {
     fetchChatSessions();
     fetchModelConfigs();
     fetchModelRoles();
     fetchUserProfile();
-    fetchWebSearchConfig();
-  }, [fetchChatSessions, fetchModelConfigs, fetchModelRoles, fetchUserProfile, fetchWebSearchConfig]);
+  }, [fetchChatSessions, fetchModelConfigs, fetchModelRoles, fetchUserProfile]);
 
   useEffect(() => {
     if (userProfile?.interfaceLanguage) {
@@ -291,7 +240,7 @@ function AIStudioLayoutContent() {
 
     try {
       await apiService.deleteChatSession(sessionId);
-      const response = await apiService.getChatSessions();
+      const response = await apiService.getChatSessions(undefined, 'topic');
 
       if (response.data) {
         setRecentChats(formatChatSessions(response.data));
@@ -299,6 +248,42 @@ function AIStudioLayoutContent() {
     } catch (error) {
       console.error("Failed to delete session:", error);
       alert(messages.shell.failedToDeleteSession);
+    }
+  };
+
+  const handleRenameSession = (e: React.MouseEvent, chat: ChatHistoryItem) => {
+    e.stopPropagation();
+    setRenameDraft(chat.title);
+    setRenameError(null);
+    setRenamingChat(chat);
+  };
+
+  const submitRename = async () => {
+    const chat = renamingChat;
+    const trimmed = renameDraft.trim();
+    if (!chat) {
+      return;
+    }
+
+    if (!trimmed || trimmed === chat.title) {
+      setRenamingChat(null);
+      return;
+    }
+
+    try {
+      const response = await apiService.updateChatSession(chat.id, { title: trimmed });
+      if (response.error || !response.data) {
+        throw new Error(response.error || messages.shell.renameTopicFailed);
+      }
+
+      if (selectedSessionId === chat.id) {
+        dispatch(updateChatSession({ title: response.data.title }));
+      }
+      await fetchChatSessions();
+      setRenamingChat(null);
+    } catch (error) {
+      console.error("Failed to rename session:", error);
+      setRenameError(messages.shell.renameTopicFailed);
     }
   };
 
@@ -321,10 +306,6 @@ function AIStudioLayoutContent() {
     if (typeof window !== 'undefined') {
       window.location.reload();
     }
-  };
-
-  const openModelSettings = () => {
-    setCurrentView('model_settings');
   };
 
   const normalizedHistorySearchQuery = historySearchQuery.trim().toLowerCase();
@@ -352,9 +333,10 @@ function AIStudioLayoutContent() {
       <aside
         className={`${isSidebarOpen ? 'w-[300px]' : 'w-0'} flex-shrink-0 overflow-hidden border-r border-white/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(244,247,250,0.92))] backdrop-blur-xl transition-all duration-300 ease-in-out`}
       >
-        <div className="flex h-20 flex-shrink-0 items-center border-b border-slate-200/70 px-5">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
+        <div className="flex h-[60px] flex-shrink-0 items-center justify-between gap-2 border-b border-slate-200/70 px-4">
+          <ModeSwitch active="topic" />
+          <div className="min-w-0 text-right">
+            <div className="flex items-center justify-end gap-2">
               <span className="rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-white">
                 {messages.shell.studioBadge}
               </span>
@@ -362,27 +344,14 @@ function AIStudioLayoutContent() {
                 {APP_VERSION}
               </span>
             </div>
-            <div className="font-semibold text-xl tracking-tight text-slate-900">
+            <div className="font-semibold text-lg tracking-tight text-slate-900">
               <span className="text-sky-700">{APP_NAME}</span>
             </div>
-            <p className="text-xs text-slate-500">{messages.shell.characterWorkbenchArchive}</p>
           </div>
         </div>
-        <div className="flex-1 space-y-6 overflow-y-auto px-4 py-5">
-          <div className="space-y-1">
-            <NavItem
-              icon={<Home size={18} />}
-              label={messages.shell.home}
-              active={currentView === 'home'}
-              onClick={() => setCurrentView('home')}
-            />
-          </div>
+        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
           <div className="rounded-[1.5rem] border border-white/70 bg-white/60 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.06)]">
-            <div className="mb-2 flex items-center justify-between px-1">
-              <div>
-                <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.sessions}</p>
-              </div>
-            </div>
+            <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.sessions}</p>
             <div className="mb-1">
               <NavItem
                 icon={<Zap size={18} />}
@@ -421,6 +390,13 @@ function AIStudioLayoutContent() {
                     <span className="truncate">{chat.title}</span>
                   </button>
                   <button
+                    onClick={(e) => handleRenameSession(e, chat)}
+                    className="absolute right-7 rounded-lg p-1 text-slate-400 opacity-0 transition-all hover:bg-sky-50 hover:text-sky-600 group-hover:opacity-100"
+                    title={messages.shell.renameTopic}
+                  >
+                    <Pencil size={12} />
+                  </button>
+                  <button
                     onClick={(e) => handleDeleteSession(e, chat.id)}
                     className="absolute right-1 rounded-lg p-1 text-slate-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100"
                     title={messages.shell.deleteChat}
@@ -443,12 +419,9 @@ function AIStudioLayoutContent() {
                 <ArrowRight size={14} className={`transition-opacity ${currentView === 'history_all' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
               </button>
             </div>
-          </div>
-          <div className="rounded-[1.5rem] border border-white/70 bg-white/50 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.04)]">
-            <div className="mb-2 px-1">
-              <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.workspace}</p>
-            </div>
-            <div className="space-y-1">
+            <div className="mt-3 border-t border-slate-200/70 pt-3">
+              <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.workspace}</p>
+              <div className="space-y-1">
               <button
                 type="button"
                 onClick={() => router.push('/memory')}
@@ -464,22 +437,16 @@ function AIStudioLayoutContent() {
                 onClick={() => setCurrentView('create')}
               />
               <NavItem
-                icon={<KeyRound size={18} />}
-                label={messages.shell.modelApiSettings}
-                active={currentView === 'model_settings'}
-                onClick={openModelSettings}
+                icon={<Settings size={18} />}
+                label={messages.shell.settings}
+                active={false}
+                onClick={() => router.push('/settings')}
                 badge={hasModelConfigs ? messages.shell.modelApiReady : messages.shell.modelApiRequired}
                 badgeTone={hasModelConfigs ? 'ready' : 'warning'}
               />
-              <NavItem
-                icon={<UserCircle2 size={18} />}
-                label={messages.shell.userSettings}
-                active={currentView === 'user_settings'}
-                onClick={() => setCurrentView('user_settings')}
-              />
+              </div>
             </div>
           </div>
-
         </div>
       </aside>
       <div className="flex min-w-0 flex-1">
@@ -507,8 +474,6 @@ function AIStudioLayoutContent() {
                 {currentView === 'playground' && messages.shell.playgroundChat}
                 {currentView === 'create' && messages.shell.buildCreateNew}
                 {currentView === 'history_all' && messages.shell.historyAll}
-                {currentView === 'model_settings' && messages.shell.modelApiSettingsHeader}
-                {currentView === 'user_settings' && messages.shell.userSettingsHeader}
                 </div>
                 <div className="text-xs text-slate-400">
                   {selectedCharacterId ? messages.shell.focusedOnOneActiveCharacterSession : messages.shell.browseCharactersSessionsAndSettings}
@@ -615,6 +580,62 @@ function AIStudioLayoutContent() {
           </div>
         )}
       </div>
+
+      {renamingChat && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+          onClick={() => setRenamingChat(null)}
+          role="presentation"
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={messages.shell.renameTopic}
+          >
+            <h3 className="text-base font-semibold text-slate-900">{messages.shell.renameTopic}</h3>
+            <input
+              autoFocus
+              type="text"
+              value={renameDraft}
+              onChange={(event) => {
+                setRenameDraft(event.target.value);
+                setRenameError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  void submitRename();
+                } else if (event.key === 'Escape') {
+                  setRenamingChat(null);
+                }
+              }}
+              placeholder={messages.shell.renameTopicPlaceholder}
+              className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            />
+            {renameError && (
+              <p className="mt-2 text-xs text-rose-600">{renameError}</p>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRenamingChat(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-50"
+              >
+                {messages.shell.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitRename()}
+                disabled={!renameDraft.trim()}
+                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {messages.shell.save}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -648,34 +669,6 @@ function AIStudioLayoutContent() {
               <CreateCharacterSimplifiedForm onCancel={() => setCurrentView('playground')} />
             </div>
           </div>
-        );
-
-      case 'model_settings':
-        return (
-          <ModelApiSettingsPanel
-            modelConfigs={modelConfigs}
-            modelRoles={modelRoles}
-            webSearchConfig={webSearchConfig}
-            loading={loadingModelConfigs}
-            loadingRoles={loadingModelRoles}
-            loadingWebSearchConfig={loadingWebSearchConfig}
-            error={modelConfigError}
-            webSearchError={webSearchConfigError}
-            onRefresh={fetchModelConfigs}
-            onRefreshModelRoles={fetchModelRoles}
-            onRefreshWebSearchConfig={fetchWebSearchConfig}
-          />
-        );
-
-      case 'user_settings':
-        return (
-          <UserSettingsPanel
-            profile={userProfile}
-            loading={loadingUserProfile}
-            error={userProfileError}
-            onRefresh={fetchUserProfile}
-            onOpenModelSettings={openModelSettings}
-          />
         );
 
       case 'history_all':
@@ -764,6 +757,13 @@ function AIStudioLayoutContent() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2 border-l border-slate-100 pl-4">
+                          <button
+                            onClick={(e) => handleRenameSession(e, chat)}
+                            className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                            title={messages.shell.renameTopic}
+                          >
+                            <Pencil size={18} />
+                          </button>
                           <button
                             onClick={(e) => handleDeleteSession(e, chat.id)}
                             className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600"
@@ -886,7 +886,7 @@ function AIStudioLayoutContent() {
                   {messages.shell.goToPlayground}
                 </button>
                 {!hasModelConfigs && (
-                  <button onClick={openModelSettings} className="rounded-xl border border-amber-200 bg-amber-50 px-6 py-3 font-medium text-amber-800 transition-colors hover:bg-amber-100">
+                  <button onClick={() => router.push('/settings')} className="rounded-xl border border-amber-200 bg-amber-50 px-6 py-3 font-medium text-amber-800 transition-colors hover:bg-amber-100">
                     {messages.shell.configureModelApi}
                   </button>
                 )}

@@ -3,7 +3,7 @@ interface ApiResponse<T> {
   error?: string;
 }
 
-import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemorySnapshot, Message, MessageAttachment, ResearchPayload, UserProfile } from '@/types';
+import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
 import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
@@ -19,6 +19,7 @@ interface ApiCharacter {
   appearance: string;
   response_guidelines: string;
   avatar_url: string;
+  enable_web_search?: boolean | null;
   file: string;
   affiliation: string;
   disabled_states?: {
@@ -37,6 +38,7 @@ interface ApiSession {
   character: number | ApiCharacter;
   last_response_latency_ms?: number | null;
   is_private_mode?: boolean;
+  origin?: string;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +50,7 @@ interface ApiModelConfig {
   model_name: string;
   api_key: string;
   base_url?: string;
+  context_window?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -74,6 +77,17 @@ interface ApiMessage {
     }>;
     error?: string;
   };
+  thinking?: string | null;
+  tool_calls?: Array<{
+    tool: string;
+    arguments?: Record<string, unknown>;
+  }>;
+  token_usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cached_tokens?: number;
+  } | null;
   file_uri?: string | null;
   file_name?: string | null;
   file_preview_url?: string | null;
@@ -215,12 +229,43 @@ function normalizeMessage(apiData: ApiMessage): Message {
     senderAvatarUrl: apiData.sender_avatar_url,
     senderType: apiData.sender_type,
     researchPayload: normalizeResearchPayload(apiData.research_payload),
+    thinking: apiData.thinking || '',
+    toolCalls: normalizeToolCalls(apiData.tool_calls),
+    tokenUsage: normalizeTokenUsage(apiData.token_usage),
     attachments,
     fileUri: primaryAttachment?.fileUri || apiData.file_uri || undefined,
     fileName: primaryAttachment?.fileName || apiData.file_name || undefined,
     filePreviewUrl: primaryAttachment?.filePreviewUrl || apiData.file_preview_url || undefined,
     fileType: primaryAttachment?.fileType || apiData.file_type || undefined,
     fileMimeType: primaryAttachment?.fileMimeType || apiData.file_mime_type || undefined,
+  };
+}
+
+function normalizeToolCalls(apiData?: ApiMessage['tool_calls']): ToolCallInfo[] {
+  return (apiData || [])
+    .filter((call) => call?.tool)
+    .map((call) => ({
+      tool: call.tool,
+      arguments: call.arguments || {},
+    }));
+}
+
+export function normalizeTokenUsage(apiData?: ApiMessage['token_usage']): TokenUsage | null {
+  if (!apiData) {
+    return null;
+  }
+
+  const promptTokens = apiData.prompt_tokens ?? 0;
+  const completionTokens = apiData.completion_tokens ?? 0;
+  if (!promptTokens && !completionTokens && !apiData.total_tokens) {
+    return null;
+  }
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: apiData.total_tokens ?? (promptTokens + completionTokens),
+    cachedTokens: Math.min(apiData.cached_tokens ?? 0, promptTokens),
   };
 }
 
@@ -335,6 +380,7 @@ function normalizeModelConfig(apiData: ApiModelConfig): ModelConfig {
     modelName: apiData.model_name,
     apiKey: apiData.api_key,
     baseUrl: apiData.base_url || '',
+    contextWindow: apiData.context_window ?? null,
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
   };
@@ -361,6 +407,7 @@ function normalizeSession(
     lastResponseLatencyMs: apiData.last_response_latency_ms ?? null,
     character,
     isPrivateMode: apiData.is_private_mode ?? false,
+    origin: apiData.origin || 'topic',
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
   };
@@ -424,6 +471,7 @@ interface SendMessageRequest {
   character_id: string;
   chat_session_id?: string;
   start_conversation?: boolean;
+  origin?: 'topic' | 'chat';
   attachment?: File | null;
   attachments?: File[];
 }
@@ -434,6 +482,7 @@ interface CreateModelConfigRequest {
   model_name: string;
   api_key: string;
   base_url?: string;
+  context_window?: number | null;
   is_default?: boolean;
 }
 
@@ -513,6 +562,20 @@ interface StreamDoneEvent {
   provider?: ModelProvider;
   model_name?: string;
   research_payload?: ApiMessage['research_payload'];
+  thinking?: string | null;
+  tool_calls?: ApiMessage['tool_calls'];
+  token_usage?: ApiMessage['token_usage'];
+}
+
+interface StreamThinkingEvent {
+  type: 'thinking';
+  content: string;
+}
+
+interface StreamToolEvent {
+  type: 'tool';
+  tool: string;
+  arguments?: Record<string, unknown>;
 }
 
 interface StreamErrorEvent {
@@ -520,7 +583,7 @@ interface StreamErrorEvent {
   error: string;
 }
 
-type StreamMessageEvent = StreamChunkEvent | StreamSessionEvent | StreamDoneEvent | StreamErrorEvent;
+type StreamMessageEvent = StreamChunkEvent | StreamSessionEvent | StreamDoneEvent | StreamThinkingEvent | StreamToolEvent | StreamErrorEvent;
 
 function buildApiUrl(endpoint: string): string {
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
@@ -662,8 +725,11 @@ class ApiService {
     return { data: undefined };
   }
 
-  async getChatSessions(characterId?: string): Promise<ApiResponse<ChatSession[]>> {
-    const params = characterId ? `?character_id=${characterId}` : '';
+  async getChatSessions(characterId?: string, origin?: 'topic' | 'chat'): Promise<ApiResponse<ChatSession[]>> {
+    const queryParams: string[] = [];
+    if (characterId) queryParams.push(`character_id=${characterId}`);
+    if (origin) queryParams.push(`origin=${origin}`);
+    const params = queryParams.length ? `?${queryParams.join('&')}` : '';
     const response = await this.request<ApiSession[]>(`/sessions${params}`);
 
     if (response.data) {
@@ -840,6 +906,7 @@ class ApiService {
           formData.append('character_id', data.character_id);
           if (data.chat_session_id) formData.append('chat_session_id', data.chat_session_id);
           if (data.start_conversation !== undefined) formData.append('start_conversation', String(data.start_conversation));
+          if (data.origin) formData.append('origin', data.origin);
           attachments.forEach((attachment) => formData.append('attachments', attachment));
           return formData;
         })()
@@ -848,6 +915,7 @@ class ApiService {
           character_id: parseInt(data.character_id),
           chat_session_id: data.chat_session_id ? parseInt(data.chat_session_id) : undefined,
           start_conversation: data.start_conversation,
+          origin: data.origin,
         });
 
     return this.request('/chat/send_message', {
@@ -860,8 +928,9 @@ class ApiService {
     data: SendMessageRequest,
     handlers: {
       onEvent: (event: StreamMessageEvent) => void;
-    }
-  ): Promise<ApiResponse<{ chat_session_id?: string }>> {
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<ApiResponse<{ chat_session_id?: string }> & { aborted?: boolean }> {
     try {
       const token = getAuthToken();
       const attachments = data.attachments?.length
@@ -877,6 +946,7 @@ class ApiService {
             formData.append('character_id', data.character_id);
             if (data.chat_session_id) formData.append('chat_session_id', data.chat_session_id);
             if (data.start_conversation !== undefined) formData.append('start_conversation', String(data.start_conversation));
+            if (data.origin) formData.append('origin', data.origin);
             attachments.forEach((attachment) => formData.append('attachments', attachment));
             return formData;
           })()
@@ -885,6 +955,7 @@ class ApiService {
             character_id: parseInt(data.character_id),
             chat_session_id: data.chat_session_id ? parseInt(data.chat_session_id) : undefined,
             start_conversation: data.start_conversation,
+            origin: data.origin,
           });
 
       const response = await fetch(buildApiUrl('/chat/stream_message'), {
@@ -894,6 +965,7 @@ class ApiService {
           ...(token ? { Authorization: `Token ${token}` } : {}),
         },
         body,
+        signal: options?.signal,
       });
 
       if (!response.ok) {
@@ -945,6 +1017,11 @@ class ApiService {
 
       return { data: { chat_session_id: chatSessionId } };
     } catch (error) {
+      if (options?.signal?.aborted) {
+        // Deliberate stop (natural-chat spec §3.3): not an error. Whatever
+        // content already streamed stays on screen via the caller.
+        return { data: {}, aborted: true };
+      }
       console.error('Streaming request failed:', error);
       return { error: error instanceof Error ? error.message : 'Unknown error' };
     }
@@ -1218,6 +1295,31 @@ class ApiService {
         count: response.data.count || 0,
       },
     };
+  }
+
+  async getMemoryNarrative(characterId: string): Promise<ApiResponse<MemoryNarrative>> {
+    const response = await this.request<{
+      narrative: string;
+      truncated: boolean;
+      count: number;
+      last_updated: string | null;
+    }>(`/characters/${characterId}/memory/narrative`);
+    if (!response.data) {
+      return { data: undefined };
+    }
+    return {
+      data: {
+        narrative: response.data.narrative || '',
+        truncated: Boolean(response.data.truncated),
+        count: response.data.count || 0,
+        lastUpdated: response.data.last_updated,
+      },
+    };
+  }
+
+  async getWebSearchReadiness(characterId?: string): Promise<ApiResponse<{ enabled: boolean; configured: boolean }>> {
+    const query = characterId ? `?character=${encodeURIComponent(characterId)}` : '';
+    return this.request<{ enabled: boolean; configured: boolean }>(`/web-search-config/readiness${query}`);
   }
 
   async createMemoryEntry(characterId: string, section: string, description: string, reason?: string): Promise<ApiResponse<MemoryEntry>> {

@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Character, Message, MessageAttachment, RootState } from '@/types';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Character, Message, MessageAttachment, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { Expand, FileText, ImageIcon, Music, Paperclip, Sparkles, Video, X } from 'lucide-react';
+import { BrainCircuit, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
+import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
 
@@ -14,6 +15,15 @@ interface ImmersiveChatWindowProps {
   currentUserLabel: string;
   attachmentSupport: AttachmentSupport;
   localizedMediaMode?: (mode: MediaHandlingMode) => string;
+  contextWindowTokens?: number | null;
+  /** Natural-chat spec §2: aborts the in-flight generation. */
+  onStop?: () => void;
+  /** Texts queued while a reply was streaming; rendered as pending chips. */
+  pendingQueueTexts?: string[];
+  /** One-line notice (e.g. "Memory +2") shown above the composer. */
+  memoryNotice?: string;
+  /** 联网搜索已开启但未配置 key 时的一次性提示（memory/search v2）。 */
+  webSearchHint?: string;
 }
 
 export interface PendingAttachment {
@@ -28,6 +38,50 @@ interface PreviewAttachment {
   fileType: AttachmentKind;
   src: string;
   href: string;
+}
+
+// Context-window denominator for the composer usage ring. Not stored per model
+// yet, so this is a visual estimate anchored at the common 128K floor.
+const CONTEXT_WINDOW_ASSUMPTION = 128_000;
+
+function ComposerContextRing({
+  progress,
+  hoverSections,
+}: {
+  progress: number;
+  hoverSections: Array<{ label: string; detail: string }>;
+}) {
+  const radius = 15;
+  const circumference = 2 * Math.PI * radius;
+  const clamped = Math.min(Math.max(progress, 0), 1);
+  const ariaSummary = hoverSections.map((section) => `${section.label} ${section.detail}`).join('；');
+
+  return (
+    <div className="group/ring relative flex h-9 w-9 flex-shrink-0 items-center justify-center" aria-label={ariaSummary}>
+      <svg viewBox="0 0 36 36" className="h-7 w-7 -rotate-90">
+        <circle cx="18" cy="18" r={radius} fill="none" stroke="#e2e8f0" strokeWidth="2.5" />
+        <circle
+          cx="18"
+          cy="18"
+          r={radius}
+          fill="none"
+          stroke="#0ea5e9"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - clamped)}
+        />
+      </svg>
+      <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-max max-w-[16rem] -translate-x-1/2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-left shadow-[0_12px_36px_rgba(15,23,42,0.14)] group-hover/ring:block">
+        {hoverSections.map((section) => (
+          <div key={section.label} className="mb-1.5 last:mb-0">
+            <p className="text-xs font-semibold text-slate-800">{section.label}</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-slate-500">{section.detail}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function buildPendingAttachmentId(file: File, kind: AttachmentKind) {
@@ -82,6 +136,11 @@ export default function ImmersiveChatWindow({
   currentUserLabel,
   attachmentSupport,
   localizedMediaMode,
+  contextWindowTokens,
+  onStop,
+  pendingQueueTexts,
+  memoryNotice,
+  webSearchHint,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -95,6 +154,26 @@ export default function ImmersiveChatWindow({
   const [previewAttachment, setPreviewAttachment] = useState<PreviewAttachment | null>(null);
   const messages = useSelector((state: RootState) => state.chat.messages);
   const character = useSelector((state: RootState) => state.chat.character);
+
+  const usageStats = useMemo(() => {
+    const withUsage = messages.filter(
+      (message) => message.role === 'assistant' && message.tokenUsage?.totalTokens
+    );
+    if (withUsage.length === 0) {
+      return null;
+    }
+
+    const promptTokens = withUsage.reduce((sum, message) => sum + (message.tokenUsage?.promptTokens || 0), 0);
+    const cachedTokens = withUsage.reduce((sum, message) => sum + (message.tokenUsage?.cachedTokens || 0), 0);
+    const latest = withUsage[withUsage.length - 1].tokenUsage!;
+    const contextTokens = latest.promptTokens + latest.completionTokens;
+    const cacheRate = promptTokens > 0 ? cachedTokens / promptTokens : 0;
+
+    return { promptTokens, cachedTokens, contextTokens, cacheRate };
+  }, [messages]);
+
+  const contextWindow = contextWindowTokens || CONTEXT_WINDOW_ASSUMPTION;
+  const isContextEstimated = !contextWindowTokens;
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
@@ -144,8 +223,10 @@ export default function ImmersiveChatWindow({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewAttachment]);
 
-  const submitMessage = () => {
-    const message = draftMessage.trim();
+  const submitMessage = (explicitText?: string) => {
+    // explicitText comes straight from the textarea element on Enter so a
+    // state flush lag can never drop a submission.
+    const message = (explicitText ?? draftMessage).trim();
     if (!message && pendingAttachments.length === 0 && !isFirstMessage) {
       return;
     }
@@ -167,7 +248,7 @@ export default function ImmersiveChatWindow({
       if (isFirstMessage) {
         return;
       }
-      submitMessage();
+      submitMessage(event.currentTarget.value);
     }
   };
 
@@ -334,67 +415,91 @@ export default function ImmersiveChatWindow({
           </div>
         ) : (
           <div className="space-y-6">
-            {groups.map((group) => (
-              <div
-                key={`${group.senderKey}-${group.messages[0].id}`}
-                className={`flex gap-3 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {group.role !== 'user' && (
-                  <div className="mt-1 flex-shrink-0">
-                    <AvatarBadge
-                      name={group.name}
-                      avatarUrl={group.avatarUrl}
-                      tone={group.role === 'assistant' ? 'character' : 'system'}
-                    />
-                  </div>
-                )}
+            {groups.map((group) => {
+              // 渲染分层（2026-08-24 交互规范）：
+              // 工具调用 = 浅色文字无气泡无头像；思考 = 虚线边框气泡无头像；
+              // 只有角色说话的内容才配头像和实线气泡。
+              const hasSpeech = (m: Message) =>
+                Boolean((m.content ?? '').trim()) || Boolean(m.attachments?.length);
+              const contentMessages = group.messages.filter(
+                (m) => group.role === 'user' || hasSpeech(m),
+              );
+              const metaMessages = group.messages.filter(
+                (m) => Boolean((m.thinking ?? '').trim()) || (m.toolCalls?.length ?? 0) > 0,
+              );
 
-                <div className={`flex max-w-[min(48rem,86vw)] flex-col ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
-                  <div className={`mb-2 flex items-center gap-2 px-1 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <span className="text-sm font-medium text-slate-700">{group.name}</span>
-                    <span className="text-xs text-slate-400">
-                      {formatTimestamp(group.messages[group.messages.length - 1].timestamp)}
-                    </span>
-                  </div>
+              return (
+                <div key={`${group.senderKey}-${group.messages[0].id}`} className="space-y-3">
+                  {metaMessages.length > 0 && (
+                    <div className="max-w-[min(48rem,86vw)] space-y-2">
+                      {metaMessages.map((message) => (
+                        <div key={`meta-${message.id}`} className="flex flex-col gap-1.5 pl-1">
+                          <MessageThinking message={message} copy={copy} />
+                          <ToolCallLines message={message} copy={copy} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
-                  <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
-                    {group.messages.map((message, index) => (
-                      <div
-                        key={message.id}
-                        className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
-                          group.role === 'user'
-                            ? 'bg-slate-900 text-white'
-                            : group.role === 'assistant'
-                              ? 'border border-white/80 bg-white/90 text-slate-800'
-                              : 'border border-amber-200/70 bg-amber-50 text-amber-900'
-                        } ${
-                          group.role === 'user'
-                            ? index === group.messages.length - 1
-                              ? 'rounded-br-md'
-                              : ''
-                            : index === group.messages.length - 1
-                              ? 'rounded-bl-md'
-                              : ''
-                        }`}
-                      >
-                        <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
-                        {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
+                  {contentMessages.length > 0 && (
+                    <div className={`flex gap-3 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      {group.role !== 'user' && (
+                        <div className="mt-1 flex-shrink-0">
+                          <AvatarBadge
+                            name={group.name}
+                            avatarUrl={group.avatarUrl}
+                            tone={group.role === 'assistant' ? 'character' : 'system'}
+                          />
+                        </div>
+                      )}
+
+                      <div className={`flex max-w-[min(48rem,86vw)] flex-col ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                        <div className={`mb-2 flex items-center gap-2 px-1 ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <span className="text-sm font-medium text-slate-700">{group.name}</span>
+                          <span className="text-xs text-slate-400">
+                            {formatTimestamp(contentMessages[contentMessages.length - 1].timestamp)}
+                          </span>
+                        </div>
+
+                        <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                          {contentMessages.map((message, index) => (
+                            <div
+                              key={message.id}
+                              className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
+                                group.role === 'user'
+                                  ? 'bg-slate-900 text-white'
+                                  : 'border border-white/80 bg-white/90 text-slate-800'
+                              } ${
+                                group.role === 'user'
+                                  ? index === contentMessages.length - 1
+                                    ? 'rounded-br-md'
+                                    : ''
+                                  : index === contentMessages.length - 1
+                                    ? 'rounded-bl-md'
+                                    : ''
+                              }`}
+                            >
+                              <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
+                              {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
 
-                {group.role === 'user' && (
-                  <div className="mt-1 flex-shrink-0">
-                    <AvatarBadge
-                      name={group.name}
-                      avatarUrl={group.avatarUrl}
-                      tone="user"
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
+                      {group.role === 'user' && (
+                        <div className="mt-1 flex-shrink-0">
+                          <AvatarBadge
+                            name={group.name}
+                            avatarUrl={group.avatarUrl}
+                            tone="user"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -420,6 +525,33 @@ export default function ImmersiveChatWindow({
       </div>
 
       <div className="border-t border-slate-200/70 bg-white/80 p-4 backdrop-blur">
+        {(isLoading || (pendingQueueTexts?.length ?? 0) > 0 || memoryNotice) && (
+          <div className="mx-1 mb-2 flex flex-wrap items-center gap-2">
+            {memoryNotice && (
+              <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-200">
+                {memoryNotice}
+              </span>
+            )}
+            {webSearchHint && (
+              <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700 ring-1 ring-rose-200">
+                ⚠︎ {webSearchHint}
+              </span>
+            )}
+            {(pendingQueueTexts?.length ?? 0) > 0 && (
+              <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-amber-200">
+                {copy.immersiveChat.pendingQueuedCount(pendingQueueTexts!.length)}
+              </span>
+            )}
+            {pendingQueueTexts?.map((text, index) => (
+              <span
+                key={index}
+                className="max-w-[14rem] truncate rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500 ring-1 ring-slate-200"
+              >
+                ⏳ {text || copy.immersiveChat.pendingAttachmentOnly}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="rounded-[1.75rem] border border-slate-200 bg-white px-3 py-3 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
           {pendingAttachments.length > 0 && (
             <div className="mb-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
@@ -432,7 +564,7 @@ export default function ImmersiveChatWindow({
                   type="button"
                   onClick={() => attachmentInputRef.current?.click()}
                   className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                  disabled={isLoading || isFirstMessage}
+                  disabled={isFirstMessage}
                 >
                   {copy.immersiveChat.addMoreFiles}
                 </button>
@@ -477,47 +609,83 @@ export default function ImmersiveChatWindow({
             </div>
           )}
 
-          <div className="flex items-end gap-3">
-            <input
-              ref={attachmentInputRef}
-              type="file"
-              className="hidden"
-              accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,video/*"
-              multiple
-              onChange={handleAttachmentChange}
-              disabled={isLoading || isFirstMessage}
-            />
-            <button
-              type="button"
-              onClick={() => attachmentInputRef.current?.click()}
-              className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={isLoading || isFirstMessage}
-              title={copy.immersiveChat.attachFile}
-            >
-              <Paperclip className="h-5 w-5" />
-            </button>
-            <textarea
-              ref={textareaRef}
-              className="max-h-48 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-3 py-2.5 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-              placeholder={isFirstMessage ? copy.immersiveChat.clickStart : copy.immersiveChat.writeNextMessage}
-              rows={1}
-              value={draftMessage}
-              onChange={(event) => setDraftMessage(event.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={isLoading || isFirstMessage}
-            />
-            <button
-              className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-              onClick={submitMessage}
-              disabled={isLoading || (!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0)}
-            >
-              {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
-            </button>
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            className="hidden"
+            accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,video/*"
+            multiple
+            onChange={handleAttachmentChange}
+            disabled={isFirstMessage}
+          />
+          <textarea
+            ref={textareaRef}
+            className="max-h-48 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 pb-1 pt-1.5 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+            placeholder={isFirstMessage ? copy.immersiveChat.clickStart : copy.immersiveChat.writeNextMessage}
+            rows={2}
+            value={draftMessage}
+            onChange={(event) => setDraftMessage(event.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={isFirstMessage}
+            title={copy.immersiveChat.enterToSend}
+          />
+          <div className="mt-1 flex items-center justify-between gap-3 px-1">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => attachmentInputRef.current?.click()}
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isFirstMessage}
+                title={copy.immersiveChat.attachFile}
+              >
+                <Plus className="h-5 w-5" />
+              </button>
+              {usageStats && (
+                <ComposerContextRing
+                  progress={usageStats.contextTokens / contextWindow}
+                  hoverSections={[
+                    {
+                      label: copy.immersiveChat.usageContextLabel,
+                      detail: copy.immersiveChat.usageContextTitle(
+                        usageStats.contextTokens.toLocaleString(),
+                        contextWindow.toLocaleString()
+                      ) + (isContextEstimated ? copy.immersiveChat.usageContextEstimateNote : ''),
+                    },
+                    {
+                      label: copy.immersiveChat.usageCacheLabel,
+                      detail: copy.immersiveChat.usageCacheTitle(
+                        `${Math.round(usageStats.cacheRate * 100)}%`,
+                        usageStats.cachedTokens.toLocaleString(),
+                        usageStats.promptTokens.toLocaleString()
+                      ),
+                    },
+                  ]}
+                />
+              )}
+            </div>
+            {isLoading ? (
+              <button
+                type="button"
+                onClick={onStop}
+                disabled={!onStop}
+                title={copy.immersiveChat.stop}
+                aria-label={copy.immersiveChat.stop}
+                className="flex h-9 items-center gap-2 rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Square className="h-3.5 w-3.5" fill="currentColor" />
+                {copy.immersiveChat.stop}
+              </button>
+            ) : (
+              <button
+                className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                onClick={() => submitMessage()}
+                disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
+              >
+                {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
+              </button>
+            )}
           </div>
         </div>
-        <p className="mt-2 px-2 text-xs text-slate-500">
-          {copy.immersiveChat.enterToSend}
-        </p>
         {composerError && (
           <p className="mt-2 px-2 text-xs text-rose-600">{composerError}</p>
         )}
@@ -809,4 +977,64 @@ function AttachmentIcon({
     return <Music className={className} />;
   }
   return <FileText className={className} />;
+}
+
+function MessageThinking({
+  message,
+  copy,
+}: {
+  message: Message;
+  copy: I18nMessages;
+}) {
+  const thinking = message.thinking?.trim();
+  if (!thinking) {
+    return null;
+  }
+
+  return (
+    <details className="rounded-xl border border-dashed border-slate-300/80 bg-slate-50/60 px-3 py-2 open:pb-3">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700">
+        <BrainCircuit className="h-3.5 w-3.5" />
+        <span>{copy.immersiveChat.thinking}</span>
+      </summary>
+      <p className="mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500">{thinking}</p>
+    </details>
+  );
+}
+
+function ToolCallLines({
+  message,
+  copy,
+}: {
+  message: Message;
+  copy: I18nMessages;
+}) {
+  const toolCalls = message.toolCalls || [];
+  if (toolCalls.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {toolCalls.map((toolCall, index) => (
+        <p key={`${toolCall.tool}-${index}`} className="text-[11px] italic leading-5 text-slate-400">
+          {describeToolCall(toolCall, copy)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function describeToolCall(toolCall: ToolCallInfo, copy: I18nMessages): string {
+  const args = toolCall.arguments || {};
+  if (toolCall.tool === 'web_search') {
+    return copy.immersiveChat.toolSearch(String(args.query || ''));
+  }
+  if (toolCall.tool === 'read_memory_file') {
+    return copy.immersiveChat.toolReadMemory(String(args.path || ''));
+  }
+  if (toolCall.tool === 'list_memory_files') {
+    return copy.immersiveChat.toolListMemory;
+  }
+  return copy.immersiveChat.toolDefault(toolCall.tool);
 }
