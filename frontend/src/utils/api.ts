@@ -476,6 +476,24 @@ interface SendMessageRequest {
   attachments?: File[];
 }
 
+export interface AsrTranscription {
+  text: string;
+  language?: string;
+  processing_ms?: number;
+  model_load_ms?: number;
+}
+
+export interface AsrReadiness {
+  available: boolean;
+  installed: boolean;
+  loaded: boolean;
+  provider: string;
+  model: string;
+  device: string;
+  compute_type: string;
+  hint: string;
+}
+
 interface CreateModelConfigRequest {
   name: string;
   provider: ModelProvider;
@@ -890,6 +908,20 @@ class ApiService {
       return { data: response.data.map(normalizeMessage) };
     }
     return { data: undefined };
+  }
+
+  async transcribeAudio(audio: Blob, language?: string): Promise<ApiResponse<AsrTranscription>> {
+    const formData = new FormData();
+    const extension = audio.type.includes('ogg') ? 'ogg' : audio.type.includes('wav') ? 'wav' : 'webm';
+    formData.append('audio', new File([audio], `speech.${extension}`, { type: audio.type || 'audio/webm' }));
+    if (language) {
+      formData.append('language', language);
+    }
+    return this.request('/chat/asr', { method: 'POST', body: formData });
+  }
+
+  async getAsrReadiness(): Promise<ApiResponse<AsrReadiness>> {
+    return this.request('/chat/asr_readiness');
   }
 
   async sendMessage(data: SendMessageRequest): Promise<ApiResponse<{ ai_message: ApiMessage; chat_session_id?: string }>> {

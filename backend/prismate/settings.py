@@ -197,6 +197,16 @@ DEV_AUTO_LOGIN_ENABLED = env.bool('DEV_AUTO_LOGIN_ENABLED', default=DEBUG)
 DEV_AUTO_LOGIN_USERNAME = env('DEV_AUTO_LOGIN_USERNAME', default='demo_user')
 DEV_AUTO_LOGIN_EMAIL = env('DEV_AUTO_LOGIN_EMAIL', default='demo@example.com')
 
+# Realtime voice input (ASR). The package dependency is optional and lives in
+# backend/requirements-asr.txt; with it missing the endpoints degrade to a
+# readable readiness hint instead of erroring.
+ASR_PROVIDER = env('ASR_PROVIDER', default='faster_whisper')
+# base 是延迟实测后的默认档（短句中位 ~1.4s，见 docs/latency-v0.1.3.md）；
+# small 质量更好但约 3 倍延迟，追求识别质量时手动切换。
+ASR_MODEL = env('ASR_MODEL', default='base')
+ASR_DEVICE = env('ASR_DEVICE', default='cpu')
+ASR_COMPUTE_TYPE = env('ASR_COMPUTE_TYPE', default='int8')
+
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'

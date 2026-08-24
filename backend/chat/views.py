@@ -9,6 +9,8 @@ from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
+from . import asr as chat_asr
+from . import tts as chat_tts
 from .memory.interface import LongTermMemoryInterface as CharacterLongTermMemory
 from .memory.manager import MemoryItemNotFoundError, MemoryManager
 from .models import (
@@ -736,6 +738,61 @@ class ChatViewSet(viewsets.ViewSet):
                 })
 
         return StreamingHttpResponse(event_stream(), content_type='application/x-ndjson')
+
+    @action(detail=False, methods=['post'])
+    def asr(self, request):
+        """实时模式语音转文字：multipart audio → 文本。
+
+        延迟是一等指标：响应带 processing_ms / model_load_ms，前端角标
+        与 docs/latency 记录都消费这两个字段。
+        """
+        upload = request.FILES.get('audio')
+        if upload is None:
+            return Response({'error': 'audio file is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > chat_asr.MAX_ASR_AUDIO_BYTES:
+            return Response(
+                {'error': f'audio too large (max {chat_asr.MAX_ASR_AUDIO_BYTES // (1024 * 1024)}MB)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        mime_type = (upload.content_type or '').split(';')[0].strip().lower()
+        if mime_type not in chat_asr.SUPPORTED_AUDIO_MIME_TYPES:
+            return Response(
+                {'error': f'unsupported audio type "{mime_type or "unknown"}"; expected webm/ogg/wav'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not chat_asr.asr_available():
+            return Response(
+                {'error': chat_asr.readiness()['hint'], 'readiness': chat_asr.readiness()},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        try:
+            result = chat_asr.transcribe_bytes(
+                upload.read(),
+                mime_type,
+                language=(request.data.get('language') or '').strip() or None,
+            )
+        except chat_asr.AsrUnavailableError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception as exc:
+            logger.exception("ASR transcription failed")
+            return Response({'error': f'ASR failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(result)
+
+    @action(detail=False, methods=['get'])
+    def asr_readiness(self, request):
+        """前端实时模式开关的提示数据源（未安装/未启用时给出可读 hint）。"""
+        return Response(chat_asr.readiness())
+
+    @action(detail=False, methods=['post'])
+    def tts(self, request):
+        """TTS 预留端点：Phase C 落地前一律 501 + 能力说明。"""
+        return Response(
+            {
+                'error': '语音回复尚未实现（realtime Phase C 预留接口）。',
+                'capabilities': chat_tts.CAPABILITIES,
+            },
+            status=status.HTTP_501_NOT_IMPLEMENTED,
+        )
 
     def _prepare_chat_turn(self, request):
         user = request.user

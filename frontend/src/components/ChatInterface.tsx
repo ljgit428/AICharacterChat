@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
 import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
+import CameraPanel from '@/components/CameraPanel';
+import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
+import { useVoiceInput } from '@/hooks/useVoiceInput';
 import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
-import { FolderTree, Brain, Globe, Pencil } from 'lucide-react';
+import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video } from 'lucide-react';
+import { createRoot } from 'react-dom/client';
 import { useI18n } from '@/i18n/provider';
 
 interface ChatInterfaceProps {
@@ -95,6 +99,11 @@ function normalizeStreamMessage(apiMessage: {
   };
 }
 
+function formatLatencyMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export default function ChatInterface({
   characterId,
   initialSessionId,
@@ -133,8 +142,183 @@ export default function ChatInterface({
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   // 联网搜索配置缺失提示（2026-08-24：开启但未配 key 时提醒用户）
   const [webSearchMissingKey, setWebSearchMissingKey] = useState(false);
+  // 实时模式（语音 ASR + 可选摄像头/屏幕帧）：转写文本自动发送，回复完成后继续聆听。
+  const [realtimeOn, setRealtimeOn] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [screenOpen, setScreenOpen] = useState(false);
+  const [subtitlesVisible, setSubtitlesVisible] = useState(true);
+  const [subtitlePipActive, setSubtitlePipActive] = useState(false);
+  const [realtimeNotice, setRealtimeNotice] = useState<string | null>(null);
+  const [asrReady, setAsrReady] = useState<{ available: boolean; hint: string } | null>(null);
+  const [lastTurnLatency, setLastTurnLatency] = useState<{ firstMs: number | null; totalMs: number } | null>(null);
+  // frameGrabberRef 挂摄像头抓帧、screenGrabberRef 挂屏幕抓帧；同轮附帧时屏幕优先。
+  const frameGrabberRef = useRef<(() => File | null) | null>(null);
+  const screenGrabberRef = useRef<(() => File | null) | null>(null);
+  const lastFrameAtRef = useRef(0);
+  const subtitlePipRef = useRef<{
+    window: Window;
+    root: { render: (node: React.ReactNode) => void; unmount: () => void };
+  } | null>(null);
   const characterIdForMemory = character?.id;
 
+  // 实时模式：转写文本直接走发送 ref（loading 中会自动排队，见 handleSendMessage），
+  // 屏幕共享或摄像头开着且距上帧 ≥5s 时随本轮附带一帧（屏幕优先），让角色"看到"用户。
+  const voiceInput = useVoiceInput({
+    paused: isLoading,
+    onTranscribed: (text) => {
+      if (!text.trim()) return;
+      const attachments: PendingAttachment[] = [];
+      const now = performance.now();
+      if (now - lastFrameAtRef.current > 5000) {
+        const grab = screenGrabberRef.current || frameGrabberRef.current;
+        const file = grab ? grab() : null;
+        if (file) {
+          attachments.push({ file, kind: 'image', previewUrl: URL.createObjectURL(file) });
+          lastFrameAtRef.current = now;
+        }
+      }
+      handleSendMessageRef.current(text, attachments);
+    },
+  });
+
+  const registerCameraGrabber = useCallback((grab: (() => File | null) | null) => {
+    frameGrabberRef.current = grab;
+  }, []);
+
+  const registerScreenGrabber = useCallback((grab: (() => File | null) | null) => {
+    screenGrabberRef.current = grab;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiService.getAsrReadiness();
+        if (!cancelled && response.data) {
+          setAsrReady({ available: response.data.available, hint: response.data.hint });
+        }
+      } catch {
+        // readiness is best-effort
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleRealtime = async () => {
+    if (realtimeOn || voiceInput.status !== 'off') {
+      voiceInput.stop();
+      setRealtimeOn(false);
+      if (subtitlePipActive) {
+        closeSubtitlePip();
+      }
+      return;
+    }
+
+    let readiness = asrReady;
+    if (!readiness) {
+      try {
+        const response = await apiService.getAsrReadiness();
+        if (response.data) {
+          readiness = { available: response.data.available, hint: response.data.hint };
+          setAsrReady(readiness);
+        }
+      } catch {
+        // readiness is best-effort; fall through and try starting anyway.
+      }
+    }
+    if (readiness && !readiness.available) {
+      setRealtimeNotice(copy.realtime.asrNotReady(readiness.hint));
+      window.setTimeout(() => setRealtimeNotice(null), 6000);
+      return;
+    }
+
+    setRealtimeOn(true);
+    setSubtitlesVisible(true);
+    await voiceInput.start();
+  };
+
+  useEffect(() => {
+    if (voiceInput.status !== 'error') return;
+    setRealtimeNotice(
+      voiceInput.errorHint === 'permission'
+        ? copy.realtime.statusErrorPermission
+        : copy.realtime.statusErrorUnavailable,
+    );
+    const timer = window.setTimeout(() => setRealtimeNotice(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [copy, voiceInput.errorHint, voiceInput.status]);
+
+  // 切换角色时结束实时会话，避免把下一句话转写发给新角色。
+  const activeCharacterIdRef = useRef<string | undefined>(characterId);
+  useEffect(() => {
+    if (activeCharacterIdRef.current === characterId) return;
+    activeCharacterIdRef.current = characterId;
+    if (statusRefSafe()) {
+      voiceInput.stop();
+      setRealtimeOn(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [characterId]);
+
+  const closeSubtitlePip = useCallback(() => {
+    const entry = subtitlePipRef.current;
+    if (!entry) return;
+    subtitlePipRef.current = null;
+    setSubtitlePipActive(false);
+    try {
+      entry.root.unmount();
+    } catch {
+      // window 已关闭时忽略
+    }
+    entry.window.close();
+  }, []);
+
+  const openSubtitlePip = useCallback(async () => {
+    const dpip = (
+      window as unknown as {
+        documentPictureInPicture?: {
+          requestWindow: (options: { width: number; height: number }) => Promise<Window>;
+        };
+      }
+    ).documentPictureInPicture;
+    if (!dpip) {
+      setRealtimeNotice(copy.realtime.subtitlePopUnavailable);
+      window.setTimeout(() => setRealtimeNotice(null), 6000);
+      return;
+    }
+    try {
+      const win = await dpip.requestWindow({ width: 520, height: 170 });
+      const host = win.document.createElement('div');
+      win.document.body.style.margin = '0';
+      win.document.body.style.background = '#0f172a';
+      win.document.body.style.padding = '14px 18px';
+      win.document.title = 'Subtitles';
+      win.document.body.appendChild(host);
+      const root = createRoot(host);
+      root.render(<SubtitleContent pip userText="" assistantText="" />);
+      win.addEventListener('pagehide', () => {
+        subtitlePipRef.current = null;
+        setSubtitlePipActive(false);
+        try {
+          root.unmount();
+        } catch {
+          // already gone
+        }
+      });
+      subtitlePipRef.current = { window: win, root };
+      setSubtitlePipActive(true);
+    } catch (error) {
+      console.error('Failed to open subtitle PiP window:', error);
+      setRealtimeNotice(copy.realtime.subtitlePopUnavailable);
+      window.setTimeout(() => setRealtimeNotice(null), 6000);
+    }
+  }, [copy]);
+
+  function statusRefSafe() {
+    return voiceInput.status !== 'off';
+  }
   useEffect(() => {
     if (!characterIdForMemory) return;
     let cancelled = false;
@@ -355,6 +539,9 @@ export default function ChatInterface({
     const controller = new AbortController();
     abortRef.current = controller;
     let streamedContent = '';
+    // 延迟埋点：首字与整轮耗时，供实时模式角标展示（docs/latency 记录协议）。
+    const turnStartedAt = performance.now();
+    let firstTokenAt: number | null = null;
 
     try {
       const requestData: SendMessageRequest = {
@@ -390,6 +577,9 @@ export default function ChatInterface({
           }
 
           if (event.type === 'delta') {
+            if (firstTokenAt === null) {
+              firstTokenAt = performance.now();
+            }
             streamedContent += event.content;
             dispatch(appendToMessage({
               id: streamingAssistantId,
@@ -482,6 +672,11 @@ export default function ChatInterface({
         throw new Error(response.error);
       }
 
+      setLastTurnLatency({
+        firstMs: firstTokenAt !== null ? Math.round(firstTokenAt - turnStartedAt) : null,
+        totalMs: Math.round(performance.now() - turnStartedAt),
+      });
+
       if (response.data?.chat_session_id) {
         setChatSessionId(response.data.chat_session_id);
         await syncSessionState(response.data.chat_session_id);
@@ -564,6 +759,36 @@ export default function ChatInterface({
 
   handleSendMessageRef.current = handleSendMessage;
 
+  const realtimeStatusLabel = () => {
+    if (voiceInput.status === 'starting') return copy.realtime.statusStarting;
+    if (voiceInput.status === 'speech') return copy.realtime.statusSpeech;
+    if (voiceInput.status === 'transcribing') return copy.realtime.statusTranscribing;
+    if (voiceInput.status === 'listening') return copy.realtime.statusListening;
+    // off / error 状态显示开关本身的文案，避免误导"已在聆听"。
+    return copy.realtime.toggle;
+  };
+
+  let subtitleUserText = '';
+  let subtitleAssistantText = '';
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!subtitleAssistantText && message.role === 'assistant' && message.content) {
+      subtitleAssistantText = message.content;
+    }
+    if (!subtitleUserText && message.role === 'user' && message.content) {
+      subtitleUserText = message.content;
+    }
+    if (subtitleUserText && subtitleAssistantText) break;
+  }
+
+  useEffect(() => {
+    const entry = subtitlePipRef.current;
+    if (!entry) return;
+    entry.root.render(
+      <SubtitleContent pip userText={subtitleUserText} assistantText={subtitleAssistantText} />,
+    );
+  }, [subtitleAssistantText, subtitleUserText]);
+
   const activeModelConfig =
     modelRoles?.text ||
     modelConfigs.find((config) => config.id === defaultModelConfigId) ||
@@ -635,6 +860,58 @@ export default function ChatInterface({
             )}
           </div>
         </div>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {realtimeOn && lastTurnLatency && (
+            <span className="hidden items-center rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium tabular-nums text-slate-500 ring-1 ring-slate-200 md:inline-flex">
+              {copy.realtime.latencyBadge(
+                voiceInput.lastAsrMs != null ? formatLatencyMs(voiceInput.lastAsrMs) : '—',
+                lastTurnLatency.firstMs != null ? formatLatencyMs(lastTurnLatency.firstMs) : '—',
+              )}
+              <span className="ml-1.5 text-slate-400">·</span>
+              <span>{formatLatencyMs(lastTurnLatency.totalMs)}</span>
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setScreenOpen((prev) => !prev)}
+            className={`flex h-10 w-10 items-center justify-center rounded-2xl transition-colors ${
+              screenOpen
+                ? 'bg-sky-50 text-sky-700 hover:bg-sky-100'
+                : 'bg-white/80 text-slate-500 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900'
+            }`}
+            title={copy.realtime.screenToggle}
+          >
+            <Monitor size={17} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setCameraOpen((prev) => !prev)}
+            className={`flex h-10 w-10 items-center justify-center rounded-2xl transition-colors ${
+              cameraOpen
+                ? 'bg-sky-50 text-sky-700 hover:bg-sky-100'
+                : 'bg-white/80 text-slate-500 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900'
+            }`}
+            title={copy.realtime.cameraToggle}
+          >
+            <Video size={17} />
+          </button>
+          <button
+            type="button"
+            onClick={() => void toggleRealtime()}
+            title={copy.realtime.toggleTitle}
+            className={`flex h-10 items-center gap-2 rounded-2xl px-3.5 text-sm font-medium transition-colors ${
+              realtimeOn
+                ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-100'
+                : 'bg-white/80 text-slate-500 ring-1 ring-slate-200 hover:bg-white hover:text-slate-900'
+            }`}
+          >
+            {(voiceInput.status === 'listening' || voiceInput.status === 'speech' || voiceInput.status === 'transcribing') && (
+              <span className="h-2 w-2 rounded-full bg-rose-500 motion-safe:animate-pulse" />
+            )}
+            <Mic size={16} />
+            <span className="hidden sm:inline">{realtimeStatusLabel()}</span>
+          </button>
+        </div>
         <div className="flex items-center gap-2 lg:hidden">
           <button
             onClick={() => setShowSoulPanel((prev) => !prev)}
@@ -672,7 +949,13 @@ export default function ChatInterface({
         </div>
       </header>
 
-      <div className="flex-1 overflow-hidden px-4 pb-4 pt-4 md:px-6 md:pb-6">
+      {realtimeNotice && (
+        <div className="mx-4 mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 md:mx-6">
+          {realtimeNotice}
+        </div>
+      )}
+
+      <div className="relative flex-1 overflow-hidden px-4 pb-4 pt-4 md:px-6 md:pb-6">
         <ImmersiveChatWindow
           onSendMessage={handleSendMessage}
           isLoading={isLoading}
@@ -688,6 +971,17 @@ export default function ChatInterface({
             webSearchMissingKey ? copy.immersiveChat.webSearchMissingKey : undefined
           }
         />
+
+        {realtimeOn && subtitlesVisible && !subtitlePipActive && (
+          <SubtitleBar
+            userText={subtitleUserText}
+            assistantText={subtitleAssistantText}
+            popLabel={copy.realtime.subtitlePopOut}
+            closeLabel={copy.realtime.subtitleClose}
+            onPopOut={() => void openSubtitlePip()}
+            onClose={() => setSubtitlesVisible(false)}
+          />
+        )}
       </div>
 
       {showSoulPanel && character && (
@@ -737,6 +1031,31 @@ export default function ChatInterface({
             <ResearchPanel />
           </div>
         </div>
+      )}
+
+      {cameraOpen && (
+        <CameraPanel
+          mode="camera"
+          onClose={() => setCameraOpen(false)}
+          onSnapshot={(file) => {
+            handleSendMessage('', [{ file, kind: 'image', previewUrl: URL.createObjectURL(file) }]);
+          }}
+          registerFrameGrabber={registerCameraGrabber}
+          snapshotLabel={copy.realtime.cameraSnapshot}
+          closeLabel={copy.realtime.cameraClose}
+          deniedLabel={copy.realtime.cameraDenied}
+        />
+      )}
+
+      {screenOpen && (
+        <CameraPanel
+          mode="screen"
+          onClose={() => setScreenOpen(false)}
+          registerFrameGrabber={registerScreenGrabber}
+          snapshotLabel={copy.realtime.cameraSnapshot}
+          closeLabel={copy.realtime.screenClose}
+          deniedLabel={copy.realtime.screenDenied}
+        />
       )}
     </div>
   );
