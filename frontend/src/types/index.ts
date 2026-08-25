@@ -45,6 +45,10 @@ export interface MemoryExplorerFile {
   fileUrl?: string;
   mimeType?: string;
   error?: string;
+  offset?: number;
+  nextOffset?: number;
+  totalChars?: number;
+  hasMore?: boolean;
 }
 
 export interface KnowledgeAsset {

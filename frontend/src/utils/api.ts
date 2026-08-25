@@ -143,6 +143,10 @@ interface ApiMemoryExplorerFile {
   file_url?: string | null;
   mime_type?: string | null;
   error?: string;
+  offset?: number;
+  next_offset?: number | null;
+  total_chars?: number;
+  has_more?: boolean;
 }
 
 interface ApiKnowledgeAsset {
@@ -329,6 +333,10 @@ function normalizeMemoryExplorerFile(apiData: ApiMemoryExplorerFile): MemoryExpl
     fileUrl,
     mimeType: apiData.mime_type || undefined,
     error: apiData.error,
+    offset: apiData.offset,
+    nextOffset: apiData.next_offset ?? undefined,
+    totalChars: apiData.total_chars,
+    hasMore: apiData.has_more,
   };
 }
 
@@ -1315,8 +1323,11 @@ class ApiService {
     return { data: undefined };
   }
 
-  async readSoulFile(characterId: string, path: string): Promise<ApiResponse<MemoryExplorerFile>> {
+  async readSoulFile(characterId: string, path: string, offset = 0): Promise<ApiResponse<MemoryExplorerFile>> {
     const query = new URLSearchParams({ path, max_chars: '12000' });
+    if (offset > 0) {
+      query.set('offset', String(offset));
+    }
     const response = await this.request<ApiMemoryExplorerFile>(`/characters/${characterId}/soul_file?${query.toString()}`);
     if (response.data) {
       return { data: normalizeMemoryExplorerFile(response.data) };
@@ -1324,14 +1335,29 @@ class ApiService {
     return { data: undefined };
   }
 
-  async uploadKnowledgeAssets(characterId: string, files: File[]): Promise<ApiResponse<KnowledgeAsset[]>> {
+  async uploadKnowledgeAssets(
+    characterId: string,
+    files: File[],
+    relativePaths?: string[],
+  ): Promise<ApiResponse<KnowledgeAsset[]>> {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
+    if (relativePaths && relativePaths.length === files.length) {
+      formData.append('relative_paths', JSON.stringify(relativePaths));
+    }
 
     const response = await this.request<ApiKnowledgeAssetUploadResponse>(`/characters/${characterId}/knowledge_assets`, {
       method: 'POST',
       body: formData,
     });
+    if (response.data) {
+      return { data: (response.data.assets || []).map(normalizeKnowledgeAsset) };
+    }
+    return { data: undefined };
+  }
+
+  async listKnowledgeAssets(characterId: string): Promise<ApiResponse<KnowledgeAsset[]>> {
+    const response = await this.request<{ assets?: ApiKnowledgeAsset[] }>(`/characters/${characterId}/knowledge_assets`);
     if (response.data) {
       return { data: (response.data.assets || []).map(normalizeKnowledgeAsset) };
     }
