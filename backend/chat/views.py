@@ -41,7 +41,7 @@ from .serializers import (
     WebSearchConfigurationSerializer,
 )
 from .tasks import generate_ai_response, stream_ai_response
-from .soul import list_memory_explorer_path, read_memory_explorer_file
+from .soul import list_memory_explorer_path, read_memory_explorer_file, sanitize_memory_relative_path
 import logging
 
 logger = logging.getLogger(__name__)
@@ -111,11 +111,23 @@ class CharacterViewSet(viewsets.ModelViewSet):
             character,
             path=path,
             max_chars=request.query_params.get('max_chars', 6000),
+            offset=request.query_params.get('offset', 0),
         ))
 
-    @action(detail=True, methods=['post'], url_path='knowledge_assets')
-    def upload_knowledge_assets(self, request, pk=None):
+    @action(detail=True, methods=['get', 'post'], url_path='knowledge_assets')
+    def knowledge_assets(self, request, pk=None):
         character = self.get_object()
+        if request.method == 'POST':
+            return self._upload_knowledge_assets(request, character)
+
+        serializer = CharacterKnowledgeAssetSerializer(
+            character.knowledge_assets.order_by('sort_order', 'id'),
+            many=True,
+            context={'request': request},
+        )
+        return Response({'assets': serializer.data})
+
+    def _upload_knowledge_assets(self, request, character):
         files = list(request.FILES.getlist('files'))
         if not files:
             single_file = request.FILES.get('file')
@@ -124,6 +136,13 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
         if not files:
             raise ValidationError({'files': 'At least one file is required.'})
+
+        # Optional parallel array of folder-group relative paths (e.g. from a
+        # browser upload that preserves webkitRelativePath). Files land inside
+        # the memory filesystem tree at raw/character_setup/uploads/<rel>.
+        relative_paths = self._extract_relative_paths(request)
+        if len(relative_paths) not in (0, len(files)):
+            raise ValidationError({'relative_paths': 'relative_paths must match the number of uploaded files.'})
 
         next_sort_order = (
             character.knowledge_assets.order_by('-sort_order').values_list('sort_order', flat=True).first() or 0
@@ -139,11 +158,14 @@ class CharacterViewSet(viewsets.ModelViewSet):
             if attachment_kind == AttachmentKind.TEXT:
                 attachment_text_content = extract_text_attachment_content(uploaded_file)
 
+            relative_path = sanitize_memory_relative_path(relative_paths[index - 1]) if relative_paths else ''
+            attachment_name = relative_path or (uploaded_file.name or '')
+
             created_assets.append(
                 CharacterKnowledgeAsset.objects.create(
                     character=character,
                     file=uploaded_file,
-                    attachment_name=uploaded_file.name or '',
+                    attachment_name=attachment_name,
                     attachment_mime_type=attachment_mime_type,
                     attachment_kind=attachment_kind,
                     attachment_text_content=attachment_text_content,
@@ -153,6 +175,23 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
         serializer = CharacterKnowledgeAssetSerializer(created_assets, many=True, context={'request': request})
         return Response({'assets': serializer.data}, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _extract_relative_paths(request):
+        values = list(request.data.getlist('relative_paths')) if hasattr(request.data, 'getlist') else []
+
+        # Multipart clients send either repeated relative_paths fields or one
+        # JSON-encoded array; accept both shapes.
+        if len(values) == 1 and isinstance(values[0], str) and values[0].lstrip().startswith('['):
+            try:
+                parsed = json.loads(values[0])
+            except ValueError:
+                raise ValidationError({'relative_paths': 'relative_paths must be a JSON array when sent as one field.'})
+            if not isinstance(parsed, list):
+                raise ValidationError({'relative_paths': 'relative_paths must be an array.'})
+            return [str(item) for item in parsed]
+
+        return [str(value) for value in values]
 
     @action(detail=True, methods=['delete'], url_path=r'knowledge_assets/(?P<asset_id>[^/.]+)')
     def delete_knowledge_asset(self, request, pk=None, asset_id=None):

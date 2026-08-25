@@ -225,6 +225,152 @@ class ExplorerNestedUploadPathTests(TestCase):
 
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class SoulFileOffsetReadTests(TestCase):
+    def setUp(self):
+        self.media_root = tempfile.mkdtemp()
+        override = override_settings(MEDIA_ROOT=self.media_root)
+        override.enable()
+        self.addCleanup(override.disable)
+        self.addCleanup(lambda: shutil.rmtree(self.media_root, ignore_errors=True))
+
+        self.user = User.objects.create_user(username='offset-owner', password='password123')
+        self.client.force_login(self.user)
+        self.character = Character.objects.create(
+            name='Offset Character',
+            description='probe',
+            scenario='',
+            example_dialogue='',
+            created_by=self.user,
+        )
+        # 1000 chars so two windows of 600 are needed.
+        self.long_body = ''.join(chr(ord('A') + i % 26) for i in range(1000))
+        CharacterKnowledgeAsset.objects.create(
+            character=self.character,
+            file=SimpleUploadedFile('long.txt', self.long_body.encode(), content_type='text/plain'),
+            attachment_name='long.txt',
+            attachment_mime_type='text/plain',
+            attachment_kind=AttachmentKind.TEXT,
+            attachment_text_content=self.long_body,
+            sort_order=1,
+        )
+
+    def test_offset_windows_concatenate_to_full_content(self):
+        first = read_memory_explorer_file(self.character, 'raw/character_setup/uploads/long.txt', max_chars=600)
+        self.assertEqual(first['offset'], 0)
+        self.assertEqual(first['total_chars'], 1000)
+        self.assertTrue(first['has_more'])
+        self.assertEqual(first['next_offset'], 600)
+        self.assertEqual(len(first['content']), 600)
+
+        second = read_memory_explorer_file(
+            self.character, 'raw/character_setup/uploads/long.txt', max_chars=600, offset=first['next_offset']
+        )
+        self.assertFalse(second['has_more'])
+        self.assertIsNone(second['next_offset'])
+        self.assertEqual(len(second['content']), 400)
+        self.assertEqual(first['content'] + second['content'], self.long_body)
+
+    def test_offset_beyond_end_returns_empty_window(self):
+        doc = read_memory_explorer_file(
+            self.character, 'raw/character_setup/uploads/long.txt', max_chars=600, offset=9999
+        )
+        self.assertEqual(doc['content'], '')
+        self.assertFalse(doc['has_more'])
+
+    def test_rest_soul_file_passes_offset(self):
+        response = self.client.get(
+            f"/api/characters/{self.character.id}/soul_file/",
+            {'path': 'raw/character_setup/uploads/long.txt', 'max_chars': '200', 'offset': '800'},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        # 800 + 200 exactly reaches the end of the 1000-char file.
+        self.assertEqual(payload['offset'], 800)
+        self.assertEqual(payload['total_chars'], 1000)
+        self.assertFalse(payload['has_more'])
+        self.assertIsNone(payload['next_offset'])
+        self.assertEqual(len(payload['content']), 200)
+
+    def test_rest_soul_file_mid_file_reports_more(self):
+        response = self.client.get(
+            f"/api/characters/{self.character.id}/soul_file/",
+            {'path': 'raw/character_setup/uploads/long.txt', 'max_chars': '200', 'offset': '500'},
+        )
+        payload = response.json()
+        self.assertTrue(payload['has_more'])
+        self.assertEqual(payload['next_offset'], 700)
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class KnowledgeAssetCollectionTests(TestCase):
+    def setUp(self):
+        self.media_root = tempfile.mkdtemp()
+        override = override_settings(MEDIA_ROOT=self.media_root)
+        override.enable()
+        self.addCleanup(override.disable)
+        self.addCleanup(lambda: shutil.rmtree(self.media_root, ignore_errors=True))
+
+        self.user = User.objects.create_user(username='asset-owner', password='password123')
+        self.client.force_login(self.user)
+        self.character = Character.objects.create(
+            name='Asset Character',
+            description='probe',
+            scenario='',
+            example_dialogue='',
+            created_by=self.user,
+        )
+
+    def test_upload_with_relative_paths_nests_into_vfs(self):
+        upload = SimpleUploadedFile('scene_1.txt', b'grouped scene body', content_type='text/plain')
+        response = self.client.post(
+            f"/api/characters/{self.character.id}/knowledge_assets/",
+            {
+                'files': upload,
+                'relative_paths': json.dumps(['Momotalk/mari_10105/scene_1.txt']),
+                'format': 'multipart',
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content[:300])
+        asset = self.character.knowledge_assets.get()
+        self.assertEqual(asset.attachment_name, 'Momotalk/mari_10105/scene_1.txt')
+
+        listing = list_memory_explorer_path(self.character, path_prefix='raw/character_setup/uploads', recursive=True)
+        paths = {entry['path'] for entry in listing['entries'] if entry['entry_type'] == 'file'}
+        self.assertIn('raw/character_setup/uploads/Momotalk/mari_10105/scene_1.txt', paths)
+
+    def test_list_knowledge_assets_returns_collection(self):
+        CharacterKnowledgeAsset.objects.create(
+            character=self.character,
+            file=SimpleUploadedFile('a.txt', b'A', content_type='text/plain'),
+            attachment_name='Group/a.txt',
+            attachment_mime_type='text/plain',
+            attachment_kind=AttachmentKind.TEXT,
+            attachment_text_content='A',
+            sort_order=1,
+        )
+        response = self.client.get(f"/api/characters/{self.character.id}/knowledge_assets/")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload['assets']), 1)
+        self.assertEqual(payload['assets'][0]['file_name'], 'Group/a.txt')
+
+    def test_upload_rejects_mismatched_relative_paths_length(self):
+        upload = SimpleUploadedFile('solo.txt', b'solo', content_type='text/plain')
+        response = self.client.post(
+            f"/api/characters/{self.character.id}/knowledge_assets/",
+            {
+                'files': upload,
+                'relative_paths': json.dumps(['one.txt', 'two.txt']),
+                'format': 'multipart',
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
 class DraftMutationPassesFileNamesTests(TestCase):
     def setUp(self):
         self.media_root = tempfile.mkdtemp()
