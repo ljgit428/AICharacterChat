@@ -32,20 +32,99 @@ onnx_model_dir，首次使用时自动加载（见 chat/tts.py 的 GenieTtsProvi
 
         cuda 需要 onnxruntime-gpu；检测不到 CUDA 时打印警告并回退 CPU。
 
-模型转换（一次性，需要 torch），每个角色各自转换出自己的目录：
+模型转换（设置页「上传并转换」的后端）：本脚本在 genie 原生应用之外
+挂了两个端点，供 Django 投递转换任务、前端轮询进度——
+
+    POST /convert_to_onnx   {torch_ckpt_path, torch_pth_path, output_dir}
+                            → {job_id}（后台线程执行，立即返回）
+    GET  /convert_status/{job_id} → {status: running|done|error, error?}
+
+转换需要 torch（genie 环境自带）；每个角色各自转换出自己的 ONNX 目录，
+等价于手动执行：
     python -c "import genie_tts as genie; genie.convert_to_onnx(
         torch_pth_path=r'.../<角色>_e8_s240.pth',
         torch_ckpt_path=r'.../<角色>-e15.ckpt',
         output_dir=r'D:/models/<角色>_onnx')"
+
+注意：genie-tts 2.0.x 的转换器只支持 v2 / v2ProPlus 底模；v2pro/v4 权重
+会在转换或加载时报错（错误会经 /convert_status 原样透传给前端）。该包
+升级支持后这里无需改动。
 """
 
 import argparse
 import threading
 import time
+import traceback
+from pathlib import Path
+from uuid import uuid4
 
 import requests
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 import genie_tts as genie
+from genie_tts.Server import app as genie_app
+
+
+# ---------------------------------------------------------------------------
+# 转换任务管理（进程内字典即可：单 worker、单机自用服务）
+# ---------------------------------------------------------------------------
+
+_convert_jobs: dict = {}
+_jobs_lock = threading.Lock()
+
+
+class ConvertPayload(BaseModel):
+    torch_ckpt_path: str
+    torch_pth_path: str
+    output_dir: str
+
+
+def _run_conversion(job_id: str, payload: ConvertPayload) -> None:
+    with _jobs_lock:
+        _convert_jobs[job_id]['status'] = 'running'
+    try:
+        genie.convert_to_onnx(
+            torch_ckpt_path=payload.torch_ckpt_path,
+            torch_pth_path=payload.torch_pth_path,
+            output_dir=payload.output_dir,
+        )
+        with _jobs_lock:
+            _convert_jobs[job_id]['status'] = 'done'
+    except Exception as exc:  # 转换失败要把原因带给前端轮询方
+        with _jobs_lock:
+            _convert_jobs[job_id]['status'] = 'error'
+            _convert_jobs[job_id]['error'] = f'{exc.__class__.__name__}: {exc}'
+        traceback.print_exc()
+
+
+def build_combined_app() -> FastAPI:
+    """genie 原生路由 + 转换端点。mount 在根上，原路径全部不变。"""
+    combined = FastAPI(title='Genie-TTS (with converter)')
+
+    @combined.post('/convert_to_onnx')
+    def start_conversion(payload: ConvertPayload):
+        for label in ('torch_ckpt_path', 'torch_pth_path'):
+            path = getattr(payload, label)
+            if not Path(path).is_file():
+                raise HTTPException(status_code=400, detail=f'{label} 不存在：{path}')
+        job_id = uuid4().hex
+        with _jobs_lock:
+            _convert_jobs[job_id] = {'status': 'pending', 'error': ''}
+        threading.Thread(target=_run_conversion, args=(job_id, payload), daemon=True).start()
+        return {'job_id': job_id}
+
+    @combined.get('/convert_status/{job_id}')
+    def conversion_status(job_id: str):
+        with _jobs_lock:
+            job = _convert_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f'未知任务：{job_id}')
+        return {'status': job['status'], 'error': job.get('error', '')}
+
+    combined.mount('/', genie_app)
+    return combined
 
 
 def enable_cuda_if_available() -> bool:
@@ -107,9 +186,11 @@ def main() -> None:
         enable_cuda_if_available()
     base_url = f'http://{args.host}:{args.port}'
 
+    # 合并应用与 genie.start_server 一样以 workers=1 同进程运行，CUDA 切换、
+    # 进程内模型缓存照常生效；转换任务也在本进程后台线程执行。
     server_thread = threading.Thread(
-        target=genie.start_server,
-        kwargs={'host': args.host, 'port': args.port, 'workers': 1},
+        target=uvicorn.run,
+        kwargs={'app': build_combined_app(), 'host': args.host, 'port': args.port, 'workers': 1},
         daemon=True,
     )
     server_thread.start()
