@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Home, KeyRound, Settings, UserCircle2 } from "lucide-react";
+import { ArrowLeft, AudioLines, Home, KeyRound, Settings, UserCircle2 } from "lucide-react";
 import ModelApiSettingsPanel from "@/components/ModelApiSettingsPanel";
+import TtsSettingsPanel from "@/components/TtsSettingsPanel";
 import UserSettingsPanel from "@/components/UserSettingsPanel";
 import { useI18n } from "@/i18n/provider";
 import { apiService } from "@/utils/api";
@@ -15,11 +16,12 @@ import {
 } from "@/types";
 import { APP_NAME, APP_VERSION } from "@/constants";
 
-type SettingsSection = "user" | "api";
+type SettingsSection = "user" | "api" | "voice";
 
 const SECTIONS: Array<{ key: SettingsSection; label: string; icon: React.ReactNode }> = [
   { key: "user", label: "用户设置", icon: <UserCircle2 size={18} /> },
   { key: "api", label: "API 设置", icon: <KeyRound size={18} /> },
+  { key: "voice", label: "语音设置", icon: <AudioLines size={18} /> },
 ];
 
 function SettingsPageContent() {
@@ -283,6 +285,8 @@ function SettingsPageContent() {
               onRefresh={fetchUserProfile}
               onOpenModelSettings={() => setActiveSection("api")}
             />
+          ) : activeSection === "voice" ? (
+            <TtsSettingsPanel />
           ) : (
             <ModelApiSettingsPanel
               modelConfigs={modelConfigs}
