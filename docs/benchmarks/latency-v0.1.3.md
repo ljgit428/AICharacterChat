@@ -4,7 +4,7 @@
 > 记录四段耗时；ASR 中位 >2s 则降模型档位重测并保留对比。
 > 环境：Windows 11 · 纯 CPU（无显卡）· faster-whisper int8 ·
 > SAPI 合成语音作为固定输入（消除人声波动）。
-> 测试音频生成脚本：PowerShell System.Speech → `test/asr-latency/*.wav`。
+> 测试音频生成脚本：PowerShell System.Speech → `tmp/test-assets/asr-latency/*.wav`。
 
 ## 1. ASR 端到端（`POST /api/chat/asr` 的 processing_ms）
 

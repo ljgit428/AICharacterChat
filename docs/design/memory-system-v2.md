@@ -254,7 +254,7 @@ Celery beat 周期任务 `consolidate_character_memory(character_id)`：
 
 | Phase | 改动文件（预估） | 前置依赖 |
 |-------|------------------|----------|
-| 1 | `tasks.py`、`memory/manager.py`、`memory/prompts.py`(无)、`settings.py`、`.env.template`、`tests_memory.py` | 无 |
+| 1 | `tasks.py`、`memory/manager.py`、`memory/prompts.py`(无)、`settings.py`、`.env.template`、`chat/tests/test_memory.py` | 无 |
 | 2 | `memory/prompts.py`、`memory/manager.py`、`memory/constants.py`(新) | 无（可与 1 并行） |
 | 3 | `views.py`(narrative/audit)、`frontend/src/components/ChatInterface.tsx` 或聊天容器、`app/memory/page.tsx`、`utils/api.ts`、`i18n/*` | Phase 1（narrative 依赖预算逻辑）、Phase 2（区块依赖约定分区） |
 | 4 | `tasks.py`(consolidate task)、`celery.py` beat 配置、`models.py`(UserProfile 开关)+migration | Phase 2 |

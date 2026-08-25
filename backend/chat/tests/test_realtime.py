@@ -116,9 +116,15 @@ class TtsReservedEndpointTests(TestCase):
         self.assertTrue(body['error'])
         self.assertIn('available', body['readiness'])
 
+    @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
     def test_unreachable_service_returns_503_with_hint(self):
+        # 角色语音配置齐全时，才轮到服务可达性探测；地址指向未监听端口 → 503
+        character = Character.objects.create(
+            created_by=self.user, name='圣亚',
+            tts_config={'voice_name': 'seia', 'onnx_model_dir': 'D:/models/seia_onnx'},
+        )
         with override_settings(TTS_GENIE_URL='http://127.0.0.1:1'):
-            response = self._post({'text': '你好'})
+            response = self._post({'text': '你好', 'character_id': character.id})
         self.assertEqual(response.status_code, 503)
         body = response.json()
         self.assertIn('不可达', body['error'])
@@ -188,6 +194,37 @@ class TtsReservedEndpointTests(TestCase):
         voice = mock_instance.synthesize.call_args.args[1]
         self.assertEqual(voice['name'], 'seia')
         self.assertEqual(voice['onnx_model_dir'], 'D:/models/seia_onnx')
+
+    @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+    def test_character_without_model_dir_gets_actionable_error(self):
+        # 角色没配 ONNX 目录：报可操作的 503，而不是静默落到某个全局模型
+        character = Character.objects.create(
+            created_by=self.user, name='无模型角色',
+            tts_config={'provider': 'genie', 'model_version': 'v2'},
+        )
+        response = self._post({'text': '你好', 'character_id': character.id})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('语音模型', response.json()['error'])
+
+    @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+    def test_voice_name_defaults_to_model_dir_basename(self):
+        # 未填音色名时以模型目录名作为 genie 侧的加载键；语言缺省 zh
+        character = Character.objects.create(
+            created_by=self.user, name='无名氏',
+            tts_config={'onnx_model_dir': 'D:/ml/ryuko_onnx'},
+        )
+        mock_instance = MagicMock()
+        mock_instance.readiness_probe.return_value = (True, '')
+        mock_instance.synthesize.return_value = {
+            'audio': b'RIFF....', 'content_type': 'audio/wav',
+            'provider': 'genie', 'processing_ms': 100, 'first_byte_ms': 50,
+        }
+        with patch('chat.tts.get_tts_provider_instance', return_value=mock_instance):
+            response = self._post({'text': '你好', 'character_id': character.id})
+        self.assertEqual(response.status_code, 200)
+        voice = mock_instance.synthesize.call_args.args[1]
+        self.assertEqual(voice['name'], 'ryuko_onnx')
+        self.assertEqual(voice['language'], 'zh')
 
     def test_invalid_character_id_falls_back_to_global(self):
         fake = {'audio': b'RIFF', 'content_type': 'audio/wav',
