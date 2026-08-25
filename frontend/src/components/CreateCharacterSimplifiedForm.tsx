@@ -6,6 +6,7 @@ import { useMutation, useQuery, gql } from '@apollo/client';
 import { FILES_UPLOAD_API_URL } from '@/constants';
 import { useI18n } from '@/i18n/provider';
 import AvatarCropper from '@/components/AvatarCropper';
+import FileTree, { FileTreeNode } from '@/components/FileTree';
 import {
   Upload,
   Sparkles,
@@ -14,7 +15,6 @@ import {
   Loader2,
   FileText,
   ArrowLeft,
-  X,
   Undo2,
 } from 'lucide-react';
 
@@ -417,10 +417,95 @@ function ReferenceAndAiPanel({
   onUndo,
   copy,
 }: ReferenceAndAiPanelProps) {
+  const { locale } = useI18n();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
   const [skipNotice, setSkipNotice] = useState<string | null>(null);
+  const [expandedGroupDirs, setExpandedGroupDirs] = useState<Set<string>>(new Set());
+
+  // 把扁平的文件列表按 relative_path 组装成分层树（本地待保存状态，与后端 VFS 无关）。
+  const groupedFileNodes = useMemo<FileTreeNode[]>(() => {
+    const roots: FileTreeNode[] = [];
+    const dirNodes = new Map<string, FileTreeNode>();
+    const ensureDir = (dirPath: string): FileTreeNode => {
+      const existing = dirNodes.get(dirPath);
+      if (existing) {
+        return existing;
+      }
+      const node: FileTreeNode = {
+        path: `folder:${dirPath}`,
+        title: dirPath.split('/').pop() || dirPath,
+        isDirectory: true,
+        children: [],
+      };
+      dirNodes.set(dirPath, node);
+      const slashIndex = dirPath.lastIndexOf('/');
+      if (slashIndex > -1) {
+        ensureDir(dirPath.slice(0, slashIndex)).children!.push(node);
+      } else {
+        roots.push(node);
+      }
+      return node;
+    };
+
+    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    for (const file of sorted) {
+      const segments = file.name.split('/');
+      const title = segments.pop() || file.name;
+      const leaf: FileTreeNode = {
+        path: file.url,
+        title,
+        isDirectory: false,
+        previewKind: file.type === 'image' ? 'image' : 'text',
+      };
+      if (segments.length) {
+        ensureDir(segments.join('/')).children!.push(leaf);
+      } else {
+        roots.push(leaf);
+      }
+    }
+    return roots;
+  }, [files]);
+
+  // 新出现的顶层文件夹默认展开，用户手动收起的保持收起。
+  useEffect(() => {
+    setExpandedGroupDirs((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const node of groupedFileNodes) {
+        if (node.isDirectory && !next.has(node.path)) {
+          next.add(node.path);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [groupedFileNodes]);
+
+  const toggleGroupDir = (node: FileTreeNode) => {
+    setExpandedGroupDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(node.path)) {
+        next.delete(node.path);
+      } else {
+        next.add(node.path);
+      }
+      return next;
+    });
+  };
+
+  const handleRemoveNode = (node: FileTreeNode) => {
+    if (node.isDirectory) {
+      const prefix = `${node.path.slice('folder:'.length)}/`;
+      files
+        .filter((file) => file.name.startsWith(prefix))
+        .forEach((file) => onRemoveFile(file.url));
+      return;
+    }
+    onRemoveFile(node.path);
+  };
+
 
   const attachFolderInputRef = (element: HTMLInputElement | null) => {
     folderInputRef.current = element;
@@ -605,30 +690,20 @@ function ReferenceAndAiPanel({
       )}
 
       {files.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {files.map((file) => (
-            <div
-              key={file.url}
-              className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-white px-2.5 py-1 text-[11px] text-gray-700"
-            >
-              <span className="font-medium text-gray-500">
-                {file.type === 'image' ? copy.imageReferenceLabel : copy.textReferenceLabel}
-              </span>
-              <span className="max-w-[160px] truncate">{file.name}</span>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onRemoveFile(file.url);
-                }}
-                className="rounded-full p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
-                aria-label={copy.removeBackgroundFile}
-                title={copy.removeBackgroundFile}
-              >
-                <X size={10} />
-              </button>
-            </div>
-          ))}
+        <div className="mt-3 max-h-60 overflow-y-auto rounded-xl border border-amber-100 bg-white/80 p-1.5">
+          <FileTree
+            nodes={groupedFileNodes}
+            expandedPaths={expandedGroupDirs}
+            onToggleDir={toggleGroupDir}
+            onSelectFile={() => {}}
+            removable
+            onRemoveNode={handleRemoveNode}
+            removeTitle={copy.removeBackgroundFile}
+            emptyDirLabel={locale === 'zh-CN' ? '（空文件夹）' : '(empty folder)'}
+          />
+          <p className="px-2 pb-1 pt-1.5 text-[11px] leading-4 text-gray-400">
+            {copy.groupedFilesHint(files.length)}
+          </p>
         </div>
       )}
 
