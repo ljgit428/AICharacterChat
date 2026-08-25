@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, gql } from '@apollo/client';
-import { UPLOAD_API_URL } from '@/constants';
+import { FILES_UPLOAD_API_URL } from '@/constants';
 import { useI18n } from '@/i18n/provider';
 import AvatarCropper from '@/components/AvatarCropper';
 import {
@@ -27,6 +27,7 @@ type ReferenceFile = {
 type PendingReferenceFile = {
   file: File;
   displayName: string;
+  relativePath: string;
 };
 
 type ReferenceFileSkipSummary = {
@@ -110,7 +111,7 @@ async function collectReferenceFilesFromEntry(
       fileEntry.file((value: File) => resolve(value), () => resolve(null));
     });
     if (file) {
-      collected.push({ file, displayName: entryPath });
+      collected.push({ file, displayName: entryPath, relativePath: entryPath });
     }
     return;
   }
@@ -143,7 +144,7 @@ async function collectFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
     .filter((entry): entry is FileSystemEntry => entry !== null);
 
   if (!entries.length) {
-    return Array.from(dataTransfer.files || []).map((file) => ({ file, displayName: file.name }));
+    return Array.from(dataTransfer.files || []).map((file) => ({ file, displayName: file.name, relativePath: file.name }));
   }
 
   const collected: PendingReferenceFile[] = [];
@@ -162,6 +163,7 @@ type TtsConfigForm = {
   provider: TtsProviderChoice;
   modelVersion: TtsModelVersion;
   voiceName: string;
+  language: string;
   onnxModelDir: string;
   refAudioPath: string;
   refAudioText: string;
@@ -172,17 +174,23 @@ const EMPTY_TTS_CONFIG: TtsConfigForm = {
   provider: '',
   modelVersion: '',
   voiceName: '',
+  language: '',
   onnxModelDir: '',
   refAudioPath: '',
   refAudioText: '',
   refAudioLanguage: '',
 };
 
+// 与后端 chat/tts.py 的 GENIE_SUPPORTED_MODEL_VERSIONS 保持一致：
+// v2pr / v4 只能走官方 GPT-SoVITS api_v2 通道，genie 加载不了这两个版本的模型。
+const GENIE_UNSUPPORTED_VERSIONS: ReadonlySet<TtsModelVersion> = new Set<TtsModelVersion>(['v2pr', 'v4']);
+
 function toTtsConfigInput(tts: TtsConfigForm): Record<string, string> {
   const config: Record<string, string> = {};
   if (tts.provider) config.provider = tts.provider;
   if (tts.modelVersion) config.model_version = tts.modelVersion;
   if (tts.voiceName.trim()) config.voice_name = tts.voiceName.trim();
+  if (tts.language.trim()) config.language = tts.language.trim();
   if (tts.onnxModelDir.trim()) config.onnx_model_dir = tts.onnxModelDir.trim();
   if (tts.refAudioPath.trim()) config.ref_audio_path = tts.refAudioPath.trim();
   if (tts.refAudioText.trim()) config.ref_audio_text = tts.refAudioText.trim();
@@ -306,8 +314,8 @@ function buildCharacterSystemPromptPreview(
 }
 
 const GENERATE_DRAFT = gql`
-  mutation GenerateDraft($fileUrls: [String!], $textContext: String, $locale: String) {
-    generateCharacterDraft(fileUrls: $fileUrls, textContext: $textContext, locale: $locale) {
+  mutation GenerateDraft($fileUrls: [String!], $fileNames: [String!], $textContext: String, $locale: String) {
+    generateCharacterDraft(fileUrls: $fileUrls, fileNames: $fileNames, textContext: $textContext, locale: $locale) {
       name
       description
       affiliation
@@ -458,7 +466,7 @@ function ReferenceAndAiPanel({
     const fileList = Array.from(event.target.files || []);
     event.target.value = '';
     if (fileList.length) {
-      submitPendingFiles(fileList.map((file) => ({ file, displayName: file.name })));
+      submitPendingFiles(fileList.map((file) => ({ file, displayName: file.name, relativePath: file.name })));
     }
   };
 
@@ -470,6 +478,7 @@ function ReferenceAndAiPanel({
         fileList.map((file) => ({
           file,
           displayName: formatReferencePath(file.webkitRelativePath || file.name),
+          relativePath: formatReferencePath(file.webkitRelativePath || file.name),
         })),
       );
     }
@@ -692,6 +701,8 @@ export default function CreateCharacterSimplifiedForm({
   });
   const [autoInputText, setAutoInputText] = useState('');
   const [backgroundFiles, setBackgroundFiles] = useState<ReferenceFile[]>([]);
+  // 参考文件上传失败的数量：保存前据此提醒用户，避免角色悄悄丢文件。
+  const [failedUploadCount, setFailedUploadCount] = useState(0);
   const [autoTargetName, setAutoTargetName] = useState('');
   const [systemPromptPreview, setSystemPromptPreview] = useState('');
   const [uploadingTarget, setUploadingTarget] = useState<'avatar' | 'background' | null>(null);
@@ -745,8 +756,13 @@ export default function CreateCharacterSimplifiedForm({
         char.enableWebSearch === true ? 'on' : char.enableWebSearch === false ? 'off' : 'default',
       ttsConfig: {
         provider: (charTts.provider as TtsConfigForm['provider']) || '',
-        modelVersion: (charTts.model_version as TtsConfigForm['modelVersion']) || '',
+        // 旧数据可能存着 genie + v2pr/v4 的非法组合（合成时必 503），加载时直接清掉。
+        modelVersion:
+          charTts.provider === 'genie' && GENIE_UNSUPPORTED_VERSIONS.has((charTts.model_version || '') as TtsModelVersion)
+            ? ''
+            : (charTts.model_version as TtsConfigForm['modelVersion']) || '',
         voiceName: charTts.voice_name || '',
+        language: charTts.language || '',
         onnxModelDir: charTts.onnx_model_dir || '',
         refAudioPath: charTts.ref_audio_path || '',
         refAudioText: charTts.ref_audio_text || '',
@@ -832,8 +848,11 @@ export default function CreateCharacterSimplifiedForm({
   const uploadSingleFile = useCallback(async (item: PendingReferenceFile) => {
     const formData = new FormData();
     formData.append('file', item.file);
+    // Keep the folder-group hierarchy so the memory filesystem can expose the
+    // uploaded tree (Momotalk/xxx/scene.txt) instead of a flat name list.
+    formData.append('relative_path', item.relativePath || item.file.name);
 
-    const res = await fetch(UPLOAD_API_URL, { method: 'POST', body: formData });
+    const res = await fetch(FILES_UPLOAD_API_URL, { method: 'POST', body: formData });
     if (!res.ok) {
       throw new Error(copy.characterForm.uploadFailed);
     }
@@ -841,7 +860,7 @@ export default function CreateCharacterSimplifiedForm({
     const uploadData = await res.json();
     return {
       uploadedUrl: uploadData.url || uploadData.uri,
-      uploadedName: item.displayName || uploadData.display_name || uploadData.name || item.file.name,
+      uploadedName: item.displayName || uploadData.display_name || uploadData.relative_path || uploadData.name || item.file.name,
       uploadedType: item.file.type.startsWith('image/') ? 'image' : 'text',
       file: item.file,
     };
@@ -850,7 +869,7 @@ export default function CreateCharacterSimplifiedForm({
   const processFileUpload = useCallback(async (file: File, target: 'avatar' | 'background') => {
     setUploadingTarget(target);
     try {
-      const uploaded = await uploadSingleFile({ file, displayName: file.name });
+      const uploaded = await uploadSingleFile({ file, displayName: file.name, relativePath: file.name });
 
       if (target === 'background') {
         setBackgroundFiles((prev) => [
@@ -892,6 +911,7 @@ export default function CreateCharacterSimplifiedForm({
       }
 
       const failedCount = items.length - uploadedFiles.length;
+      setFailedUploadCount((prev) => prev + failedCount);
       if (failedCount) {
         alert(copy.characterForm.uploadSomeFailed(failedCount));
       }
@@ -1009,6 +1029,7 @@ export default function CreateCharacterSimplifiedForm({
       const response = await generateDraft({
         variables: {
           fileUrls: draftSourceFiles.map((file) => file.url),
+          fileNames: draftSourceFiles.map((file) => file.name),
           textContext: combinedContext,
           locale: promptPreviewLocale,
         }
@@ -1039,6 +1060,22 @@ export default function CreateCharacterSimplifiedForm({
     setHighlightDeadline(0);
   };
 
+  const handleTtsProviderChange = (provider: TtsProviderChoice) => {
+    setForm((prev) => ({
+      ...prev,
+      ttsConfig: {
+        ...prev.ttsConfig,
+        provider,
+        // genie 只认 v2/v2ProPlus；切到该引擎时清掉已选的不兼容版本，
+        // 避免保存出合成时必然失败（503）的组合。
+        modelVersion:
+          provider === 'genie' && GENIE_UNSUPPORTED_VERSIONS.has(prev.ttsConfig.modelVersion)
+            ? ''
+            : prev.ttsConfig.modelVersion,
+      },
+    }));
+  };
+
   const handleSave = async () => {
     if (!form.name.trim() || !form.description.trim()) {
       alert(copy.characterForm.nameAndBriefRequired);
@@ -1048,6 +1085,19 @@ export default function CreateCharacterSimplifiedForm({
     if (form.name === 'Generation Failed' || form.name === copy.characterForm.generateFailedName) {
       alert(copy.characterForm.cannotSaveGenerationError);
       return;
+    }
+
+    // 参考文件组还没传完就保存，是“角色存了但文件丢了”的直接原因：
+    // 这里必须等上传结束，失败的部分要用户确认后才能继续。
+    if (uploadingTarget) {
+      alert(copy.characterForm.saveBlockedWhileUploading);
+      return;
+    }
+    if (failedUploadCount > 0) {
+      const proceed = window.confirm(copy.characterForm.saveWithFailedUploads(failedUploadCount));
+      if (!proceed) {
+        return;
+      }
     }
 
     try {
@@ -1089,6 +1139,12 @@ export default function CreateCharacterSimplifiedForm({
   const isUploadingAvatar = uploadingTarget === 'avatar';
   const isUploadingBackground = uploadingTarget === 'background';
   const textReferenceCount = backgroundFiles.filter((file) => file.type === 'text').length;
+  // 仅在「跟随全局（全局可能是 genie）/ 明确 genie」且版本不被 genie 支持时提示；
+  // gptsovits 引擎下 v2pr/v4 是合法组合，不应打扰。
+  const ttsVersionConflictsWithGenie =
+    form.ttsConfig.provider !== 'gptsovits' &&
+    form.ttsConfig.provider !== 'indextts' &&
+    GENIE_UNSUPPORTED_VERSIONS.has(form.ttsConfig.modelVersion);
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
   const isHighlighted = (key: AiDraftKey) =>
     aiFilledFields.has(key) && !aiEditedFields.has(key) && now < highlightDeadline;
@@ -1361,137 +1417,171 @@ export default function CreateCharacterSimplifiedForm({
                   </label>
                   <p className="mt-1 text-xs text-gray-400">{copy.characterForm.ttsSectionHint}</p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-gray-500">
-                      {copy.characterForm.ttsEngineLabel}
-                    </label>
-                    <select
-                      value={form.ttsConfig.provider}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          ttsConfig: { ...prev.ttsConfig, provider: e.target.value as TtsConfigForm['provider'] },
-                        }))
-                      }
-                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    >
-                      <option value="">{copy.characterForm.ttsEngineDefault}</option>
-                      <option value="genie">Genie-TTS（CPU 实时，v2/v2proplus）</option>
-                      <option value="gptsovits">GPT-SoVITS api_v2（全部版本）</option>
-                      <option value="indextts">IndexTTS</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-gray-500">
-                      {copy.characterForm.ttsVersionLabel}
-                    </label>
-                    <select
-                      value={form.ttsConfig.modelVersion}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          ttsConfig: { ...prev.ttsConfig, modelVersion: e.target.value as TtsConfigForm['modelVersion'] },
-                        }))
-                      }
-                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    >
-                      <option value="">{copy.characterForm.ttsVersionDefault}</option>
-                      <option value="v2">v2</option>
-                      <option value="v2pr">v2pr（v2Pro）</option>
-                      <option value="v2proplus">v2proplus（v2ProPlus）</option>
-                      <option value="v4">v4</option>
-                    </select>
-                    {form.ttsConfig.modelVersion === 'v2pr' || form.ttsConfig.modelVersion === 'v4' ? (
-                      <p className="text-xs text-amber-600">{copy.characterForm.ttsVersionLinkageHint}</p>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-gray-500">
-                      {copy.characterForm.ttsVoiceNameLabel}
-                    </label>
-                    <input
-                      value={form.ttsConfig.voiceName}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          ttsConfig: { ...prev.ttsConfig, voiceName: e.target.value },
-                        }))
-                      }
-                      placeholder={copy.characterForm.ttsVoiceNamePlaceholder}
-                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-gray-500">
-                      {copy.characterForm.ttsOnnxDirLabel}
-                    </label>
-                    <input
-                      value={form.ttsConfig.onnxModelDir}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          ttsConfig: { ...prev.ttsConfig, onnxModelDir: e.target.value },
-                        }))
-                      }
-                      placeholder={copy.characterForm.ttsOnnxDirPlaceholder}
-                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                  </div>
-                </div>
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-gray-500">
-                    {copy.characterForm.ttsRefAudioPathLabel}
+                    {copy.characterForm.ttsEngineLabel}
                   </label>
-                  <input
-                    value={form.ttsConfig.refAudioPath}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        ttsConfig: { ...prev.ttsConfig, refAudioPath: e.target.value },
-                      }))
-                    }
-                    placeholder={copy.characterForm.ttsRefAudioPathPlaceholder}
+                  <select
+                    value={form.ttsConfig.provider}
+                    onChange={(e) => handleTtsProviderChange(e.target.value as TtsProviderChoice)}
                     className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                  />
+                  >
+                    <option value="">{copy.characterForm.ttsEngineDefault}</option>
+                    <option value="genie">{copy.characterForm.ttsEngineOptionGenie}</option>
+                    <option value="gptsovits">{copy.characterForm.ttsEngineOptionGptsovits}</option>
+                    <option value="indextts">{copy.characterForm.ttsEngineOptionIndextts}</option>
+                  </select>
+                  <p className="text-[11px] leading-4 text-gray-400">
+                    {copy.characterForm.ttsEngineDeployHint}
+                  </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-[1.6fr_0.4fr]">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-gray-500">
-                      {copy.characterForm.ttsRefAudioTextLabel}
-                    </label>
-                    <textarea
-                      value={form.ttsConfig.refAudioText}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          ttsConfig: { ...prev.ttsConfig, refAudioText: e.target.value },
-                        }))
-                      }
-                      rows={2}
-                      placeholder={copy.characterForm.ttsRefAudioTextPlaceholder}
-                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-gray-500">
-                      {copy.characterForm.ttsRefAudioLangLabel}
-                    </label>
-                    <input
-                      value={form.ttsConfig.refAudioLanguage}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          ttsConfig: { ...prev.ttsConfig, refAudioLanguage: e.target.value },
-                        }))
-                      }
-                      placeholder="jp"
-                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                  </div>
-                </div>
+                {form.ttsConfig.provider === 'indextts' ? (
+                  <p className="text-xs leading-5 text-gray-400">{copy.characterForm.ttsIndexttsHint}</p>
+                ) : (
+                  <>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-gray-500">
+                        {copy.characterForm.ttsVersionLabel}
+                      </label>
+                      <select
+                        value={form.ttsConfig.modelVersion}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            ttsConfig: { ...prev.ttsConfig, modelVersion: e.target.value as TtsConfigForm['modelVersion'] },
+                          }))
+                        }
+                        className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                      >
+                        <option value="">{copy.characterForm.ttsVersionDefault}</option>
+                        <option value="v2">v2</option>
+                        <option value="v2pr" disabled={form.ttsConfig.provider === 'genie'}>
+                          v2pr（v2Pro）
+                        </option>
+                        <option value="v2proplus">v2proplus（v2ProPlus）</option>
+                        <option value="v4" disabled={form.ttsConfig.provider === 'genie'}>
+                          v4
+                        </option>
+                      </select>
+                      {ttsVersionConflictsWithGenie ? (
+                        <p className="text-xs text-amber-600">{copy.characterForm.ttsVersionLinkageHint}</p>
+                      ) : null}
+                    </div>
+                    {form.ttsConfig.provider !== 'gptsovits' && (
+                      <>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-gray-500">
+                              {copy.characterForm.ttsVoiceNameLabel}
+                            </label>
+                            <input
+                              value={form.ttsConfig.voiceName}
+                              onChange={(e) =>
+                                setForm((prev) => ({
+                                  ...prev,
+                                  ttsConfig: { ...prev.ttsConfig, voiceName: e.target.value },
+                                }))
+                              }
+                              placeholder={copy.characterForm.ttsVoiceNamePlaceholder}
+                              className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-gray-500">
+                              {copy.characterForm.ttsLanguageLabel}
+                            </label>
+                            <select
+                              value={form.ttsConfig.language}
+                              onChange={(e) =>
+                                setForm((prev) => ({
+                                  ...prev,
+                                  ttsConfig: { ...prev.ttsConfig, language: e.target.value },
+                                }))
+                              }
+                              className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                            >
+                              <option value="">{copy.characterForm.ttsLanguageDefault}</option>
+                              <option value="zh">中文 zh</option>
+                              <option value="jp">日本語 jp</option>
+                              <option value="en">English en</option>
+                              <option value="ko">한국어 ko</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-gray-500">
+                            {copy.characterForm.ttsOnnxDirLabel}
+                          </label>
+                          <input
+                            value={form.ttsConfig.onnxModelDir}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                ttsConfig: { ...prev.ttsConfig, onnxModelDir: e.target.value },
+                              }))
+                            }
+                            placeholder={copy.characterForm.ttsOnnxDirPlaceholder}
+                            className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                          />
+                        </div>
+                      </>
+                    )}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-gray-500">
+                        {copy.characterForm.ttsRefAudioPathLabel}
+                      </label>
+                      <input
+                        value={form.ttsConfig.refAudioPath}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            ttsConfig: { ...prev.ttsConfig, refAudioPath: e.target.value },
+                          }))
+                        }
+                        placeholder={copy.characterForm.ttsRefAudioPathPlaceholder}
+                        className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                      />
+                      {form.ttsConfig.provider === 'gptsovits' ? (
+                        <p className="text-xs text-amber-600">{copy.characterForm.ttsRefAudioRequiredHint}</p>
+                      ) : null}
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-[1.6fr_0.4fr]">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-gray-500">
+                          {copy.characterForm.ttsRefAudioTextLabel}
+                        </label>
+                        <textarea
+                          value={form.ttsConfig.refAudioText}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              ttsConfig: { ...prev.ttsConfig, refAudioText: e.target.value },
+                            }))
+                          }
+                          rows={2}
+                          placeholder={copy.characterForm.ttsRefAudioTextPlaceholder}
+                          className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-gray-500">
+                          {copy.characterForm.ttsRefAudioLangLabel}
+                        </label>
+                        <input
+                          value={form.ttsConfig.refAudioLanguage}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              ttsConfig: { ...prev.ttsConfig, refAudioLanguage: e.target.value },
+                            }))
+                          }
+                          placeholder="jp"
+                          className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -1532,7 +1622,7 @@ export default function CreateCharacterSimplifiedForm({
           <button
             type="button"
             onClick={handleSave}
-            disabled={saveLoading}
+            disabled={saveLoading || uploadingTarget !== null}
             className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-70"
           >
             {saveLoading ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}

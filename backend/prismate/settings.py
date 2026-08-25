@@ -208,18 +208,14 @@ ASR_DEVICE = env('ASR_DEVICE', default='cpu')
 ASR_COMPUTE_TYPE = env('ASR_COMPUTE_TYPE', default='int8')
 
 # Realtime voice reply (TTS). Engines run as standalone HTTP services;
-# Django only talks to them. genie = Genie-TTS (GPT-SoVITS ONNX on CPU,
+# Django only talks to them. genie = Genie-TTS (GPT-SoVITS ONNX, CPU by
+# default — start scripts/genie_server.py with --device cuda for NVIDIA GPU;
 # supports v2/v2ProPlus converted characters); gptsovits = official
-# api_v2 (all four model versions, needs GPU for realtime); indextts reserved.
+# api_v2 (all four model versions, best deployed on a GPU); indextts reserved.
 TTS_PROVIDER = env('TTS_PROVIDER', default='genie')
 TTS_GENIE_URL = env('TTS_GENIE_URL', default='http://127.0.0.1:8050')
-TTS_GENIE_CHARACTER = env('TTS_GENIE_CHARACTER', default='seia')
-TTS_GENIE_LANGUAGE = env('TTS_GENIE_LANGUAGE', default='zh')
-# 角色未在表单里配置 ONNX 目录/参考音频时的全局兜底路径（Genie 服务器本机路径）
-TTS_GENIE_ONNX_MODEL_DIR = env('TTS_GENIE_ONNX_MODEL_DIR', default='')
-TTS_GENIE_REF_AUDIO_PATH = env('TTS_GENIE_REF_AUDIO_PATH', default='')
-TTS_GENIE_REF_AUDIO_TEXT = env('TTS_GENIE_REF_AUDIO_TEXT', default='')
-TTS_GENIE_REF_AUDIO_LANGUAGE = env('TTS_GENIE_REF_AUDIO_LANGUAGE', default='')
+# 每个角色的模型目录/参考音频/语言是角色属性，只在角色编辑页「语音模型」
+# 区块配置（Character.tts_config），不设全局环境变量兜底。
 TTS_GPTSOVITS_URL = env('TTS_GPTSOVITS_URL', default='http://127.0.0.1:9880')
 TTS_GPTSOVITS_TEXT_LANG = env('TTS_GPTSOVITS_TEXT_LANG', default='zh')
 TTS_GPTSOVITS_REF_AUDIO_PATH = env('TTS_GPTSOVITS_REF_AUDIO_PATH', default='')

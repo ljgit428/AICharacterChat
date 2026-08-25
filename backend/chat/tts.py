@@ -3,8 +3,9 @@
 架构（2026-08-24 定稿）：
 - 全部 provider 都是"HTTP 客户端"——TTS 引擎以独立服务运行，Django 不背
   PyTorch 栈。当前实现：
-  * genie     —— Genie-TTS FastAPI 服务器（GPT-SoVITS ONNX CPU 推理，
-                 首响 ~1.1s，支持 v2/v2ProPlus 转换后的角色音色，圣亚即此路线）
+  * genie     —— Genie-TTS FastAPI 服务器（GPT-SoVITS ONNX 推理，服务端
+                 默认 CPU、可 --device cuda 走 GPU，CPU 首响 ~1.1s，
+                 支持 v2/v2ProPlus 转换后的角色音色，圣亚即此路线）
   * gptsovits —— 官方 GPT-SoVITS api_v2 服务器（支持 v2/v2pro/v2proplus/v4
                  全部四种模型版本；CPU 推理慢，留给有 GPU 的场景）
   * indextts  —— IndexTTS HTTP 服务（预留，POST JSON 返回音频）
@@ -18,6 +19,7 @@ import logging
 import os
 import time
 import wave
+from pathlib import PurePath
 
 import requests
 from django.conf import settings
@@ -48,8 +50,6 @@ def get_tts_config() -> dict:
     return {
         'provider': _env('TTS_PROVIDER', 'genie').strip().lower(),
         'genie_url': _env('TTS_GENIE_URL', 'http://127.0.0.1:8050').rstrip('/'),
-        'genie_character': _env('TTS_GENIE_CHARACTER', 'seia'),
-        'genie_language': _env('TTS_GENIE_LANGUAGE', 'zh'),
         'gptsovits_url': _env('TTS_GPTSOVITS_URL', 'http://127.0.0.1:9880').rstrip('/'),
         'gptsovits_text_lang': _env('TTS_GPTSOVITS_TEXT_LANG', 'zh'),
         'gptsovits_ref_audio_path': _env('TTS_GPTSOVITS_REF_AUDIO_PATH'),
@@ -61,8 +61,8 @@ def get_tts_config() -> dict:
 
 
 PROVIDER_LABELS = {
-    'genie': 'Genie-TTS（GPT-SoVITS ONNX，CPU 实时）',
-    'gptsovits': 'GPT-SoVITS api_v2（支持 v2/v2pro/v2proplus/v4）',
+    'genie': 'Genie-TTS（GPT-SoVITS ONNX 实时，CPU/GPU 取决于服务端启动参数）',
+    'gptsovits': 'GPT-SoVITS api_v2（支持 v2/v2pro/v2proplus/v4，建议 GPU 部署）',
     'indextts': 'IndexTTS HTTP 服务',
 }
 
@@ -284,18 +284,35 @@ def build_provider(provider: str):
 # v2pro（v2pr）与 v4 必须走官方 api_v2 通道。
 GENIE_SUPPORTED_MODEL_VERSIONS = {'', 'v2', 'v2proplus'}
 
+# 角色未在语音模型设置里选择语言时的兜底（中文底模最常见）。
+# 仅此一项保留默认值；模型目录、参考音频一律只认角色自己的配置。
+DEFAULT_GENIE_LANGUAGE = 'zh'
 
-def build_genie_voice(config: dict, character_tts_config: dict | None) -> dict:
-    """合并全局默认与角色级 tts_config，得到一次合成所需的音色描述。"""
+
+def build_genie_voice(character_tts_config: dict | None) -> dict:
+    """从角色级 tts_config 构造一次合成所需的音色描述。
+
+    每个角色对应自己的 ONNX 模型：模型目录/参考音频是角色属性，只认
+    角色编辑页「语音模型」里配置的值，不设全局环境变量兜底——缺关键
+    配置时抛可操作的错误，而不是静默加载到错误的模型上。
+    """
     cfg = character_tts_config or {}
-    language = cfg.get('language') or config['genie_language']
+    onnx_model_dir = (cfg.get('onnx_model_dir') or '').strip()
+    if not onnx_model_dir:
+        raise TtsUnavailableError(
+            '该角色尚未配置语音模型：请在角色编辑页「语音模型」中填写 '
+            'ONNX 模型目录（genie.convert_to_onnx 的输出目录）。'
+        )
+    # 音色键默认取模型目录名：同一模型的多个角色共享 genie 侧的一次加载。
+    voice_name = cfg.get('voice_name') or PurePath(onnx_model_dir.replace('\\', '/')).name
+    language = (cfg.get('language') or '').strip() or DEFAULT_GENIE_LANGUAGE
     return {
-        'name': cfg.get('voice_name') or config['genie_character'],
-        'onnx_model_dir': cfg.get('onnx_model_dir') or _env('TTS_GENIE_ONNX_MODEL_DIR'),
+        'name': voice_name,
+        'onnx_model_dir': onnx_model_dir,
         'language': language,
-        'ref_audio_path': cfg.get('ref_audio_path') or _env('TTS_GENIE_REF_AUDIO_PATH'),
-        'ref_audio_text': cfg.get('ref_audio_text') or _env('TTS_GENIE_REF_AUDIO_TEXT'),
-        'ref_audio_language': cfg.get('ref_audio_language') or _env('TTS_GENIE_REF_AUDIO_LANGUAGE') or language,
+        'ref_audio_path': cfg.get('ref_audio_path') or '',
+        'ref_audio_text': cfg.get('ref_audio_text') or '',
+        'ref_audio_language': cfg.get('ref_audio_language') or language,
     }
 
 
@@ -316,7 +333,7 @@ def resolve_provider_and_voice(
                 f'Genie-TTS 不支持 {model_version} 模型版本（仅 v2/v2proplus）；'
                 f'该角色的音色请改用 gptsovits 通道。'
             )
-        voice = build_genie_voice(config, cfg)
+        voice = build_genie_voice(cfg)
     elif cfg.get('ref_audio_path') or cfg.get('ref_audio_text'):
         # 非 genie 引擎：仅透传角色级参考音频覆盖
         voice = {key: cfg[key] for key in ('ref_audio_path', 'ref_audio_text') if cfg.get(key)}
