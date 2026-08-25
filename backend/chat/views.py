@@ -799,8 +799,9 @@ class ChatViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         provider = (request.data.get('provider') or '').strip().lower() or None
-        # 角色级语音模型配置（角色界面"语音模型"区块）优先于全局配置；
-        # 无效/不属于当前用户的 character_id 静默回退全局默认音色。
+        # 每个角色的模型目录/参考音频只存在角色级 tts_config（角色界面"语音
+        # 模型"区块），没有全局音色兜底；无效/不属于当前用户的 character_id
+        # 视作未提供配置，genie 通道会直接报"请先配置语音模型"。
         character_tts_config = None
         character_id = str(request.data.get('character_id') or '').strip()
         if character_id:
