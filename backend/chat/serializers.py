@@ -3,7 +3,7 @@ import os
 from rest_framework import serializers
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .attachments import get_message_attachments, get_primary_message_attachment
-from .models import Character, CharacterKnowledgeAsset, ChatSession, Message, ModelConfiguration, UserProfile, WebSearchConfiguration
+from .models import Character, CharacterKnowledgeAsset, ChatSession, Message, ModelConfiguration, TtsEngine, TtsServiceSettings, TtsVoiceModel, UserProfile, WebSearchConfiguration
 
 class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
@@ -192,6 +192,85 @@ class WebSearchConfigurationSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class TtsServiceSettingsSerializer(serializers.ModelSerializer):
+    """用户级 TTS 引擎设置。空字段 = 跟随环境变量默认（chat.tts.get_tts_config）。"""
+
+    # 用 CharField 接住大小写变体（'GENIE'），validate 阶段再归一化并校验。
+    default_provider = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_default_provider(self, value):
+        provider = (value or '').strip().lower()
+        if provider and provider not in {choice for choice, _ in TtsEngine.choices}:
+            raise serializers.ValidationError(f'Unknown TTS engine: {provider}')
+        return provider
+
+    def _normalize_url(self, value):
+        return (value or '').strip().rstrip('/')
+
+    def validate(self, attrs):
+        if 'genie_url' in attrs:
+            attrs['genie_url'] = self._normalize_url(attrs.get('genie_url'))
+        if 'gptsovits_url' in attrs:
+            attrs['gptsovits_url'] = self._normalize_url(attrs.get('gptsovits_url'))
+        if 'indextts_url' in attrs:
+            attrs['indextts_url'] = self._normalize_url(attrs.get('indextts_url'))
+        return attrs
+
+    def create(self, validated_data):
+        user = self.context['user']
+        settings_row, _ = TtsServiceSettings.objects.update_or_create(
+            user=user,
+            defaults=validated_data,
+        )
+        return settings_row
+
+    class Meta:
+        model = TtsServiceSettings
+        fields = ['default_provider', 'genie_url', 'gptsovits_url', 'indextts_url', 'updated_at']
+        read_only_fields = ['updated_at']
+
+
+# 与 chat.tts.TTS_MODEL_VERSION_ALIASES 一致：存量数据曾把 v2pro 写作 v2pr。
+TTS_MODEL_VERSION_ALIASES = {'v2pr': 'v2pro'}
+
+
+class TtsVoiceModelSerializer(serializers.ModelSerializer):
+    """音色库条目。model_version 只做归一化不做枚举拦截：genie-tts 升级
+    支持更多版本时后端无需改这里，兼容校验在合成时进行。"""
+
+    # 用 CharField 接住大小写变体，validate 阶段再归一化并校验。
+    engine = serializers.CharField()
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('Name is required.')
+        return name
+
+    def validate_engine(self, value):
+        engine = (value or '').strip().lower()
+        valid = {choice for choice, _ in TtsEngine.choices}
+        if engine not in valid:
+            raise serializers.ValidationError(f'Unknown TTS engine: {engine}')
+        return engine
+
+    def validate_model_version(self, value):
+        version = (value or '').strip().lower()
+        return TTS_MODEL_VERSION_ALIASES.get(version, version)
+
+    class Meta:
+        model = TtsVoiceModel
+        fields = [
+            'id', 'name', 'engine', 'model_version', 'language', 'voice_name',
+            'onnx_model_dir', 'ref_audio_path', 'ref_audio_text', 'ref_audio_language',
+            'conversion_status', 'conversion_error',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'conversion_status', 'conversion_error', 'created_at', 'updated_at',
+        ]
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

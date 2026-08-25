@@ -24,6 +24,8 @@ from pathlib import PurePath
 import requests
 from django.conf import settings
 
+from .models import TtsServiceSettings, TtsVoiceModel
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,8 +48,10 @@ def _env(key: str, default: str = "") -> str:
     return str(getattr(settings, key, None) or os.getenv(key) or default)
 
 
-def get_tts_config() -> dict:
-    return {
+def get_tts_config(overrides: dict | None = None) -> dict:
+    """环境变量为底的引擎配置；overrides（来自用户级 TtsServiceSettings）
+    里的非空字段覆盖同名项。"""
+    config = {
         'provider': _env('TTS_PROVIDER', 'genie').strip().lower(),
         'genie_url': _env('TTS_GENIE_URL', 'http://127.0.0.1:8050').rstrip('/'),
         'gptsovits_url': _env('TTS_GPTSOVITS_URL', 'http://127.0.0.1:9880').rstrip('/'),
@@ -58,6 +62,10 @@ def get_tts_config() -> dict:
         'indextts_url': _env('TTS_INDEXTTS_URL').rstrip('/'),
         'indextts_text_field': _env('TTS_INDEXTTS_TEXT_FIELD', 'text'),
     }
+    for key, value in (overrides or {}).items():
+        if key in config and str(value or '').strip():
+            config[key] = str(value).strip().rstrip('/') if key.endswith('_url') else str(value).strip().lower()
+    return config
 
 
 PROVIDER_LABELS = {
@@ -269,8 +277,8 @@ PROVIDER_CLASSES = {
 _provider_instances: dict = {}
 
 
-def build_provider(provider: str):
-    config = get_tts_config()
+def build_provider(provider: str, config: dict | None = None):
+    config = config or get_tts_config()
     if provider == 'genie':
         return GenieTtsProvider(config['genie_url'])
     if provider == 'gptsovits':
@@ -279,100 +287,188 @@ def build_provider(provider: str):
         return IndexTtsProvider(config)
     raise TtsUnavailableError(f'未知 TTS provider：{provider}')
 
-
 # 角色音色的版本→引擎兼容性：genie 只能加载 v2 / v2ProPlus 转换的模型，
-# v2pro（v2pr）与 v4 必须走官方 api_v2 通道。
+# v2pro 与 v4 必须走官方 api_v2 通道。genie-tts 升级支持更多版本时只需改这里。
 GENIE_SUPPORTED_MODEL_VERSIONS = {'', 'v2', 'v2proplus'}
 
-# 角色未在语音模型设置里选择语言时的兜底（中文底模最常见）。
-# 仅此一项保留默认值；模型目录、参考音频一律只认角色自己的配置。
+# 存量数据里 model_version 曾写作 v2pr，读取时归一化为 v2pro。
+TTS_MODEL_VERSION_ALIASES = {'v2pr': 'v2pro'}
+
+# 角色未在语音设置里选择语言时的兜底（中文底模最常见）。
+# 仅此一项保留默认值；模型目录、参考音频一律只认音色库/角色自己的配置。
 DEFAULT_GENIE_LANGUAGE = 'zh'
 
 
-def build_genie_voice(character_tts_config: dict | None) -> dict:
-    """从角色级 tts_config 构造一次合成所需的音色描述。
+def _normalize_model_version(version: str) -> str:
+    version = (version or '').strip().lower()
+    return TTS_MODEL_VERSION_ALIASES.get(version, version)
 
-    每个角色对应自己的 ONNX 模型：模型目录/参考音频是角色属性，只认
-    角色编辑页「语音模型」里配置的值，不设全局环境变量兜底——缺关键
-    配置时抛可操作的错误，而不是静默加载到错误的模型上。
+
+def _resolve_server_path(path: str) -> str:
+    """把 MEDIA_ROOT 相对路径解析为服务器绝对路径；绝对路径原样返回。"""
+    path = (path or '').strip()
+    if not path or os.path.isabs(path):
+        return path
+    return os.path.join(str(settings.MEDIA_ROOT), path)
+
+
+def _voice_model_record(character_tts_config: dict | None, user=None):
+    """角色 tts_config.voice_model_id → 音色库记录（限定属于该用户）。"""
+    raw_id = str((character_tts_config or {}).get('voice_model_id') or '').strip()
+    if not raw_id:
+        return None
+    try:
+        pk = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    queryset = TtsVoiceModel.objects.all()
+    if user is not None:
+        queryset = queryset.filter(user=user)
+    return queryset.filter(pk=pk).first()
+
+
+def merged_voice_fields(character_tts_config: dict | None, user=None) -> dict:
+    """合成所需的音色字段。优先级：角色显式字段 > 音色库记录 > 空。
+
+    旧角色的 tts_config 直接存 onnx_model_dir/ref_audio_path（无
+    voice_model_id）也走同一条路，行为与迁移前一致。
     """
     cfg = character_tts_config or {}
-    onnx_model_dir = (cfg.get('onnx_model_dir') or '').strip()
+    record = _voice_model_record(cfg, user)
+
+    def pick(key: str) -> str:
+        value = (cfg.get(key) or '').strip() if isinstance(cfg.get(key), str) else ''
+        if value:
+            return value
+        return (getattr(record, key, '') or '').strip() if record else ''
+
+    ref_audio_language = pick('ref_audio_language')
+    language = pick('language')
+    result = {
+        'provider': pick('provider'),
+        'model_version': _normalize_model_version(pick('model_version')),
+        'onnx_model_dir': pick('onnx_model_dir'),
+        'voice_name': pick('voice_name'),
+        'language': language,
+        'ref_audio_path': _resolve_server_path(pick('ref_audio_path')),
+        'ref_audio_text': pick('ref_audio_text'),
+        'ref_audio_language': ref_audio_language or language,
+    }
+    if not result['voice_name'] and record is not None:
+        # 音色库条目的名字即 genie 侧音色键（目录名只兜底旧数据直填场景）。
+        result['voice_name'] = (record.name or '').strip()
+    return result
+
+
+def build_genie_voice(character_tts_config: dict | None, user=None) -> dict:
+    """构造一次 genie 合成所需的音色描述。
+
+    每个音色对应自己的 ONNX 模型：模型目录/参考音频来自设置页登记的音色
+    库（或旧数据的角色级直填），不设全局环境变量兜底——缺关键配置时抛
+    可操作的错误，而不是静默加载到错误的模型上。
+    """
+    fields = merged_voice_fields(character_tts_config, user)
+    onnx_model_dir = fields['onnx_model_dir']
     if not onnx_model_dir:
         raise TtsUnavailableError(
-            '该角色尚未配置语音模型：请在角色编辑页「语音模型」中填写 '
-            'ONNX 模型目录（genie.convert_to_onnx 的输出目录）。'
+            '该角色尚未配置语音模型：请在 设置→语音设置 登记音色后，'
+            '在角色编辑页「语音模型」中选择。'
         )
     # 音色键默认取模型目录名：同一模型的多个角色共享 genie 侧的一次加载。
-    voice_name = cfg.get('voice_name') or PurePath(onnx_model_dir.replace('\\', '/')).name
-    language = (cfg.get('language') or '').strip() or DEFAULT_GENIE_LANGUAGE
+    voice_name = fields['voice_name'] or PurePath(onnx_model_dir.replace('\\', '/')).name
     return {
         'name': voice_name,
         'onnx_model_dir': onnx_model_dir,
-        'language': language,
-        'ref_audio_path': cfg.get('ref_audio_path') or '',
-        'ref_audio_text': cfg.get('ref_audio_text') or '',
-        'ref_audio_language': cfg.get('ref_audio_language') or language,
+        'language': fields['language'] or DEFAULT_GENIE_LANGUAGE,
+        'ref_audio_path': fields['ref_audio_path'],
+        'ref_audio_text': fields['ref_audio_text'],
+        'ref_audio_language': fields['ref_audio_language'],
     }
 
 
 def resolve_provider_and_voice(
     provider: str | None = None,
     character_tts_config: dict | None = None,
+    user=None,
 ) -> tuple[str, dict | None]:
     """确定本次合成使用的 provider 与音色覆盖（含版本兼容校验）。"""
     config = get_tts_config()
-    cfg = character_tts_config or {}
-    selected = (cfg.get('provider') or provider or config['provider']).strip().lower()
-    model_version = (cfg.get('model_version') or '').strip().lower()
+    fields = merged_voice_fields(character_tts_config, user)
+    selected = (fields['provider'] or provider or config['provider']).strip().lower()
+    model_version = fields['model_version']
 
     voice = None
     if selected == 'genie':
         if model_version and model_version not in GENIE_SUPPORTED_MODEL_VERSIONS:
             raise TtsUnavailableError(
                 f'Genie-TTS 不支持 {model_version} 模型版本（仅 v2/v2proplus）；'
-                f'该角色的音色请改用 gptsovits 通道。'
+                f'该音色请改用 gptsovits 通道。'
             )
-        voice = build_genie_voice(cfg)
-    elif cfg.get('ref_audio_path') or cfg.get('ref_audio_text'):
-        # 非 genie 引擎：仅透传角色级参考音频覆盖
-        voice = {key: cfg[key] for key in ('ref_audio_path', 'ref_audio_text') if cfg.get(key)}
+        voice = build_genie_voice(character_tts_config, user)
+    elif fields['ref_audio_path'] or fields['ref_audio_text']:
+        # 非 genie 引擎：仅透传音色级参考音频覆盖
+        voice = {key: fields[key] for key in ('ref_audio_path', 'ref_audio_text') if fields[key]}
     return selected, voice
 
 
 _provider_instances: dict = {}
 
 
-def get_tts_provider_instance(provider: str):
-    if provider not in _provider_instances:
-        _provider_instances[provider] = build_provider(provider)
-    return _provider_instances[provider]
+def get_tts_provider_instance(provider: str, config: dict | None = None):
+    """按 (provider, base_url) 缓存 provider 实例——不同用户的引擎地址可能不同。"""
+    config = config or get_tts_config()
+    base_url = _provider_config(config, provider).get('url', '')
+    cache_key = (provider, base_url)
+    if cache_key not in _provider_instances:
+        _provider_instances[cache_key] = build_provider(provider, config)
+    return _provider_instances[cache_key]
 
 
-def get_tts_provider(provider: str | None = None):
+def get_tts_provider(provider: str | None = None, config: dict | None = None):
     """按配置（或请求覆盖）构建 provider；未就绪时抛 TtsUnavailableError。"""
-    config = get_tts_config()
+    config = config or get_tts_config()
     selected = (provider or config['provider']).strip().lower()
     ok, hint = provider_ready(config, selected)
     if not ok:
         raise TtsUnavailableError(hint)
-    instance = get_tts_provider_instance(selected)
+    instance = get_tts_provider_instance(selected, config)
     reachable, reach_hint = instance.readiness_probe()
     if not reachable:
         raise TtsUnavailableError(reach_hint)
     return instance
 
 
-def readiness() -> dict:
+def service_overrides_for_user(user) -> dict | None:
+    """用户级 TtsServiceSettings → get_tts_config 的 overrides 字典。
+
+    空字段不进字典，保持环境变量默认生效。未登录/未配置返回 None。
+    """
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return None
+    row = TtsServiceSettings.get_for_user(user)
+    if not row:
+        return None
+    return {
+        'provider': (row.default_provider or '').strip(),
+        'genie_url': (row.genie_url or '').strip(),
+        'gptsovits_url': (row.gptsovits_url or '').strip(),
+        'indextts_url': (row.indextts_url or '').strip(),
+    }
+
+
+def readiness(service_overrides: dict | None = None) -> dict:
     """前端"语音回复"开关的提示数据源。"""
-    config = get_tts_config()
+    config = get_tts_config(service_overrides)
     provider = config['provider']
     configured_ok, hint = provider_ready(config, provider)
     reachable = False
     if configured_ok:
-        instance = build_provider(provider)
-        reachable, reach_hint = instance.readiness_probe()
-        hint = hint or reach_hint
+        try:
+            instance = build_provider(provider, config)
+            reachable, reach_hint = instance.readiness_probe()
+            hint = hint or reach_hint
+        except TtsUnavailableError as exc:
+            hint = str(exc)
     if configured_ok and reachable:
         hint = ''
     return {
@@ -392,10 +488,17 @@ def synthesize_speech(
     text: str,
     provider: str | None = None,
     character_tts_config: dict | None = None,
+    user=None,
+    service_overrides: dict | None = None,
 ) -> dict:
-    """合成一段文本。角色级 tts_config 优先于全局配置（语音模型的唯一配置入口在角色界面）。"""
-    selected, voice = resolve_provider_and_voice(provider, character_tts_config)
-    instance = get_tts_provider_instance(selected)
+    """合成一段文本。
+
+    引擎地址/默认 provider：用户级设置（service_overrides）> 环境变量。
+    音色：角色 tts_config 里的显式字段 > 其所选音色库记录。
+    """
+    config = get_tts_config(service_overrides)
+    selected, voice = resolve_provider_and_voice(provider, character_tts_config, user)
+    instance = get_tts_provider_instance(selected, config)
     ok, hint = instance.readiness_probe()
     if not ok:
         raise TtsUnavailableError(hint)

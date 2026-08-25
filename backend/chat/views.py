@@ -1,11 +1,16 @@
 import json
+from pathlib import Path
+from uuid import uuid4
 
+import requests
+from django.conf import settings
 from django.http import HttpResponse, StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
+from django.utils.text import slugify
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
@@ -24,6 +29,9 @@ from .models import (
     ModelConfiguration,
     ModelRole,
     ModelRoleAssignment,
+    TtsEngine,
+    TtsServiceSettings,
+    TtsVoiceModel,
     UserProfile,
     WebSearchConfiguration,
 )
@@ -37,6 +45,8 @@ from .serializers import (
     MessageSerializer,
     MessageCreateSerializer,
     ModelConfigurationSerializer,
+    TtsServiceSettingsSerializer,
+    TtsVoiceModelSerializer,
     UserProfileSerializer,
     WebSearchConfigurationSerializer,
 )
@@ -469,6 +479,166 @@ class WebSearchConfigurationViewSet(viewsets.ViewSet):
         return Response(payload)
 
 
+def _save_upload_to(directory: Path, uploaded) -> Path:
+    """把上传文件落盘到 MEDIA_ROOT 子目录，返回服务器绝对路径（genie/api_v2
+    按本机路径读取参考音频）。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / Path(uploaded.name or 'upload.bin').name
+    with open(target, 'wb') as handle:
+        for chunk in uploaded.chunks():
+            handle.write(chunk)
+    return target
+
+
+class TtsServiceSettingsViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['get', 'patch'])
+    def me(self, request):
+        settings_row = TtsServiceSettings.get_for_user(request.user)
+
+        if request.method == 'GET':
+            settings_row = settings_row or TtsServiceSettings(user=request.user)
+            return Response(TtsServiceSettingsSerializer(settings_row).data)
+
+        serializer = TtsServiceSettingsSerializer(
+            settings_row,
+            data=request.data,
+            partial=True,
+            context={'user': request.user},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def test(self, request):
+        """连通性测试：{engine} → {ok, hint}。使用合并用户设置后的地址。"""
+        engine = (request.data.get('engine') or '').strip().lower()
+        if engine not in chat_tts.PROVIDER_CLASSES:
+            raise ValidationError({'engine': f'Unknown TTS engine: {engine}'})
+        config = chat_tts.get_tts_config(chat_tts.service_overrides_for_user(request.user))
+        ok, hint = chat_tts.provider_ready(config, engine)
+        if ok:
+            try:
+                instance = chat_tts.build_provider(engine, config)
+                ok, hint = instance.readiness_probe()
+            except chat_tts.TtsUnavailableError as exc:
+                ok, hint = False, str(exc)
+        return Response({'ok': bool(ok), 'hint': hint})
+
+
+class TtsVoiceModelViewSet(viewsets.ModelViewSet):
+    """音色库 CRUD + 上传转换。角色通过 tts_config.voice_model_id 引用这里的记录。"""
+
+    queryset = TtsVoiceModel.objects.none()
+    serializer_class = TtsVoiceModelSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return TtsVoiceModel.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def upload_convert(self, request):
+        """multipart 上传 GPT-SoVITS torch 权重并交给 Genie 服务转 ONNX。
+
+        字段：ckpt（T2S .ckpt）、pth（VITS .pth）必填；name/language/
+        model_version/ref_audio(+text/lang) 可选。转换在 Genie 侧异步执行，
+        本端点只投递任务并立即返回（conversion_status=pending/converting），
+        前端经 /conversion_status/ 轮询直到 ready/failed。
+        """
+        ckpt = request.FILES.get('ckpt')
+        pth = request.FILES.get('pth')
+        missing = [field for field, file in (('ckpt', ckpt), ('pth', pth)) if not file]
+        if missing:
+            raise ValidationError({field: 'This file is required.' for field in missing})
+
+        name = (request.data.get('name') or '').strip() or Path(pth.name or '').stem.strip() or 'voice'
+        model_version = (request.data.get('model_version') or '').strip().lower()
+        model_version = chat_tts.TTS_MODEL_VERSION_ALIASES.get(model_version, model_version)
+        language = (request.data.get('language') or '').strip().lower()
+
+        source_dir = Path(settings.MEDIA_ROOT) / 'tts' / 'model_sources' / uuid4().hex
+        ckpt_path = _save_upload_to(source_dir, ckpt)
+        pth_path = _save_upload_to(source_dir, pth)
+
+        ref_audio_path = ''
+        ref_audio = request.FILES.get('ref_audio')
+        if ref_audio:
+            ref_audio_path = str(_save_upload_to(Path(settings.MEDIA_ROOT) / 'tts' / 'ref_audio', ref_audio))
+
+        dir_name = slugify(name) or uuid4().hex[:8]
+        output_dir = str(Path(settings.MEDIA_ROOT) / 'tts' / 'onnx_models' / f'{dir_name}_onnx')
+
+        voice = TtsVoiceModel.objects.create(
+            user=request.user,
+            name=name,
+            engine=TtsEngine.GENIE,
+            model_version=model_version,
+            language=language,
+            onnx_model_dir=output_dir,
+            ref_audio_path=ref_audio_path,
+            ref_audio_text=(request.data.get('ref_audio_text') or '').strip(),
+            ref_audio_language=(request.data.get('ref_audio_language') or '').strip(),
+            source_ckpt_path=str(ckpt_path),
+            source_pth_path=str(pth_path),
+            conversion_status=TtsVoiceModel.ConversionStatus.PENDING,
+        )
+
+        genie_url = chat_tts.get_tts_config(chat_tts.service_overrides_for_user(request.user))['genie_url']
+        try:
+            response = requests.post(f'{genie_url}/convert_to_onnx', json={
+                'torch_ckpt_path': str(ckpt_path),
+                'torch_pth_path': str(pth_path),
+                'output_dir': output_dir,
+            }, timeout=(5, 30))
+            response.raise_for_status()
+            job_id = str((response.json() or {}).get('job_id') or '')
+            if job_id:
+                voice.conversion_job_id = job_id
+                voice.conversion_status = TtsVoiceModel.ConversionStatus.CONVERTING
+                voice.save(update_fields=['conversion_job_id', 'conversion_status'])
+            else:
+                voice.conversion_status = TtsVoiceModel.ConversionStatus.FAILED
+                voice.conversion_error = 'Genie-TTS 转换服务未返回 job_id。'
+                voice.save(update_fields=['conversion_status', 'conversion_error'])
+        except requests.RequestException as exc:
+            voice.conversion_status = TtsVoiceModel.ConversionStatus.FAILED
+            voice.conversion_error = f'无法连接 Genie-TTS 转换服务（{genie_url}）：{exc.__class__.__name__}'
+            voice.save(update_fields=['conversion_status', 'conversion_error'])
+
+        return Response(TtsVoiceModelSerializer(voice).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def conversion_status(self, request, pk=None):
+        """轮询转换进度：向 Genie 查询并把终态回写到音色记录。"""
+        voice = self.get_object()
+        if voice.conversion_job_id and voice.conversion_status == TtsVoiceModel.ConversionStatus.CONVERTING:
+            genie_url = chat_tts.get_tts_config(chat_tts.service_overrides_for_user(request.user))['genie_url']
+            try:
+                upstream = requests.get(f'{genie_url}/convert_status/{voice.conversion_job_id}', timeout=10)
+                upstream.raise_for_status()
+                payload = upstream.json() or {}
+            except requests.RequestException as exc:
+                return Response(
+                    {'detail': f'转换状态查询失败：{exc.__class__.__name__}'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            state = (payload.get('status') or '').lower()
+            if state == 'done':
+                voice.conversion_status = TtsVoiceModel.ConversionStatus.READY
+                voice.conversion_error = ''
+                voice.save(update_fields=['conversion_status', 'conversion_error', 'updated_at'])
+            elif state == 'error':
+                voice.conversion_status = TtsVoiceModel.ConversionStatus.FAILED
+                voice.conversion_error = payload.get('error') or 'ONNX 转换失败。'
+                voice.save(update_fields=['conversion_status', 'conversion_error', 'updated_at'])
+        return Response(TtsVoiceModelSerializer(voice).data)
+
+
 class ChatSessionViewSet(viewsets.ModelViewSet):
     queryset = ChatSession.objects.none()
     permission_classes = [IsAuthenticated]
@@ -838,9 +1008,9 @@ class ChatViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         provider = (request.data.get('provider') or '').strip().lower() or None
-        # 每个角色的模型目录/参考音频只存在角色级 tts_config（角色界面"语音
-        # 模型"区块），没有全局音色兜底；无效/不属于当前用户的 character_id
-        # 视作未提供配置，genie 通道会直接报"请先配置语音模型"。
+        # 音色的模型目录/参考音频来自设置页登记的音色库（角色 tts_config 通过
+        # voice_model_id 引用；旧数据的直填字段仍兼容）。无效/不属于当前用户
+        # 的 character_id 视作未提供配置，genie 通道会直接报"请先配置语音模型"。
         character_tts_config = None
         character_id = str(request.data.get('character_id') or '').strip()
         if character_id:
@@ -849,9 +1019,11 @@ class ChatViewSet(viewsets.ViewSet):
                 character_tts_config = character.tts_config or {}
             except (Character.DoesNotExist, ValueError):
                 pass
+        service_overrides = chat_tts.service_overrides_for_user(request.user)
         try:
             result = chat_tts.synthesize_speech(
                 text, provider=provider, character_tts_config=character_tts_config,
+                user=request.user, service_overrides=service_overrides,
             )
         except chat_tts.TtsUnavailableError as exc:
             readiness = chat_tts.readiness()
@@ -874,7 +1046,7 @@ class ChatViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def tts_readiness(self, request):
         """前端"语音回复"开关的提示数据源（未配置/不可达时给出可读 hint）。"""
-        return Response(chat_tts.readiness())
+        return Response(chat_tts.readiness(chat_tts.service_overrides_for_user(request.user)))
 
     def _prepare_chat_turn(self, request):
         user = request.user

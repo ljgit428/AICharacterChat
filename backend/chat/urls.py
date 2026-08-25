@@ -8,6 +8,8 @@ from .views import (
     ModelConfigurationViewSet,
     ModelRoleAssignmentView,
     ModelCatalogViewSet,
+    TtsServiceSettingsViewSet,
+    TtsVoiceModelViewSet,
     UserProfileViewSet,
     WebSearchConfigurationViewSet,
 )
@@ -23,6 +25,8 @@ router.register(r'model-configs', ModelConfigurationViewSet, basename='model-con
 router.register(r'model-catalog', ModelCatalogViewSet, basename='model-catalog')
 router.register(r'user-profile', UserProfileViewSet, basename='user-profile')
 router.register(r'web-search-config', WebSearchConfigurationViewSet, basename='web-search-config')
+router.register(r'tts-settings', TtsServiceSettingsViewSet, basename='tts-settings')
+router.register(r'tts-voice-models', TtsVoiceModelViewSet, basename='tts-voice-models')
 router.register(r'sessions', ChatSessionViewSet)
 router.register(r'messages', MessageViewSet)
 router.register(r'chat', ChatViewSet, basename='chat')

@@ -33,6 +33,12 @@ class WebSearchProvider(models.TextChoices):
     TAVILY = "tavily", "Tavily"
 
 
+class TtsEngine(models.TextChoices):
+    GENIE = "genie", "Genie-TTS (GPT-SoVITS ONNX)"
+    GPTSOVITS = "gptsovits", "GPT-SoVITS api_v2"
+    INDEXTTS = "indextts", "IndexTTS"
+
+
 class AttachmentKind(models.TextChoices):
     TEXT = "text", "Text"
     IMAGE = "image", "Image"
@@ -185,6 +191,75 @@ class WebSearchConfiguration(models.Model):
     @classmethod
     def get_for_user(cls, user):
         return cls.objects.filter(user=user).first()
+
+
+class TtsServiceSettings(models.Model):
+    """用户级 TTS 引擎服务设置（设置界面「语音设置」）。
+
+    只存引擎服务地址与默认 provider；引擎本身仍是独立进程，Django 不背
+    推理栈。字段为空 = 跟随环境变量默认（chat.tts.get_tts_config），保存
+    后覆盖 env。
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="tts_service_settings")
+    default_provider = models.CharField(max_length=16, choices=TtsEngine.choices, blank=True, default="")
+    genie_url = models.CharField(max_length=500, blank=True, default="")
+    gptsovits_url = models.CharField(max_length=500, blank=True, default="")
+    indextts_url = models.CharField(max_length=500, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["user_id"]
+
+    def __str__(self):
+        return f"TTS settings for {self.user.username}"
+
+    @classmethod
+    def get_for_user(cls, user):
+        return cls.objects.filter(user=user).first()
+
+
+class TtsVoiceModel(models.Model):
+    """音色库：设置页统一登记的语音模型，角色通过 tts_config.voice_model_id 引用。
+
+    engine=gptsovits 只需参考音频（api_v2 支持全部模型版本）；engine=genie
+    需要 onnx_model_dir。model_version 存自由值、API 层不做兼容拦截——
+    上传转换照单全收，genie 不支持时透传其报错；genie-tts 升级支持更多
+    版本时只需更新 chat/tts.py 的 GENIE_SUPPORTED_MODEL_VERSIONS。
+    """
+
+    class ConversionStatus(models.TextChoices):
+        READY = "ready", "Ready"
+        PENDING = "pending", "Pending conversion"
+        CONVERTING = "converting", "Converting"
+        FAILED = "failed", "Conversion failed"
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tts_voice_models")
+    name = models.CharField(max_length=100)
+    engine = models.CharField(max_length=16, choices=TtsEngine.choices, default=TtsEngine.GENIE)
+    model_version = models.CharField(max_length=16, blank=True, default="", help_text="v2 / v2pro / v2proplus / v4，空=未指定")
+    language = models.CharField(max_length=8, blank=True, default="", help_text="模型语言 zh/jp/en/ko")
+    voice_name = models.CharField(max_length=100, blank=True, default="", help_text="genie 侧音色键，空则取 ONNX 目录名")
+    onnx_model_dir = models.CharField(max_length=500, blank=True, default="", help_text="genie 通道：convert_to_onnx 输出目录")
+    ref_audio_path = models.CharField(max_length=500, blank=True, default="", help_text="参考音频服务器路径（绝对路径或 MEDIA_ROOT 相对路径）")
+    ref_audio_text = models.TextField(blank=True, default="")
+    ref_audio_language = models.CharField(max_length=8, blank=True, default="")
+    conversion_status = models.CharField(max_length=16, choices=ConversionStatus.choices, blank=True, default="")
+    conversion_job_id = models.CharField(max_length=64, blank=True, default="")
+    conversion_error = models.TextField(blank=True, default="")
+    source_ckpt_path = models.CharField(max_length=500, blank=True, default="", help_text="上传的 T2S .ckpt（转换源）")
+    source_pth_path = models.CharField(max_length=500, blank=True, default="", help_text="上传的 VITS .pth（转换源）")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "name"], name="unique_tts_voice_model_name_per_user"),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.engine})"
 
 
 class Character(models.Model):
