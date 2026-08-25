@@ -343,6 +343,25 @@ def _safe_memory_asset_name(name):
     return normalized.replace("\\", "_").replace("/", "_")
 
 
+MAX_MEMORY_RELATIVE_PATH_SEGMENTS = 12
+
+
+def sanitize_memory_relative_path(path):
+    """Sanitize a client-supplied relative path (e.g. webkitRelativePath from a
+    folder upload like ``Momotalk/mari_10105/scene_1.txt``) into a safe VFS
+    sub-path. The directory hierarchy is preserved so file groups stay browsable;
+    traversal, empty, and over-long paths are collapsed."""
+    segments = []
+    for raw_segment in (path or "").replace("\\", "/").split("/"):
+        segment = raw_segment.strip().replace("/", "_")
+        if not segment or segment in {".", ".."}:
+            continue
+        segments.append(segment)
+        if len(segments) >= MAX_MEMORY_RELATIVE_PATH_SEGMENTS:
+            break
+    return "/".join(segments)
+
+
 def _parent_memory_path(path):
     if not path or "/" not in path:
         return ""
@@ -561,12 +580,18 @@ def _build_memory_explorer_records(character):
 
     setup_prefix = "raw/character_setup/uploads"
     for asset_index, asset in enumerate(_get_character_knowledge_assets(character), start=1):
-        base_name = _safe_memory_asset_name(_get_asset_name(asset) or f"upload-{asset_index}")
-        alias_path = f"{setup_prefix}/{base_name}"
-        stem, ext = os.path.splitext(base_name)
+        # attachment_name carries the original folder-group relative path
+        # (e.g. "Momotalk/mari_10105/scene_1.txt"); keep the hierarchy so the
+        # uploads tree mirrors what the user uploaded.
+        rel_name = (
+            sanitize_memory_relative_path(_get_asset_name(asset))
+            or f"upload-{asset_index}"
+        )
+        alias_path = f"{setup_prefix}/{rel_name}"
+        stem, ext = os.path.splitext(alias_path)
         dedupe_index = 2
         while alias_path in used_paths:
-            alias_path = f"{setup_prefix}/{stem}__{dedupe_index}{ext}"
+            alias_path = f"{stem}__{dedupe_index}{ext}"
             dedupe_index += 1
         used_paths.add(alias_path)
 
@@ -784,12 +809,16 @@ def _read_record_content(record):
     return "\n".join(content_lines)
 
 
-def read_memory_explorer_file(character, path, max_chars=6000):
+def read_memory_explorer_file(character, path, max_chars=6000, offset=0):
     normalized_path = (path or "").strip().strip("/")
     try:
         safe_max_chars = max(200, min(int(max_chars or 6000), 12000))
     except (TypeError, ValueError):
         safe_max_chars = 6000
+    try:
+        safe_offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        safe_offset = 0
 
     for record in _build_memory_explorer_records(character):
         if record["path"] != normalized_path:
@@ -814,15 +843,21 @@ def read_memory_explorer_file(character, path, max_chars=6000):
         else:
             content = _read_record_content(record)
 
-        truncated = len(content) > safe_max_chars
+        # Char-window pagination: offset lets a reader continue past the
+        # per-request cap without ever loading more than max_chars into the
+        # response. offset=0 keeps the historical single-shot behaviour.
+        total_chars = len(content)
+        window = content[safe_offset:safe_offset + safe_max_chars]
+        next_offset = safe_offset + len(window)
+        has_more = next_offset < total_chars
         return {
             "path": normalized_path,
             "layer": record.get("layer", ""),
             "title": record.get("title", ""),
             "kind": record.get("kind", ""),
             "read_hint": record.get("read_hint", ""),
-            "content": content[:safe_max_chars],
-            "truncated": truncated,
+            "content": window,
+            "truncated": has_more,
             "manageable": record.get("manageable", False),
             "asset_id": record.get("asset_id"),
             "preview_kind": (
@@ -834,6 +869,10 @@ def read_memory_explorer_file(character, path, max_chars=6000):
             ),
             "file_url": record.get("file_url", ""),
             "mime_type": record.get("attachment_mime_type", ""),
+            "offset": safe_offset,
+            "next_offset": next_offset if has_more else None,
+            "total_chars": total_chars,
+            "has_more": has_more,
         }
 
     return {

@@ -16,5 +16,8 @@ export const GRAPHQL_API_URL = process.env.NEXT_PUBLIC_GRAPHQL_URL
     ? `${API_BASE_URL}/graphql/`
     : `${API_BASE_URL}/graphql`;
 export const UPLOAD_API_URL = useDirectLocalBackend ? `${API_BASE_URL}/upload/` : `${API_BASE_URL}/upload`;
+// Reference-file group uploads go to the dedicated file endpoint so they land
+// under media/uploads/ (with folder hierarchy), not the avatar bucket.
+export const FILES_UPLOAD_API_URL = useDirectLocalBackend ? `${API_BASE_URL}/files/upload/` : `${API_BASE_URL}/files/upload`;
 export const MEDIA_BASE_URL = API_BASE_URL.replace(/\/api$/, "");
 export const DEFAULT_PROJECT_MODEL_NAME = process.env.NEXT_PUBLIC_DEFAULT_MODEL_NAME || "default-model";

@@ -255,16 +255,20 @@ def _read_local_text_file(file_url: Optional[str]) -> str:
         return ""
 
 
-def _resolve_staged_uploads(file_urls: Optional[List[str]]) -> List[dict]:
+def _resolve_staged_uploads(file_urls: Optional[List[str]], file_names: Optional[List[str]] = None) -> List[dict]:
     """Resolve the just-uploaded file URLs into the staged-upload records that
     the draft Memory Tools browse. Text files carry their extracted content;
-    images carry only their URL/metadata (they cannot be read as text)."""
+    images carry only their URL/metadata (they cannot be read as text).
+
+    ``file_names`` runs parallel to ``file_urls`` and carries the original
+    folder-group relative path (e.g. ``Momotalk/mari/scene_1.txt``) so the
+    staged memory filesystem can preserve the uploaded hierarchy."""
     if not file_urls:
         return []
 
     uploads = []
     seen_urls = set()
-    for file_url in file_urls:
+    for index, file_url in enumerate(file_urls):
         if not file_url or file_url in seen_urls:
             continue
         seen_urls.add(file_url)
@@ -273,11 +277,13 @@ def _resolve_staged_uploads(file_urls: Optional[List[str]]) -> List[dict]:
         if not file_path:
             continue
 
-        name = os.path.basename(file_path)
+        parallel_name = file_names[index] if file_names and index < len(file_names) else ""
+        name = (parallel_name or "").strip() or os.path.basename(file_path)
         mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         if _is_supported_background_text_path(file_path):
             uploads.append({
                 "name": name,
+                "relative_path": name,
                 "kind": AttachmentKind.TEXT,
                 "mime_type": mime_type,
                 "content": _read_local_text_file(file_url),
@@ -286,6 +292,7 @@ def _resolve_staged_uploads(file_urls: Optional[List[str]]) -> List[dict]:
         elif mime_type.startswith("image/"):
             uploads.append({
                 "name": name,
+                "relative_path": name,
                 "kind": AttachmentKind.IMAGE,
                 "mime_type": mime_type,
                 "content": "",
@@ -295,23 +302,49 @@ def _resolve_staged_uploads(file_urls: Optional[List[str]]) -> List[dict]:
     return uploads
 
 
-def _build_character_draft_tool_prompt(locale: str, text_context: Optional[str], upload_count: int) -> List[dict]:
+def _build_staged_upload_index_section(locale: str, directory_index: str) -> str:
+    if locale == "zh-CN":
+        return (
+            "[上传文件目录索引]\n"
+            "以下是用户本次上传的全部文件（记忆文本）及其在记忆文件系统中的路径，"
+            "read_memory_file 的 path 参数必须逐字使用这些路径：\n"
+            f"{directory_index}"
+        )
+    return (
+        "[Uploaded File Directory Index]\n"
+        "Below are ALL files the user uploaded this session (memory texts) and their "
+        "memory-filesystem paths. The read_memory_file `path` argument must match one of "
+        "these paths verbatim:\n"
+        f"{directory_index}"
+    )
+
+
+def _build_character_draft_tool_prompt(
+    locale: str,
+    text_context: Optional[str],
+    upload_count: int,
+    directory_index: str = "",
+) -> List[dict]:
     """Build the system/user messages for the tool-driven character draft.
 
     Unlike ``_build_character_draft_prompt``, uploaded file bodies are *not*
-    inlined here. The model must use ``list_memory_files`` / ``read_memory_file``
-    to read the files it actually needs.
+    inlined here. The model sees a compact directory index of the uploaded file
+    group up front, then uses ``list_memory_files`` / ``read_memory_file`` to
+    read on demand the files it actually needs.
     """
+    index_section = _build_staged_upload_index_section(locale, directory_index) if directory_index else ""
     if locale == "zh-CN":
         system_prompt = (
             "你是一名专业的角色设计师。\n"
             "请分析提供的上下文，提取稳定的角色锚点和说话风格。\n\n"
-            f"用户上传了 {upload_count} 个参考文件，它们通过记忆文件系统暴露，"
-            "并不会出现在这条提示里。\n"
+            f"用户上传了 {upload_count} 个参考文件，它们是本角色的记忆文本，"
+            "通过记忆文件系统暴露，正文不会出现在这条提示里。\n"
             "必须使用工具按需查阅文件，而不是假设内容：\n"
-            "- 先用 list_memory_files 浏览上传文件（路径前缀 raw/character_setup/uploads）。\n"
-            "- 再用 read_memory_file 只读取与角色塑造相关的文件。\n"
-            "- 没有实际读取过的文件，不得声称知道其内容。\n\n"
+            "- 先看下方[上传文件目录索引]了解有哪些文件；需要浏览目录时用 list_memory_files（路径前缀 raw/character_setup/uploads）。\n"
+            "- 再用 read_memory_file 只读取与角色塑造相关的文件；path 必须使用目录索引或 list 结果中的原始路径。\n"
+            "- 与目标角色直接相关的文件必须完整读取；没有实际读取过的文件，不得声称知道其内容。\n\n"
+            + (index_section + "\n\n" if index_section else "")
+            +
             "只返回原始 JSON 对象，不要使用 markdown，不要添加额外说明。JSON 必须包含这些键：\n"
             "- name（字符串）：角色名\n"
             "- description（字符串）：完整的背景与概述，至少 3 句话\n"
@@ -338,12 +371,16 @@ def _build_character_draft_tool_prompt(locale: str, text_context: Optional[str],
     system_prompt = (
         "You are an expert Character Designer.\n"
         "Analyze the provided context to extract stable character anchors and a voice style.\n\n"
-        f"The user uploaded {upload_count} reference file(s). They are exposed through a memory "
-        "filesystem and are NOT included in this prompt.\n"
+        f"The user uploaded {upload_count} reference file(s). They are memory texts for this "
+        "character, exposed through a memory filesystem; their bodies are NOT included in this prompt.\n"
         "You MUST use the tools to read files on demand instead of assuming their content:\n"
-        "- Call list_memory_files first to browse the uploaded files (path prefix raw/character_setup/uploads).\n"
-        "- Call read_memory_file to open only the files relevant to the character you are building.\n"
-        "- Never claim facts about a file you have not actually read.\n\n"
+        "- Check the [Uploaded File Directory Index] below first; call list_memory_files to browse "
+        "(path prefix raw/character_setup/uploads) when you need folder navigation.\n"
+        "- Call read_memory_file to open only the files relevant to the character you are building; "
+        "the `path` argument must be copied verbatim from the index or listing.\n"
+        "- Read the files directly about the target character in full. Never claim facts about a file you have not actually read.\n\n"
+        + (index_section + "\n\n" if index_section else "")
+        +
         "Return ONLY a raw JSON object (no markdown formatting) with the following keys:\n"
         "- name (string): Character name\n"
         "- description (string): A comprehensive background and summary (at least 3 sentences)\n"
@@ -442,6 +479,7 @@ class Mutation:
         info,
         file_url: Optional[str] = None,
         file_urls: Optional[List[str]] = None,
+        file_names: Optional[List[str]] = None,
         text_context: Optional[str] = None,
         locale: Optional[str] = None,
     ) -> PrisMateDraft:
@@ -450,7 +488,8 @@ class Mutation:
 
         Uploaded reference files are not inlined into the prompt. When the
         runtime model supports tool calls (OpenAI-compatible / Anthropic),
-        the files are exposed through the ``list_memory_files`` /
+        the prompt carries a compact directory index of the uploaded file
+        group, and the files are exposed through the ``list_memory_files`` /
         ``read_memory_file`` tools so the model reads only what it needs.
         Gemini falls back to reading text files locally.
         """
@@ -466,7 +505,7 @@ class Mutation:
             if file_url:
                 normalized_file_urls.append(file_url)
 
-            staged_uploads = _resolve_staged_uploads(normalized_file_urls)
+            staged_uploads = _resolve_staged_uploads(normalized_file_urls, file_names)
 
             # 大量参考文件：走 reduce 流水线（分层精读 → 结构化笔记 → 合并），
             # 避免单次 ReAct loop 无法覆盖全部文件。少量文件仍走 Memory Tools
@@ -517,6 +556,7 @@ class Mutation:
                     draft_locale,
                     text_context,
                     len(staged_uploads),
+                    directory_index=filesystem.build_directory_index(),
                 )
                 raw_text = await sync_to_async(_generate_text)(
                     runtime_config,
