@@ -4,7 +4,7 @@ interface ApiResponse<T> {
 }
 
 import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
-import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
+import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
 
@@ -446,6 +446,58 @@ function normalizeUserProfile(apiData: ApiUserProfile): UserProfile {
     allowPreferenceInference: apiData.allow_preference_inference,
     allowResearchProfileUpdates: apiData.allow_research_profile_updates,
     blockedTopics: apiData.blocked_topics || '',
+    createdAt: apiData.created_at,
+    updatedAt: apiData.updated_at,
+  };
+}
+
+interface ApiTtsServiceSettings {
+  default_provider: string;
+  genie_url: string;
+  gptsovits_url: string;
+  indextts_url: string;
+}
+
+interface ApiTtsVoiceModel {
+  id: number;
+  name: string;
+  engine: string;
+  model_version: string;
+  language: string;
+  voice_name: string;
+  onnx_model_dir: string;
+  ref_audio_path: string;
+  ref_audio_text: string;
+  ref_audio_language: string;
+  conversion_status: string;
+  conversion_error: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+function normalizeTtsServiceSettings(apiData: ApiTtsServiceSettings): TtsServiceSettings {
+  return {
+    defaultProvider: (apiData.default_provider || '') as TtsServiceSettings['defaultProvider'],
+    genieUrl: apiData.genie_url || '',
+    gptsovitsUrl: apiData.gptsovits_url || '',
+    indexttsUrl: apiData.indextts_url || '',
+  };
+}
+
+function normalizeTtsVoiceModel(apiData: ApiTtsVoiceModel): TtsVoiceModel {
+  return {
+    id: apiData.id,
+    name: apiData.name,
+    engine: (apiData.engine || 'genie') as TtsVoiceModel['engine'],
+    modelVersion: apiData.model_version || '',
+    language: apiData.language || '',
+    voiceName: apiData.voice_name || '',
+    onnxModelDir: apiData.onnx_model_dir || '',
+    refAudioPath: apiData.ref_audio_path || '',
+    refAudioText: apiData.ref_audio_text || '',
+    refAudioLanguage: apiData.ref_audio_language || '',
+    conversionStatus: (apiData.conversion_status || '') as TtsVoiceModel['conversionStatus'],
+    conversionError: apiData.conversion_error || '',
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
   };
@@ -1319,6 +1371,134 @@ class ApiService {
     });
     if (response.data) {
       return { data: normalizeResearchPayload(response.data) || { query, provider: '', items: [], error: '' } };
+    }
+    return { data: undefined };
+  }
+
+  // ------------------------------------------------------------------
+  // 语音设置：用户级引擎配置 + 音色库（角色经 tts_config.voice_model_id 引用）
+  // ------------------------------------------------------------------
+
+  async getTtsSettings(): Promise<ApiResponse<TtsServiceSettings>> {
+    const response = await this.request<ApiTtsServiceSettings>('/tts-settings/me');
+    if (response.data) {
+      return { data: normalizeTtsServiceSettings(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async updateTtsSettings(data: Partial<TtsServiceSettings>): Promise<ApiResponse<TtsServiceSettings>> {
+    const response = await this.request<ApiTtsServiceSettings>('/tts-settings/me', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        default_provider: data.defaultProvider,
+        genie_url: data.genieUrl,
+        gptsovits_url: data.gptsovitsUrl,
+        indextts_url: data.indexttsUrl,
+      }),
+    });
+    if (response.data) {
+      return { data: normalizeTtsServiceSettings(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async testTtsEngine(engine: TtsEngine): Promise<ApiResponse<TtsEngineTestResult>> {
+    return this.request<TtsEngineTestResult>('/tts-settings/test', {
+      method: 'POST',
+      body: JSON.stringify({ engine }),
+    });
+  }
+
+  async listTtsVoiceModels(): Promise<ApiResponse<TtsVoiceModel[]>> {
+    const response = await this.request<ApiTtsVoiceModel[]>('/tts-voice-models');
+    if (response.data) {
+      return { data: response.data.map(normalizeTtsVoiceModel) };
+    }
+    return { data: undefined };
+  }
+
+  async createTtsVoiceModel(
+    data: Omit<TtsVoiceModel, 'id' | 'conversionStatus' | 'conversionError' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ApiResponse<TtsVoiceModel>> {
+    const response = await this.request<ApiTtsVoiceModel>('/tts-voice-models', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: data.name,
+        engine: data.engine,
+        model_version: data.modelVersion,
+        language: data.language,
+        voice_name: data.voiceName,
+        onnx_model_dir: data.onnxModelDir,
+        ref_audio_path: data.refAudioPath,
+        ref_audio_text: data.refAudioText,
+        ref_audio_language: data.refAudioLanguage,
+      }),
+    });
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async updateTtsVoiceModel(id: number, data: Partial<TtsVoiceModel>): Promise<ApiResponse<TtsVoiceModel>> {
+    const response = await this.request<ApiTtsVoiceModel>(`/tts-voice-models/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name: data.name,
+        engine: data.engine,
+        model_version: data.modelVersion,
+        language: data.language,
+        voice_name: data.voiceName,
+        onnx_model_dir: data.onnxModelDir,
+        ref_audio_path: data.refAudioPath,
+        ref_audio_text: data.refAudioText,
+        ref_audio_language: data.refAudioLanguage,
+      }),
+    });
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async deleteTtsVoiceModel(id: number): Promise<ApiResponse<void>> {
+    return this.request(`/tts-voice-models/${id}`, { method: 'DELETE' });
+  }
+
+  async uploadConvertVoiceModel(data: UploadConvertRequest): Promise<ApiResponse<TtsVoiceModel>> {
+    const formData = new FormData();
+    formData.append('ckpt', data.ckpt);
+    formData.append('pth', data.pth);
+    if (data.refAudio) {
+      formData.append('ref_audio', data.refAudio);
+    }
+    if (data.name) {
+      formData.append('name', data.name);
+    }
+    if (data.language) {
+      formData.append('language', data.language);
+    }
+    if (data.modelVersion) {
+      formData.append('model_version', data.modelVersion);
+    }
+    if (data.refAudioText) {
+      formData.append('ref_audio_text', data.refAudioText);
+    }
+    const response = await this.request<ApiTtsVoiceModel>('/tts-voice-models/upload_convert', {
+      method: 'POST',
+      body: formData,
+    });
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async pollTtsConversionStatus(voiceModelId: number): Promise<ApiResponse<TtsVoiceModel>> {
+    const response = await this.request<ApiTtsVoiceModel>(`/tts-voice-models/${voiceModelId}/conversion_status`);
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
     }
     return { data: undefined };
   }

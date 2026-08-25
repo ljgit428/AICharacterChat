@@ -150,6 +150,51 @@ export interface ModelConfig {
 
 export type ModelRoleAssignments = Record<ModelRoleKey, ModelConfig | null>;
 
+export type TtsEngine = 'genie' | 'gptsovits' | 'indextts';
+
+export type TtsConversionStatus = '' | 'pending' | 'converting' | 'ready' | 'failed';
+
+// 设置页「语音设置」里登记的音色；角色通过 tts_config.voice_model_id 引用。
+export interface TtsVoiceModel {
+  id: number;
+  name: string;
+  engine: TtsEngine;
+  modelVersion: string;
+  language: string;
+  voiceName: string;
+  onnxModelDir: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+  conversionStatus: TtsConversionStatus;
+  conversionError: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 用户级 TTS 引擎服务设置；空字段 = 跟随环境变量默认。
+export interface TtsServiceSettings {
+  defaultProvider: TtsEngine | '';
+  genieUrl: string;
+  gptsovitsUrl: string;
+  indexttsUrl: string;
+}
+
+export interface TtsEngineTestResult {
+  ok: boolean;
+  hint: string;
+}
+
+export interface UploadConvertRequest {
+  ckpt: File;
+  pth: File;
+  refAudio?: File;
+  name?: string;
+  language?: string;
+  modelVersion?: string;
+  refAudioText?: string;
+}
+
 export interface WebSearchConfig {
   id?: string;
   provider: WebSearchProvider;
