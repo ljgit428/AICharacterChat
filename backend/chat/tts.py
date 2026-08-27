@@ -174,6 +174,13 @@ class GenieTtsProvider:
             'text': text,
             'split_sentence': True,
         }
+        # genie 的 tts_player 是会话式单例：上一轮 feed() 的句子队列若未清理，
+        # 新文本会接在残留后面，导致"播放内容混入别的文本"。
+        # 每次合成前先 /stop 重置会话，保证本请求从干净的播放器状态开始。
+        try:
+            requests.post(f'{self.base_url}/stop', timeout=5)
+        except requests.RequestException:
+            pass  # 服务不可达时让下面的 /tts 自然报错
         started = time.perf_counter()
         with requests.post(
             f'{self.base_url}/tts',
