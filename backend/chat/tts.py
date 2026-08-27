@@ -17,6 +17,7 @@
 import io
 import logging
 import os
+import re
 import time
 import wave
 from pathlib import PurePath
@@ -579,6 +580,12 @@ def synthesize_speech(
     音色：角色 tts_config 里的显式字段 > 其所选音色库记录。
     emotion：角色情感组里的情感名，命中时用该情感的参考音频（否则默认）。
     """
+    # genie/GPT-SoVITS 对 emoji 等非语言符号处理异常（会把符号逐字合成进
+    # 音频，导致"生成文本 + 多余内容"的超长结果）。合成前剥离符号，
+    # 只把可朗读的文本交给引擎。
+    text = re.sub(
+        r'[^\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\u0020-\u007e]', '', text
+    ).strip()
     config = get_tts_config(service_overrides)
     selected, voice = resolve_provider_and_voice(provider, character_tts_config, user)
     instance = get_tts_provider_instance(selected, config)

@@ -12,7 +12,6 @@ import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
-import { splitReplyParagraphs } from '@/utils/replyParagraphs';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
 import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
@@ -275,12 +274,8 @@ export default function ChatInterface({
   };
 
   // 单段朗读（消息气泡旁的喇叭按钮）：不依赖全局"自动朗读"开关，独立发声。
-  // 优先播放预合成缓存（回复完成时后台生成），缓存未命中才现场合成。
-  // 与 speakReply 共用 currentAudioRef，所以先停掉正在播的音频。
-  //
-  // 重要：genie 服务端 /tts 使用全局单例 tts_player（start_session/feed/end_session），
-  // 并发合成请求会互相污染，产生"播放内容混入别的文本"的串音。因此这里把
-  // 所有 TTS 合成请求串行化，一次只发一个。
+  // 点击时合成并缓存，后续点击直接播放缓存。不预合成（预合成曾导致缓存与渲染
+  // 段落不一致，产生"播放内容混入别的文本"的 bug）。
   const ttsQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const runTtsSerialized = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
     const run = ttsQueueRef.current.then(task, task);
@@ -309,21 +304,6 @@ export default function ChatInterface({
     return blob;
   }, [character?.id, runTtsSerialized]);
 
-  // 回复流式完成后预合成各段音频：串行逐段合成，点击喇叭时直接播放缓存。
-  // 某段失败（TTS 不可用等）不阻塞其余段落；失败段落点击时现场再合成一次。
-  const prewarmSegmentAudio = useCallback((content: string) => {
-    const paragraphs = splitReplyParagraphs(content);
-    void (async () => {
-      for (const paragraph of paragraphs) {
-        try {
-          await synthesizeSegmentCached(paragraph);
-        } catch {
-          // 单段失败继续下一段
-        }
-      }
-    })();
-  }, [synthesizeSegmentCached]);
-
   const speakSegment = async (text: string, emotion?: string) => {
     if (!text.trim()) return;
     cancelSpeech();
@@ -337,7 +317,7 @@ export default function ChatInterface({
     }
   };
 
-  // 单段音频下载：优先用预合成缓存，否则现场合成后以 .wav 保存到本地。
+  // 单段音频下载：优先用缓存，否则现场合成后以 .wav 保存到本地。
   const downloadSegment = async (text: string) => {
     if (!text.trim()) return;
     try {
@@ -890,8 +870,6 @@ export default function ChatInterface({
               ? event.tts_segments.filter((seg) => seg?.text)
               : [];
             speakReplyRef.current(ttsSegments.length ? ttsSegments : [{ text: event.content }]);
-            // 预合成每段音频：喇叭按钮点击时直接播放缓存，无需等待合成。
-            prewarmSegmentAudio(event.content);
             return;
           }
 
