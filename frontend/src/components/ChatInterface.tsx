@@ -277,9 +277,21 @@ export default function ChatInterface({
   // 单段朗读（消息气泡旁的喇叭按钮）：不依赖全局"自动朗读"开关，独立发声。
   // 优先播放预合成缓存（回复完成时后台生成），缓存未命中才现场合成。
   // 与 speakReply 共用 currentAudioRef，所以先停掉正在播的音频。
+  //
+  // 重要：genie 服务端 /tts 使用全局单例 tts_player（start_session/feed/end_session），
+  // 并发合成请求会互相污染，产生"播放内容混入别的文本"的串音。因此这里把
+  // 所有 TTS 合成请求串行化，一次只发一个。
+  const ttsQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const runTtsSerialized = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const run = ttsQueueRef.current.then(task, task);
+    ttsQueueRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }, []);
+
   const segmentAudioCacheRef = useRef<Map<string, Blob>>(new Map());
-  // 每段音频状态：prewarming=合成中 / ready=可立即播放 / failed=合成失败（点击时重试）。
-  const [segmentAudioStatus, setSegmentAudioStatus] = useState<Record<string, 'prewarming' | 'ready' | 'failed'>>({});
 
   const synthesizeSegmentCached = useCallback(async (text: string, emotion?: string): Promise<Blob> => {
     const cacheKey = `${character?.id ?? 'global'}:${emotion ?? ''}:${text}`;
@@ -287,33 +299,30 @@ export default function ChatInterface({
     if (cached) {
       return cached;
     }
-    const blob = await apiService.synthesizeSpeech(text.trim(), {
-      characterId: character?.id,
-      emotion,
-    });
-    segmentAudioCacheRef.current.set(cacheKey, blob);
-    return blob;
-  }, [character?.id]);
-
-  // 回复流式完成后预合成各段音频：喇叭按钮点击时直接播放缓存，不用等合成。
-  const prewarmSegmentAudio = useCallback((content: string) => {
-    const paragraphs = splitReplyParagraphs(content);
-    void Promise.allSettled(
-      paragraphs.map(async (paragraph) => {
-        if (segmentAudioStatus[paragraph]) {
-          return; // 已有状态（合成中/就绪/失败）不重复预合成
-        }
-        setSegmentAudioStatus((prev) => ({ ...prev, [paragraph]: 'prewarming' }));
-        try {
-          await synthesizeSegmentCached(paragraph);
-          setSegmentAudioStatus((prev) => ({ ...prev, [paragraph]: 'ready' }));
-        } catch {
-          // 合成失败（TTS 不可用等）：标记失败，点击喇叭时现场再合成一次。
-          setSegmentAudioStatus((prev) => ({ ...prev, [paragraph]: 'failed' }));
-        }
+    const blob = await runTtsSerialized(() =>
+      apiService.synthesizeSpeech(text.trim(), {
+        characterId: character?.id,
+        emotion,
       }),
     );
-  }, [synthesizeSegmentCached, segmentAudioStatus]);
+    segmentAudioCacheRef.current.set(cacheKey, blob);
+    return blob;
+  }, [character?.id, runTtsSerialized]);
+
+  // 回复流式完成后预合成各段音频：串行逐段合成，点击喇叭时直接播放缓存。
+  // 某段失败（TTS 不可用等）不阻塞其余段落；失败段落点击时现场再合成一次。
+  const prewarmSegmentAudio = useCallback((content: string) => {
+    const paragraphs = splitReplyParagraphs(content);
+    void (async () => {
+      for (const paragraph of paragraphs) {
+        try {
+          await synthesizeSegmentCached(paragraph);
+        } catch {
+          // 单段失败继续下一段
+        }
+      }
+    })();
+  }, [synthesizeSegmentCached]);
 
   const speakSegment = async (text: string, emotion?: string) => {
     if (!text.trim()) return;
@@ -323,9 +332,6 @@ export default function ChatInterface({
       const blob = await synthesizeSegmentCached(text, emotion);
       if (speakCancelRef.current) return;
       await playBlob(blob);
-      if (!emotion) {
-        setSegmentAudioStatus((prev) => ({ ...prev, [text]: 'ready' }));
-      }
     } catch {
       // 合成或播放失败即静默停止
     }
@@ -1246,7 +1252,6 @@ export default function ChatInterface({
           onTextModelChange={handleTextModelChange}
           onSpeakSegment={speakSegment}
           onDownloadSegment={downloadSegment}
-          segmentAudioStatus={segmentAudioStatus}
         />
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (

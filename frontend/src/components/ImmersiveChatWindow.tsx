@@ -32,8 +32,6 @@ interface ImmersiveChatWindowProps {
   onSpeakSegment?: (text: string, emotion?: string) => void;
   /** 单段音频下载（气泡下载按钮）：合成该段并保存为 .wav。 */
   onDownloadSegment?: (text: string) => void;
-  /** 预合成状态（key=段落文本）：prewarming=合成中 / ready=可立即播放 / failed=失败待重试。 */
-  segmentAudioStatus?: Record<string, 'prewarming' | 'ready' | 'failed'>;
 }
 
 export interface PendingAttachment {
@@ -162,7 +160,6 @@ export default function ImmersiveChatWindow({
   onTextModelChange,
   onSpeakSegment,
   onDownloadSegment,
-  segmentAudioStatus,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -649,19 +646,9 @@ export default function ImmersiveChatWindow({
                                             type="button"
                                             onClick={() => onSpeakSegment(paragraph)}
                                             title={copy.immersiveChat.speakSegment}
-                                            className={`flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-sky-50 hover:text-sky-600 ${
-                                              segmentAudioStatus?.[paragraph] === 'ready'
-                                                ? 'text-sky-500'
-                                                : segmentAudioStatus?.[paragraph] === 'prewarming'
-                                                  ? 'text-sky-400'
-                                                  : 'text-slate-400'
-                                            }`}
+                                            className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
                                           >
-                                            {segmentAudioStatus?.[paragraph] === 'prewarming' ? (
-                                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                            ) : (
-                                              <Volume2 className="h-3.5 w-3.5" />
-                                            )}
+                                            <Volume2 className="h-3.5 w-3.5" />
                                           </button>
                                           {onDownloadSegment && (
                                             <button
