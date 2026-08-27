@@ -268,7 +268,7 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
           }
           void refetch();
         } else {
-          alert(messages.gallery.deleteCharacterBlocked);
+          alert(messages.gallery.deleteCharacterError);
         }
       } catch (deleteError) {
         console.error(deleteError);

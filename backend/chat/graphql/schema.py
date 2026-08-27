@@ -1,18 +1,17 @@
 import strawberry
 from typing import List, Optional
 from asgiref.sync import sync_to_async
-from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.core.files import File
 import json
 import logging
 import mimetypes
 import os
-from urllib.parse import urlparse, unquote
 
 from .types import CharacterType, ChatSessionType, CharacterInput, PrisMateDraft
 from chat.attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
 from chat.character_reduce import _normalize_target_name, reduce_result_to_draft, run_reduce_pipeline
+from chat.cleanup import _resolve_local_media_path, cleanup_character_files
 from chat.memory.filesystem import StagedUploadMemoryFilesystem
 from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, ModelRole, ModelRoleAssignment, UserProfile
 from chat.tasks import (
@@ -208,29 +207,6 @@ def _build_character_draft_prompt(locale: str, text_context: Optional[str], uplo
 
 def _is_supported_background_text_path(file_path):
     return os.path.splitext(file_path.lower())[1] in SUPPORTED_BACKGROUND_TEXT_EXTENSIONS
-
-
-def _resolve_local_media_path(file_url: Optional[str]) -> Optional[str]:
-    if not file_url:
-        return None
-
-    parsed_url = urlparse(file_url)
-    relative_path = unquote(parsed_url.path).lstrip('/')
-    media_url_path = urlparse(settings.MEDIA_URL).path.lstrip('/')
-    if media_url_path and relative_path.startswith(media_url_path):
-        relative_path = relative_path[len(media_url_path):].lstrip('/')
-    elif relative_path.startswith('media/'):
-        relative_path = relative_path[6:]
-
-    file_path = os.path.normpath(os.path.join(settings.MEDIA_ROOT, relative_path))
-    media_root = os.path.normpath(settings.MEDIA_ROOT)
-    try:
-        if os.path.commonpath([media_root, file_path]) != media_root:
-            return None
-    except ValueError:
-        return None
-
-    return file_path if os.path.exists(file_path) else None
 
 
 def _decode_text_content(raw_bytes: bytes) -> str:
@@ -661,9 +637,8 @@ class Mutation:
             user = _get_authenticated_user(info)
             character = _get_owned_character(user, id)
 
-            if character.chat_sessions.exists():
-                return False
-
+            # 先删磁盘文件（头像、知识资产、消息附件），再级联删除关系行。
+            cleanup_character_files(character)
             character.delete()
             return True
         return await delete_sync()

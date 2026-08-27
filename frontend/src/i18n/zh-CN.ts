@@ -91,8 +91,7 @@ export const zhCNMessages = {
     details: "详情",
     editCharacter: "编辑角色",
     deleteCharacter: "删除角色",
-    confirmDeleteCharacter: (name: string) => `确定删除“${name}”吗？此操作无法撤销。`,
-    deleteCharacterBlocked: "无法删除该角色，因为仍有关联聊天历史，请先删除相关会话。",
+    confirmDeleteCharacter: (name: string) => `确定删除“${name}”吗？此操作无法撤销，该角色的所有聊天记录也会一并删除。`,
     deleteCharacterError: "删除时发生错误。",
   },
   modelApi: {

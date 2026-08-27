@@ -16,6 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from .attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
 from . import asr as chat_asr
 from . import tts as chat_tts
+from .cleanup import cleanup_character_files
 from .memory.interface import LongTermMemoryInterface as CharacterLongTermMemory
 from .memory.manager import MemoryItemNotFoundError, MemoryManager
 from .models import (
@@ -94,11 +95,8 @@ class CharacterViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         character = self.get_object()
-        if character.chat_sessions.exists():
-            return Response(
-                {'error': 'Cannot delete a character with existing chat sessions'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # 先清磁盘文件（头像、知识资产、消息附件等），再级联删除关系行。
+        cleanup_character_files(character)
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['get'])

@@ -102,8 +102,7 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     details: "Details",
     editCharacter: "Edit character",
     deleteCharacter: "Delete character",
-    confirmDeleteCharacter: (name: string) => `Are you sure you want to delete "${name}"? This action cannot be undone.`,
-    deleteCharacterBlocked: "Cannot delete this character because there are existing chat histories associated with them. Please delete the chat sessions first.",
+    confirmDeleteCharacter: (name: string) => `Are you sure you want to delete "${name}"? This action cannot be undone, and all chat history with this character will also be deleted.`,
     deleteCharacterError: "An error occurred while trying to delete.",
   },
   modelApi: {
