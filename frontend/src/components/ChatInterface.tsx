@@ -12,6 +12,7 @@ import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
+import { splitReplyParagraphs } from '@/utils/replyParagraphs';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
 import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
@@ -274,30 +275,67 @@ export default function ChatInterface({
   };
 
   // 单段朗读（消息气泡旁的喇叭按钮）：不依赖全局"自动朗读"开关，独立发声。
+  // 优先播放预合成缓存（回复完成时后台生成），缓存未命中才现场合成。
   // 与 speakReply 共用 currentAudioRef，所以先停掉正在播的音频。
+  const segmentAudioCacheRef = useRef<Map<string, Blob>>(new Map());
+  // 每段音频状态：prewarming=合成中 / ready=可立即播放 / failed=合成失败（点击时重试）。
+  const [segmentAudioStatus, setSegmentAudioStatus] = useState<Record<string, 'prewarming' | 'ready' | 'failed'>>({});
+
+  const synthesizeSegmentCached = useCallback(async (text: string, emotion?: string): Promise<Blob> => {
+    const cacheKey = `${character?.id ?? 'global'}:${emotion ?? ''}:${text}`;
+    const cached = segmentAudioCacheRef.current.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const blob = await apiService.synthesizeSpeech(text.trim(), {
+      characterId: character?.id,
+      emotion,
+    });
+    segmentAudioCacheRef.current.set(cacheKey, blob);
+    return blob;
+  }, [character?.id]);
+
+  // 回复流式完成后预合成各段音频：喇叭按钮点击时直接播放缓存，不用等合成。
+  const prewarmSegmentAudio = useCallback((content: string) => {
+    const paragraphs = splitReplyParagraphs(content);
+    void Promise.allSettled(
+      paragraphs.map(async (paragraph) => {
+        if (segmentAudioStatus[paragraph]) {
+          return; // 已有状态（合成中/就绪/失败）不重复预合成
+        }
+        setSegmentAudioStatus((prev) => ({ ...prev, [paragraph]: 'prewarming' }));
+        try {
+          await synthesizeSegmentCached(paragraph);
+          setSegmentAudioStatus((prev) => ({ ...prev, [paragraph]: 'ready' }));
+        } catch {
+          // 合成失败（TTS 不可用等）：标记失败，点击喇叭时现场再合成一次。
+          setSegmentAudioStatus((prev) => ({ ...prev, [paragraph]: 'failed' }));
+        }
+      }),
+    );
+  }, [synthesizeSegmentCached, segmentAudioStatus]);
+
   const speakSegment = async (text: string, emotion?: string) => {
     if (!text.trim()) return;
     cancelSpeech();
     speakCancelRef.current = false;
     try {
-      const blob = await apiService.synthesizeSpeech(text.trim(), {
-        characterId: character?.id,
-        emotion,
-      });
+      const blob = await synthesizeSegmentCached(text, emotion);
       if (speakCancelRef.current) return;
       await playBlob(blob);
+      if (!emotion) {
+        setSegmentAudioStatus((prev) => ({ ...prev, [text]: 'ready' }));
+      }
     } catch {
       // 合成或播放失败即静默停止
     }
   };
 
-  // 单段音频下载：合成后以 .wav 保存到本地。
+  // 单段音频下载：优先用预合成缓存，否则现场合成后以 .wav 保存到本地。
   const downloadSegment = async (text: string) => {
     if (!text.trim()) return;
     try {
-      const blob = await apiService.synthesizeSpeech(text.trim(), {
-        characterId: character?.id,
-      });
+      const blob = await synthesizeSegmentCached(text);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -846,6 +884,8 @@ export default function ChatInterface({
               ? event.tts_segments.filter((seg) => seg?.text)
               : [];
             speakReplyRef.current(ttsSegments.length ? ttsSegments : [{ text: event.content }]);
+            // 预合成每段音频：喇叭按钮点击时直接播放缓存，无需等待合成。
+            prewarmSegmentAudio(event.content);
             return;
           }
 
@@ -1206,6 +1246,7 @@ export default function ChatInterface({
           onTextModelChange={handleTextModelChange}
           onSpeakSegment={speakSegment}
           onDownloadSegment={downloadSegment}
+          segmentAudioStatus={segmentAudioStatus}
         />
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (

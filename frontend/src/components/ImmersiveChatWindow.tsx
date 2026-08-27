@@ -32,6 +32,8 @@ interface ImmersiveChatWindowProps {
   onSpeakSegment?: (text: string, emotion?: string) => void;
   /** 单段音频下载（气泡下载按钮）：合成该段并保存为 .wav。 */
   onDownloadSegment?: (text: string) => void;
+  /** 预合成状态（key=段落文本）：prewarming=合成中 / ready=可立即播放 / failed=失败待重试。 */
+  segmentAudioStatus?: Record<string, 'prewarming' | 'ready' | 'failed'>;
 }
 
 export interface PendingAttachment {
@@ -113,13 +115,7 @@ function formatFileSize(size: number) {
  * 角色长回复按自然段落拆分为多个气泡：空行分隔的块（markdown 段落/列表）。
  * 整段保持原样（不切句），气泡之间留小间距，配合每段喇叭/下载按钮。
  */
-function splitReplyParagraphs(text: string): string[] {
-  const parts = text
-    .split(/\n\s*\n/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  return parts.length ? parts : [text.trim()];
-}
+import { splitReplyParagraphs } from '@/utils/replyParagraphs';
 
 function buildPreviewAttachment(attachment: PendingAttachment | MessageAttachment): PreviewAttachment | null {
   if ('file' in attachment) {
@@ -166,6 +162,7 @@ export default function ImmersiveChatWindow({
   onTextModelChange,
   onSpeakSegment,
   onDownloadSegment,
+  segmentAudioStatus,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -652,9 +649,19 @@ export default function ImmersiveChatWindow({
                                             type="button"
                                             onClick={() => onSpeakSegment(paragraph)}
                                             title={copy.immersiveChat.speakSegment}
-                                            className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                                            className={`flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-sky-50 hover:text-sky-600 ${
+                                              segmentAudioStatus?.[paragraph] === 'ready'
+                                                ? 'text-sky-500'
+                                                : segmentAudioStatus?.[paragraph] === 'prewarming'
+                                                  ? 'text-sky-400'
+                                                  : 'text-slate-400'
+                                            }`}
                                           >
-                                            <Volume2 className="h-3.5 w-3.5" />
+                                            {segmentAudioStatus?.[paragraph] === 'prewarming' ? (
+                                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            ) : (
+                                              <Volume2 className="h-3.5 w-3.5" />
+                                            )}
                                           </button>
                                           {onDownloadSegment && (
                                             <button
