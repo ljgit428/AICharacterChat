@@ -406,7 +406,9 @@ function pickFormState(form: FormState, keys: readonly AiDraftKey[]): Partial<Fo
 interface ReferenceAndAiPanelProps {
   files: ReferenceFile[];
   isUploading: boolean;
+  uploadProgress: { done: number; total: number } | null;
   isGenerating: boolean;
+  aiStageText: string;
   canUndo: boolean;
   textReferenceCount: number;
   autoTargetName: string;
@@ -424,7 +426,9 @@ interface ReferenceAndAiPanelProps {
 function ReferenceAndAiPanel({
   files,
   isUploading,
+  uploadProgress,
   isGenerating,
+  aiStageText,
   canUndo,
   textReferenceCount,
   autoTargetName,
@@ -680,9 +684,23 @@ function ReferenceAndAiPanel({
           onChange={handleFolderChange}
         />
         {isUploading ? (
-          <div className="flex flex-col items-center text-amber-700">
-            <Loader2 className="mb-1 animate-spin" size={24} />
-            <span className="text-xs font-medium">{copy.uploadingBackgroundFile}</span>
+          <div className="flex w-full max-w-[260px] flex-col items-center gap-1.5 text-amber-700">
+            <Loader2 className="mb-0.5 animate-spin" size={24} />
+            <span className="text-xs font-medium">
+              {uploadProgress && uploadProgress.total > 1
+                ? copy.uploadProgress(uploadProgress.done, uploadProgress.total)
+                : copy.uploadingBackgroundFile}
+            </span>
+            {uploadProgress && uploadProgress.total > 1 && (
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-amber-200/80">
+                <div
+                  className="h-full rounded-full bg-amber-500 transition-all duration-300"
+                  style={{
+                    width: `${Math.round((uploadProgress.done / uploadProgress.total) * 100)}%`,
+                  }}
+                />
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -765,6 +783,20 @@ function ReferenceAndAiPanel({
         <span>{buttonLabel}</span>
       </button>
 
+      {isGenerating && (
+        <div className="mt-2 space-y-1.5">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-violet-100">
+            <div className="progress-indeterminate h-full rounded-full bg-violet-500" />
+          </div>
+          <p className="text-center text-[11px] leading-4 text-gray-500">{aiStageText}</p>
+          {textReferenceCount > 0 && (
+            <p className="text-center text-[11px] text-gray-400">
+              {copy.aiAnalyzingCount(textReferenceCount)}
+            </p>
+          )}
+        </div>
+      )}
+
       <p className="mt-2 text-[11px] leading-4 text-gray-500">{copy.aiScopeHintShort}</p>
     </div>
   );
@@ -844,6 +876,10 @@ export default function CreateCharacterSimplifiedForm({
   };
   // 参考文件上传失败的数量：保存前据此提醒用户，避免角色悄悄丢文件。
   const [failedUploadCount, setFailedUploadCount] = useState(0);
+  // 批量上传进度：done/total 用于进度条与"已上传 X/Y"提示；null 表示不在上传。
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  // AI 分析阶段的解说词轮换下标；aiLoading 期间按固定间隔推进。
+  const [aiStageIndex, setAiStageIndex] = useState(0);
   const [autoTargetName, setAutoTargetName] = useState('');
   const [systemPromptPreview, setSystemPromptPreview] = useState('');
   const [uploadingTarget, setUploadingTarget] = useState<'avatar' | 'background' | null>(null);
@@ -966,6 +1002,22 @@ export default function CreateCharacterSimplifiedForm({
     return () => clearTimeout(handle);
   }, [now, highlightDeadline, aiUndoDeadline]);
 
+  // AI 分析阶段：await 期间用轮换解说词让用户感知进展。
+  useEffect(() => {
+    if (!aiLoading) {
+      setAiStageIndex(0);
+      return;
+    }
+    const stages = copy.characterForm.aiAnalyzingStages;
+    if (!stages || stages.length === 0) {
+      return;
+    }
+    const handle = setInterval(() => {
+      setAiStageIndex((i) => (i + 1) % stages.length);
+    }, 2600);
+    return () => clearInterval(handle);
+  }, [aiLoading, copy.characterForm.aiAnalyzingStages]);
+
   const updateForm = (field: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     if (aiFilledFields.has(field as AiDraftKey)) {
@@ -1028,8 +1080,16 @@ export default function CreateCharacterSimplifiedForm({
     }
 
     setUploadingTarget('background');
+    setUploadProgress({ done: 0, total: items.length });
     try {
-      const results = await Promise.allSettled(items.map((item) => uploadSingleFile(item)));
+      // 并行上传，每完成一个就把进度 +1：进度条和"已上传 X/Y"随之推进。
+      const results = await Promise.allSettled(
+        items.map(async (item) => {
+          const result = await uploadSingleFile(item);
+          setUploadProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+          return result;
+        }),
+      );
       const uploadedFiles = results
         .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof uploadSingleFile>>> => result.status === 'fulfilled')
         .map((result) => result.value);
@@ -1052,6 +1112,7 @@ export default function CreateCharacterSimplifiedForm({
       }
     } finally {
       setUploadingTarget(null);
+      setUploadProgress(null);
     }
   }, [copy.characterForm, uploadSingleFile]);
 
@@ -1258,6 +1319,8 @@ export default function CreateCharacterSimplifiedForm({
   const isUploadingAvatar = uploadingTarget === 'avatar';
   const isUploadingBackground = uploadingTarget === 'background';
   const textReferenceCount = backgroundFiles.filter((file) => file.type === 'text').length;
+  const aiStages = copy.characterForm.aiAnalyzingStages;
+  const aiStageText = aiStages.length > 0 ? aiStages[aiStageIndex % aiStages.length] : '';
   // 仅在「跟随全局（全局可能是 genie）/ 明确 genie」且版本不被 genie 支持时提示；
   // gptsovits 引擎下 v2pr/v4 是合法组合，不应打扰。
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
@@ -1371,7 +1434,9 @@ export default function CreateCharacterSimplifiedForm({
             <ReferenceAndAiPanel
               files={backgroundFiles}
               isUploading={isUploadingBackground}
+              uploadProgress={uploadProgress}
               isGenerating={aiLoading}
+              aiStageText={aiStageText}
               canUndo={canUndoAiFill}
               textReferenceCount={textReferenceCount}
               autoTargetName={autoTargetName}
