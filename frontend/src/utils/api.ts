@@ -1136,8 +1136,21 @@ class ApiService {
       const decoder = new TextDecoder();
       let buffer = '';
       let chatSessionId: string | undefined;
+      // 收到 done 即终止本轮读取：后端 done 后连接可能不立刻关闭，
+      // 继续 reader.read() 会挂起，导致 isLoading 无法复位（停止按钮/“正在输入”卡死）。
+      let turnFinished = false;
 
-      while (true) {
+      const handleEvent = (event: StreamMessageEvent) => {
+        if (event.type === 'session') {
+          chatSessionId = String(event.chat_session_id);
+        }
+        handlers.onEvent(event);
+        if (event.type === 'done' || event.type === 'error') {
+          turnFinished = true;
+        }
+      };
+
+      while (!turnFinished) {
         const { done, value } = await reader.read();
         if (done) {
           break;
@@ -1152,22 +1165,22 @@ class ApiService {
           if (!trimmed) {
             continue;
           }
-
-          const event = JSON.parse(trimmed) as StreamMessageEvent;
-          if (event.type === 'session') {
-            chatSessionId = String(event.chat_session_id);
+          handleEvent(JSON.parse(trimmed) as StreamMessageEvent);
+          if (turnFinished) {
+            break;
           }
-          handlers.onEvent(event);
         }
-      }
 
-      const finalChunk = buffer.trim();
-      if (finalChunk) {
-        const event = JSON.parse(finalChunk) as StreamMessageEvent;
-        if (event.type === 'session') {
-          chatSessionId = String(event.chat_session_id);
+        // 尾部没有换行符的完整事件（尤其 done）也必须立即处理，
+        // 否则会被误判为"不完整行"留在 buffer，循环继续 read() 挂起。
+        if (!turnFinished && buffer.trim()) {
+          try {
+            handleEvent(JSON.parse(buffer.trim()) as StreamMessageEvent);
+            buffer = '';
+          } catch {
+            // 不完整 JSON，等待后续数据块补齐。
+          }
         }
-        handlers.onEvent(event);
       }
 
       return { data: { chat_session_id: chatSessionId } };
@@ -1497,6 +1510,40 @@ class ApiService {
 
   async deleteTtsVoiceModel(id: number): Promise<ApiResponse<void>> {
     return this.request(`/tts-voice-models/${id}`, { method: 'DELETE' });
+  }
+
+  async uploadTtsRefAudio(file: File): Promise<ApiResponse<{ path: string; name: string }>> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.request<{ path: string; name: string }>('/tts-voice-models/upload_ref_audio/', {
+      method: 'POST',
+      body: formData,
+    });
+    if (response.data) {
+      return { data: response.data };
+    }
+    return { data: undefined };
+  }
+
+  async uploadTtsOnnxDir(
+    files: File[],
+    relativePaths: string[],
+    name: string,
+  ): Promise<ApiResponse<{ path: string; name: string }>> {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    relativePaths.forEach((rel) => formData.append('relative_paths[]', rel));
+    if (name) {
+      formData.append('name', name);
+    }
+    const response = await this.request<{ path: string; name: string }>('/tts-voice-models/upload_onnx_dir/', {
+      method: 'POST',
+      body: formData,
+    });
+    if (response.data) {
+      return { data: response.data };
+    }
+    return { data: undefined };
   }
 
   async uploadConvertVoiceModel(data: UploadConvertRequest): Promise<ApiResponse<TtsVoiceModel>> {

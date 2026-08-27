@@ -166,11 +166,22 @@ export default function ImmersiveChatWindow({
   // 历史加载一旦出现过 loading，空状态就保持占位条直到消息真正渲染。
   // 否则"loading 复位但消息未落地"的中间帧会闪出空场景卡
   // （2026-08-24 用户视频逐帧实证：spinner→场景卡1帧→历史）。
+  // 注意：loading 结束后经过缓冲窗口（loadingSettled）就允许回落到场景卡，
+  // 否则新会话（无历史消息）会永远卡在"正在准备对话"，场景卡不出现。
   const [sawInitialLoading, setSawInitialLoading] = useState(false);
+  const [loadingSettled, setLoadingSettled] = useState(false);
   useEffect(() => {
-    if (isLoading) setSawInitialLoading(true);
-  }, [isLoading]);
-  const showLoadingPlaceholder = messages.length === 0 && (isLoading || (sawInitialLoading && !chatError));
+    if (isLoading) {
+      setSawInitialLoading(true);
+      setLoadingSettled(false);
+    } else if (sawInitialLoading && !loadingSettled) {
+      // 给消息落地留出缓冲窗口，超时后回退到场景卡（空会话可见）。
+      const timer = window.setTimeout(() => setLoadingSettled(true), 800);
+      return () => window.clearTimeout(timer);
+    }
+  }, [isLoading, sawInitialLoading, loadingSettled]);
+  const showLoadingPlaceholder =
+    messages.length === 0 && (isLoading || (sawInitialLoading && !chatError && !loadingSettled));
 
   const usageStats = useMemo(() => {
     const withUsage = messages.filter(
@@ -269,8 +280,9 @@ export default function ImmersiveChatWindow({
     // explicitText comes straight from the textarea element on Enter so a
     // state flush lag can never drop a submission.
     const message = (explicitText ?? draftMessage).trim();
-    if (!message && pendingAttachments.length === 0 && !isFirstMessage) {
-      return;
+    if (!message && pendingAttachments.length === 0) {
+      if (!isFirstMessage) return;
+      // isFirstMessage 且空文本 → 发送问候（角色先开口）
     }
 
     onSendMessage(message, pendingAttachments);
@@ -287,9 +299,6 @@ export default function ImmersiveChatWindow({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      if (isFirstMessage) {
-        return;
-      }
       submitMessage(event.currentTarget.value);
     }
   };
@@ -741,17 +750,15 @@ export default function ImmersiveChatWindow({
             accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,video/*"
             multiple
             onChange={handleAttachmentChange}
-            disabled={isFirstMessage}
           />
           <textarea
             ref={textareaRef}
             className="max-h-48 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 pb-1 pt-1.5 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-            placeholder={isFirstMessage ? copy.immersiveChat.clickStart : copy.immersiveChat.writeNextMessage}
+            placeholder={copy.immersiveChat.writeNextMessage}
             rows={2}
             value={draftMessage}
             onChange={(event) => setDraftMessage(event.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isFirstMessage}
             title={copy.immersiveChat.enterToSend}
           />
           <div className="mt-1 flex items-center justify-between gap-3 px-1">
@@ -760,7 +767,6 @@ export default function ImmersiveChatWindow({
                 type="button"
                 onClick={() => attachmentInputRef.current?.click()}
                 className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={isFirstMessage}
                 title={copy.immersiveChat.attachFile}
               >
                 <Plus className="h-5 w-5" />
@@ -853,9 +859,15 @@ export default function ImmersiveChatWindow({
                 <button
                   className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
                   onClick={() => submitMessage()}
-                  disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
+                  disabled={
+                    !isFirstMessage &&
+                    !draftMessage.trim() &&
+                    pendingAttachments.length === 0
+                  }
                 >
-                  {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
+                  {isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0
+                    ? copy.immersiveChat.start
+                    : copy.immersiveChat.send}
                 </button>
               )}
             </div>

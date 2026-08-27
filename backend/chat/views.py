@@ -52,6 +52,7 @@ from .serializers import (
     WebSearchConfigurationSerializer,
 )
 from .tasks import generate_ai_response, stream_ai_response
+from .file_views import sanitize_relative_path
 from .soul import list_memory_explorer_path, read_memory_explorer_file, sanitize_memory_relative_path
 import logging
 
@@ -635,6 +636,48 @@ class TtsVoiceModelViewSet(viewsets.ModelViewSet):
                 voice.conversion_error = payload.get('error') or 'ONNX 转换失败。'
                 voice.save(update_fields=['conversion_status', 'conversion_error', 'updated_at'])
         return Response(TtsVoiceModelSerializer(voice).data)
+
+    @action(detail=False, methods=['post'])
+    def upload_ref_audio(self, request):
+        """上传参考音频（音色或情感组用），返回服务器绝对路径供 genie 读取。
+
+        供设置页「选择音频文件」按钮使用：把本机音频传到 MEDIA_ROOT/tts/ref_audio，
+        返回绝对路径回填到表单的 ref_audio_path，避免用户手敲服务器路径。
+        """
+        audio = request.FILES.get('file')
+        if not audio:
+            raise ValidationError({'file': 'This file is required.'})
+        path = _save_upload_to(Path(settings.MEDIA_ROOT) / 'tts' / 'ref_audio', audio)
+        return Response({'path': str(path), 'name': audio.name})
+
+    @action(detail=False, methods=['post'])
+    def upload_onnx_dir(self, request):
+        """上传一个 ONNX 模型文件夹（webkitdirectory 多文件），返回服务器目录路径。
+
+        文件字段为 files[]（重复 files），保留相对路径目录结构，
+        落盘到 MEDIA_ROOT/tts/onnx_models/<name>_onnx/ 并返回目录绝对路径。
+        """
+        files = request.FILES.getlist('files')
+        if not files:
+            raise ValidationError({'files': 'At least one file is required.'})
+        relative_paths = request.POST.getlist('relative_paths[]')
+        name = (request.data.get('name') or '').strip() or slugify(
+            Path(relative_paths[0] if relative_paths else '').parts[0]
+        ) or f'voice_{uuid4().hex[:6]}'
+
+        output_dir = Path(settings.MEDIA_ROOT) / 'tts' / 'onnx_models' / f'{slugify(name) or uuid4().hex[:8]}_onnx'
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for index, file_obj in enumerate(files):
+            rel = relative_paths[index] if index < len(relative_paths) else file_obj.name
+            rel = sanitize_relative_path(rel) or os.path.basename(file_obj.name)
+            target = output_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, 'wb') as handle:
+                for chunk in file_obj.chunks():
+                    handle.write(chunk)
+
+        return Response({'path': str(output_dir), 'name': str(output_dir.name)})
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):

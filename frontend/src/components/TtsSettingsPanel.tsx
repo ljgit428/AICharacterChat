@@ -84,6 +84,64 @@ export default function TtsSettingsPanel() {
   const [testResults, setTestResults] = useState<Partial<Record<TtsEngine, { ok: boolean; hint: string }>>>({});
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // 路径选择：参考音频（音色级 / 情感组级）与 ONNX 模型文件夹
+  const refAudioInputRef = useRef<HTMLInputElement>(null);
+  const emotionAudioInputRef = useRef<HTMLInputElement>(null);
+  const onnxDirInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingRefAudio, setUploadingRefAudio] = useState(false);
+  const [uploadingEmotionAudio, setUploadingEmotionAudio] = useState<number | null>(null);
+  const [uploadingOnnxDir, setUploadingOnnxDir] = useState(false);
+  const [emotionAudioTarget, setEmotionAudioTarget] = useState<number | null>(null);
+
+  const handlePickRefAudio = async (file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+    setUploadingRefAudio(true);
+    const response = await apiService.uploadTtsRefAudio(file);
+    setUploadingRefAudio(false);
+    if (response.error || !response.data) {
+      setVoiceError(response.error || copy.refAudioUploadFailed);
+      return;
+    }
+    setForm((prev) => ({ ...prev, refAudioPath: response.data!.path }));
+  };
+
+  const handlePickEmotionAudio = async (index: number, file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+    setEmotionAudioTarget(index);
+    setUploadingEmotionAudio(index);
+    const response = await apiService.uploadTtsRefAudio(file);
+    setUploadingEmotionAudio(null);
+    setEmotionAudioTarget(null);
+    if (response.error || !response.data) {
+      setVoiceError(response.error || copy.refAudioUploadFailed);
+      return;
+    }
+    updateEmotion(index, { refAudioPath: response.data!.path });
+  };
+
+  const handlePickOnnxDir = async (files: FileList | null) => {
+    if (!files || files.length === 0) {
+      return;
+    }
+    setUploadingOnnxDir(true);
+    const fileList = Array.from(files);
+    const relativePaths = fileList.map((file) => {
+      const webkitPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+      return webkitPath || file.name;
+    });
+    const response = await apiService.uploadTtsOnnxDir(fileList, relativePaths, form.name.trim());
+    setUploadingOnnxDir(false);
+    if (response.error || !response.data) {
+      setVoiceError(response.error || copy.onnxDirUploadFailed);
+      return;
+    }
+    setForm((prev) => ({ ...prev, onnxModelDir: response.data!.path }));
+  };
+
   const fetchVoices = useCallback(async () => {
     try {
       setLoadingVoices(true);
@@ -604,14 +662,51 @@ export default function TtsSettingsPanel() {
               {form.engine === 'genie' && (
                 <div className="space-y-1.5 sm:col-span-2">
                   <label className="text-xs font-medium text-slate-500">{copy.onnxDirLabel}</label>
-                  <input value={form.onnxModelDir} onChange={(e) => setForm((prev) => ({ ...prev, onnxModelDir: e.target.value }))} placeholder="D:/models/<name>_onnx" className={`${inputClassName} font-mono`} />
+                  <div className="flex gap-2">
+                    <input value={form.onnxModelDir} onChange={(e) => setForm((prev) => ({ ...prev, onnxModelDir: e.target.value }))} placeholder="D:/models/<name>_onnx" className={`${inputClassName} font-mono`} />
+                    <input
+                      ref={onnxDirInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+                      onChange={(e) => { void handlePickOnnxDir(e.target.files); e.target.value = ''; }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => onnxDirInputRef.current?.click()}
+                      disabled={uploadingOnnxDir}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {uploadingOnnxDir ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+                      {uploadingOnnxDir ? copy.uploading : copy.pickOnnxDir}
+                    </button>
+                  </div>
                 </div>
               )}
               {form.engine !== 'indextts' && (
                 <>
                   <div className="space-y-1.5 sm:col-span-2">
                     <label className="text-xs font-medium text-slate-500">{copy.refAudioPathLabel}</label>
-                    <input value={form.refAudioPath} onChange={(e) => setForm((prev) => ({ ...prev, refAudioPath: e.target.value }))} placeholder="F:/voice/sample.wav" className={`${inputClassName} font-mono`} />
+                    <div className="flex gap-2">
+                      <input value={form.refAudioPath} onChange={(e) => setForm((prev) => ({ ...prev, refAudioPath: e.target.value }))} placeholder="F:/voice/sample.wav" className={`${inputClassName} font-mono`} />
+                      <input
+                        ref={refAudioInputRef}
+                        type="file"
+                        accept="audio/*,.wav,.flac,.ogg,.aif,.aiff"
+                        className="hidden"
+                        onChange={(e) => { void handlePickRefAudio(e.target.files?.[0]); e.target.value = ''; }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => refAudioInputRef.current?.click()}
+                        disabled={uploadingRefAudio}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {uploadingRefAudio ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+                        {uploadingRefAudio ? copy.uploading : copy.pickRefAudio}
+                      </button>
+                    </div>
                   </div>
                   <div className="space-y-1.5 sm:col-span-2">
                     <label className="text-xs font-medium text-slate-500">{copy.refTextLabel}</label>
@@ -651,12 +746,30 @@ export default function TtsSettingsPanel() {
                     </div>
                     <div className="space-y-1">
                       <label className="text-[11px] font-medium text-slate-500">{copy.emotionRefAudioLabel}</label>
-                      <input
-                        value={emotion.refAudioPath}
-                        onChange={(e) => updateEmotion(index, { refAudioPath: e.target.value })}
-                        placeholder={copy.emotionRefAudioPlaceholder}
-                        className={`${inputClassName} font-mono`}
-                      />
+                      <div className="flex gap-2">
+                        <input
+                          value={emotion.refAudioPath}
+                          onChange={(e) => updateEmotion(index, { refAudioPath: e.target.value })}
+                          placeholder={copy.emotionRefAudioPlaceholder}
+                          className={`${inputClassName} font-mono`}
+                        />
+                        <input
+                          ref={emotionAudioInputRef}
+                          type="file"
+                          accept="audio/*,.wav,.flac,.ogg,.aif,.aiff"
+                          className="hidden"
+                          onChange={(e) => { void handlePickEmotionAudio(index, e.target.files?.[0]); e.target.value = ''; }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => { setEmotionAudioTarget(index); emotionAudioInputRef.current?.click(); }}
+                          disabled={uploadingEmotionAudio !== null}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {uploadingEmotionAudio === index ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+                          {uploadingEmotionAudio === index ? copy.uploading : copy.pickRefAudio}
+                        </button>
+                      </div>
                     </div>
                     <div className="space-y-1">
                       <label className="text-[11px] font-medium text-slate-500">{copy.emotionRefTextLabel}</label>
