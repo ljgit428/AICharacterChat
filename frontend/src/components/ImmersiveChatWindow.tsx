@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Check, Cpu, Expand, FileText, ImageIcon, Loader2, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
+import { BrainCircuit, Check, Cpu, Download, Expand, FileText, ImageIcon, Loader2, Music, Plus, Sparkles, Square, Video, Volume2, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
@@ -28,6 +28,10 @@ interface ImmersiveChatWindowProps {
   modelConfigs?: ModelConfig[];
   activeTextModel?: ModelConfig | null;
   onTextModelChange?: (modelId: string) => void | Promise<void>;
+  /** 单段朗读（气泡喇叭按钮）：不依赖全局自动朗读开关。 */
+  onSpeakSegment?: (text: string, emotion?: string) => void;
+  /** 单段音频下载（气泡下载按钮）：合成该段并保存为 .wav。 */
+  onDownloadSegment?: (text: string) => void;
 }
 
 export interface PendingAttachment {
@@ -105,6 +109,18 @@ function formatFileSize(size: number) {
   return `${(size / 1024 / 1024).toFixed(2)} MB`;
 }
 
+/**
+ * 角色长回复按自然段落拆分为多个气泡：空行分隔的块（markdown 段落/列表）。
+ * 整段保持原样（不切句），气泡之间留小间距，配合每段喇叭/下载按钮。
+ */
+function splitReplyParagraphs(text: string): string[] {
+  const parts = text
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length ? parts : [text.trim()];
+}
+
 function buildPreviewAttachment(attachment: PendingAttachment | MessageAttachment): PreviewAttachment | null {
   if ('file' in attachment) {
     if (!attachment.previewUrl || attachment.kind === 'text') {
@@ -148,6 +164,8 @@ export default function ImmersiveChatWindow({
   modelConfigs,
   activeTextModel,
   onTextModelChange,
+  onSpeakSegment,
+  onDownloadSegment,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -595,27 +613,67 @@ export default function ImmersiveChatWindow({
                         </div>
 
                         <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
-                          {contentMessages.map((message, index) => (
-                            <div
-                              key={message.id}
-                              className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
-                                group.role === 'user'
-                                  ? 'bg-slate-900 text-white'
-                                  : 'border border-white/80 bg-white/90 text-slate-800'
-                              } ${
-                                group.role === 'user'
-                                  ? index === contentMessages.length - 1
-                                    ? 'rounded-br-md'
-                                    : ''
-                                  : index === contentMessages.length - 1
-                                    ? 'rounded-bl-md'
-                                    : ''
-                              }`}
-                            >
-                              <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
-                              {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
-                            </div>
-                          ))}
+                          {contentMessages.map((message, index) => {
+                            // 角色长回复按自然段落拆成多个小气泡，每段带朗读/下载按钮；
+                            // 用户消息保持单气泡整段显示。
+                            const paragraphs =
+                              group.role !== 'user' && message.content
+                                ? splitReplyParagraphs(message.content)
+                                : [message.content || ''];
+                            const isLast = index === contentMessages.length - 1;
+                            const bubbleBase =
+                              group.role === 'user'
+                                ? 'bg-slate-900 text-white'
+                                : 'border border-white/80 bg-white/90 text-slate-800';
+                            const corner =
+                              group.role === 'user'
+                                ? isLast
+                                  ? 'rounded-br-md'
+                                  : ''
+                                : isLast
+                                  ? 'rounded-bl-md'
+                                  : '';
+
+                            return (
+                              <div key={message.id} className={`flex flex-col gap-1.5 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
+                                {paragraphs.map((paragraph, paraIndex) => (
+                                  <div
+                                    key={`${message.id}-p${paraIndex}`}
+                                    className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${bubbleBase} ${
+                                      paragraphs.length > 1 && paraIndex === paragraphs.length - 1 ? corner : ''
+                                    }`}
+                                  >
+                                    <div className="flex flex-col gap-1">
+                                      <p className="whitespace-pre-wrap">{paragraph}</p>
+                                      {group.role !== 'user' && onSpeakSegment && (
+                                        <div className="flex items-center gap-1 pt-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => onSpeakSegment(paragraph)}
+                                            title={copy.immersiveChat.speakSegment}
+                                            className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                                          >
+                                            <Volume2 className="h-3.5 w-3.5" />
+                                          </button>
+                                          {onDownloadSegment && (
+                                            <button
+                                              type="button"
+                                              onClick={() => onDownloadSegment(paragraph)}
+                                              title={copy.immersiveChat.downloadSegment}
+                                              className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                                            >
+                                              <Download className="h-3.5 w-3.5" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 

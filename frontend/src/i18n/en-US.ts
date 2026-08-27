@@ -336,6 +336,8 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     startConversation: "Start the conversation",
     defaultSceneDescription: "Click start and let the character open the conversation first.",
     pressStart: "Type a message to start, or press Start to let the character speak first.",
+speakSegment: "Listen to this segment",
+downloadSegment: "Download this segment's audio",
     characterIsTyping: "Character is typing...",
     usageContextLabel: "Context capacity",
     usageContextTitle: (used: string, limit: string) => `${used} / ${limit} tokens`,

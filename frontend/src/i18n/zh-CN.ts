@@ -325,6 +325,8 @@ export const zhCNMessages = {
     startConversation: "开始这段对话",
     defaultSceneDescription: "点击“开始”，让角色先开口。",
     pressStart: "输入消息即可开始对话；或点击“开始”，让角色先说第一句。",
+    speakSegment: "朗读这段话",
+    downloadSegment: "下载这段话的音频",
     characterIsTyping: "角色正在输入...",
     usageContextLabel: "上下文容量",
     usageContextTitle: (used: string, limit: string) => `${used} / ${limit} tokens`,

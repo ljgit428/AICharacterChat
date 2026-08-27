@@ -273,6 +273,44 @@ export default function ChatInterface({
     void speakReply(segments);
   };
 
+  // 单段朗读（消息气泡旁的喇叭按钮）：不依赖全局"自动朗读"开关，独立发声。
+  // 与 speakReply 共用 currentAudioRef，所以先停掉正在播的音频。
+  const speakSegment = async (text: string, emotion?: string) => {
+    if (!text.trim()) return;
+    cancelSpeech();
+    speakCancelRef.current = false;
+    try {
+      const blob = await apiService.synthesizeSpeech(text.trim(), {
+        characterId: character?.id,
+        emotion,
+      });
+      if (speakCancelRef.current) return;
+      await playBlob(blob);
+    } catch {
+      // 合成或播放失败即静默停止
+    }
+  };
+
+  // 单段音频下载：合成后以 .wav 保存到本地。
+  const downloadSegment = async (text: string) => {
+    if (!text.trim()) return;
+    try {
+      const blob = await apiService.synthesizeSpeech(text.trim(), {
+        characterId: character?.id,
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${character?.name || 'voice'}-segment-${Date.now()}.wav`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // 合成失败即静默停止
+    }
+  };
+
   useEffect(() => cancelSpeech, [cancelSpeech]);
 
   useEffect(() => {
@@ -1166,6 +1204,8 @@ export default function ChatInterface({
           modelConfigs={modelConfigs}
           activeTextModel={activeModelConfig}
           onTextModelChange={handleTextModelChange}
+          onSpeakSegment={speakSegment}
+          onDownloadSegment={downloadSegment}
         />
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (
