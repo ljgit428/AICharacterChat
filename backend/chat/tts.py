@@ -98,8 +98,7 @@ def provider_ready(config: dict, provider: str) -> tuple[bool, str]:
 class GenieTtsProvider:
     """Genie-TTS 服务器客户端。/tts 返回裸 PCM（32kHz/16bit/mono）→ 包 WAV 头。
 
-    角色音色按需自动加载：voice 字典带 onnx_model_dir / 参考音频时，
-    首次合成前自动 POST /load_character + /set_reference_audio。
+    角色音色按需自动加载；情感组参考音频在每次合成时按需切换。
     """
 
     name = 'genie'
@@ -107,6 +106,8 @@ class GenieTtsProvider:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip('/')
         self._loaded_voices: set[str] = set()
+        # 跟踪每个音色当前在 genie 服务端设置的参考音频，避免重复请求。
+        self._ref_audios: dict[str, tuple[str, str, str]] = {}
 
     def ensure_voice_loaded(self, voice: dict) -> None:
         name = voice['name']
@@ -125,21 +126,49 @@ class GenieTtsProvider:
             raise TtsUnavailableError(
                 f'Genie-TTS 加载角色 {name} 失败：{response.text[:200]}'
             )
-        if voice.get('ref_audio_path'):
-            requests.post(
-                f'{self.base_url}/set_reference_audio',
-                json={
-                    'character_name': name,
-                    'audio_path': voice['ref_audio_path'],
-                    'audio_text': voice.get('ref_audio_text', ''),
-                    'language': voice.get('ref_audio_language') or voice['language'],
-                },
-                timeout=60,
-            )
         self._loaded_voices.add(name)
 
-    def synthesize(self, text: str, voice: dict, timeout: float = 60.0):
+    def _ensure_ref_audio(self, voice: dict, emotion: str | None) -> None:
+        """确保 genie 服务的参考音频为本请求所需（情感或默认）。
+        仅在内容变化时发请求。
+        """
+        name = voice['name']
+        ref = pick_emotion_ref(voice, emotion)
+        if ref is None and voice.get('ref_audio_path'):
+            ref = {
+                'ref_audio_path': voice['ref_audio_path'],
+                'ref_audio_text': voice.get('ref_audio_text', ''),
+                'ref_audio_language': (voice.get('ref_audio_language')
+                                       or voice['language']),
+            }
+        if ref is None:
+            # 既无情感参考又无默认参考音频——genie 服务端仍有上次的值，
+            # 但 /tts 会报 404。让上游返回错误，调用方可见。
+            return
+        key = (ref['ref_audio_path'], ref['ref_audio_text'], ref['ref_audio_language'])
+        if self._ref_audios.get(name) == key:
+            return
+        response = requests.post(
+            f'{self.base_url}/set_reference_audio',
+            json={
+                'character_name': name,
+                'audio_path': ref['ref_audio_path'],
+                'audio_text': ref['ref_audio_text'],
+                'language': ref['ref_audio_language'],
+            },
+            timeout=60,
+        )
+        if response.status_code != 200:
+            raise TtsUnavailableError(
+                f'Genie-TTS 设置参考音频（情感：{emotion or "默认"}）失败：'
+                f'{response.text[:200]}'
+            )
+        self._ref_audios[name] = key
+
+    def synthesize(self, text: str, voice: dict, timeout: float = 60.0,
+                   emotion: str | None = None):
         self.ensure_voice_loaded(voice)
+        self._ensure_ref_audio(voice, emotion)
         payload = {
             'character_name': voice['name'],
             'text': text,
@@ -195,9 +224,11 @@ class GptSoVitsProvider:
         self.prompt_text = config['gptsovits_prompt_text']
         self.prompt_lang = config['gptsovits_prompt_lang']
 
-    def synthesize(self, text: str, voice: dict | None = None, timeout: float = 120.0):
-        ref_audio_path = (voice or {}).get('ref_audio_path') or self.ref_audio_path
-        prompt_text = (voice or {}).get('ref_audio_text') or self.prompt_text
+    def synthesize(self, text: str, voice: dict | None = None, timeout: float = 120.0,
+                   emotion: str | None = None):
+        ref = pick_emotion_ref(voice, emotion) if voice else None
+        ref_audio_path = (ref or {}).get('ref_audio_path') or (voice or {}).get('ref_audio_path') or self.ref_audio_path
+        prompt_text = (ref or {}).get('ref_audio_text') or (voice or {}).get('ref_audio_text') or self.prompt_text
         if not ref_audio_path:
             raise TtsUnavailableError(
                 'GPT-SoVITS 缺少参考音频配置：请设置 TTS_GPTSOVITS_REF_AUDIO_PATH '
@@ -342,6 +373,10 @@ def merged_voice_fields(character_tts_config: dict | None, user=None) -> dict:
             return value
         return (getattr(record, key, '') or '').strip() if record else ''
 
+    # 情感组只属于角色级配置（每个情感一份参考音频），不来自音色库记录。
+    raw_emotions = cfg.get('emotions') or []
+    emotions = raw_emotions if isinstance(raw_emotions, list) else []
+
     ref_audio_language = pick('ref_audio_language')
     language = pick('language')
     result = {
@@ -353,11 +388,39 @@ def merged_voice_fields(character_tts_config: dict | None, user=None) -> dict:
         'ref_audio_path': _resolve_server_path(pick('ref_audio_path')),
         'ref_audio_text': pick('ref_audio_text'),
         'ref_audio_language': ref_audio_language or language,
+        'emotions': emotions,
     }
     if not result['voice_name'] and record is not None:
         # 音色库条目的名字即 genie 侧音色键（目录名只兜底旧数据直填场景）。
         result['voice_name'] = (record.name or '').strip()
     return result
+
+
+def pick_emotion_ref(voice: dict, emotion: str | None) -> dict | None:
+    """按情感名从 voice['emotions'] 挑参考音频；未命中返回 None（走默认参考音频）。
+
+    返回 {ref_audio_path, ref_audio_text, ref_audio_language}，路径已解析为
+    服务端绝对路径；情感条目没配参考音频时视为未命中。
+    """
+    if not emotion or not isinstance(voice, dict):
+        return None
+    target = emotion.strip()
+    for entry in voice.get('emotions') or []:
+        if not isinstance(entry, dict):
+            continue
+        if (str(entry.get('name') or '').strip() != target):
+            continue
+        path = _resolve_server_path(str(entry.get('ref_audio_path') or '').strip())
+        if not path:
+            continue
+        return {
+            'ref_audio_path': path,
+            'ref_audio_text': str(entry.get('ref_audio_text') or '').strip(),
+            'ref_audio_language': (str(entry.get('ref_audio_language') or '').strip()
+                                   or voice.get('ref_audio_language') or voice.get('language')
+                                   or DEFAULT_GENIE_LANGUAGE),
+        }
+    return None
 
 
 def build_genie_voice(character_tts_config: dict | None, user=None) -> dict:
@@ -383,6 +446,7 @@ def build_genie_voice(character_tts_config: dict | None, user=None) -> dict:
         'ref_audio_path': fields['ref_audio_path'],
         'ref_audio_text': fields['ref_audio_text'],
         'ref_audio_language': fields['ref_audio_language'],
+        'emotions': fields.get('emotions', []),
     }
 
 
@@ -405,9 +469,11 @@ def resolve_provider_and_voice(
                 f'该音色请改用 gptsovits 通道。'
             )
         voice = build_genie_voice(character_tts_config, user)
-    elif fields['ref_audio_path'] or fields['ref_audio_text']:
-        # 非 genie 引擎：仅透传音色级参考音频覆盖
+    elif fields['ref_audio_path'] or fields['ref_audio_text'] or fields.get('emotions'):
+        # 非 genie 引擎：透传音色级参考音频覆盖（情感组一并带上，合成时按需挑）
         voice = {key: fields[key] for key in ('ref_audio_path', 'ref_audio_text') if fields[key]}
+        if fields.get('emotions'):
+            voice['emotions'] = fields['emotions']
     return selected, voice
 
 
@@ -490,11 +556,13 @@ def synthesize_speech(
     character_tts_config: dict | None = None,
     user=None,
     service_overrides: dict | None = None,
+    emotion: str | None = None,
 ) -> dict:
     """合成一段文本。
 
     引擎地址/默认 provider：用户级设置（service_overrides）> 环境变量。
     音色：角色 tts_config 里的显式字段 > 其所选音色库记录。
+    emotion：角色情感组里的情感名，命中时用该情感的参考音频（否则默认）。
     """
     config = get_tts_config(service_overrides)
     selected, voice = resolve_provider_and_voice(provider, character_tts_config, user)
@@ -502,10 +570,14 @@ def synthesize_speech(
     ok, hint = instance.readiness_probe()
     if not ok:
         raise TtsUnavailableError(hint)
-    result = instance.synthesize(text, voice) if voice is not None else instance.synthesize(text)
+    if voice is not None:
+        result = instance.synthesize(text, voice, emotion=emotion)
+    else:
+        result = instance.synthesize(text)
     result['provider'] = selected
     logger.info(
-        "TTS done via %s in %dms (first_byte=%s, chars=%d)",
+        "TTS done via %s in %dms (first_byte=%s, chars=%d, emotion=%s)",
         selected, result['processing_ms'], result.get('first_byte_ms'), len(text),
+        emotion or '-',
     )
     return result

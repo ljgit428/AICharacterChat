@@ -994,9 +994,10 @@ class ChatViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'])
     def tts(self, request):
-        """实时模式语音合成：{text, provider?} → 音频流（上游透传）。
+        """实时模式语音合成：{text, provider?, character_id?, emotion?} → 音频流。
 
         provider 由 TTS_PROVIDER 配置（genie/gptsovits/indextts），请求可覆盖。
+        emotion 对应角色情感组的情感名，命中时使用该情感专属的参考音频。
         未配置返回 501；已配置但服务不可达返回 503 + readiness 提示。
         """
         text = (request.data.get('text') or '').strip()
@@ -1008,6 +1009,7 @@ class ChatViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         provider = (request.data.get('provider') or '').strip().lower() or None
+        emotion = (request.data.get('emotion') or '').strip() or None
         # 音色的模型目录/参考音频来自设置页登记的音色库（角色 tts_config 通过
         # voice_model_id 引用；旧数据的直填字段仍兼容）。无效/不属于当前用户
         # 的 character_id 视作未提供配置，genie 通道会直接报"请先配置语音模型"。
@@ -1023,7 +1025,7 @@ class ChatViewSet(viewsets.ViewSet):
         try:
             result = chat_tts.synthesize_speech(
                 text, provider=provider, character_tts_config=character_tts_config,
-                user=request.user, service_overrides=service_overrides,
+                user=request.user, service_overrides=service_overrides, emotion=emotion,
             )
         except chat_tts.TtsUnavailableError as exc:
             readiness = chat_tts.readiness()

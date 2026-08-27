@@ -160,17 +160,53 @@ type WebSearchMode = 'default' | 'on' | 'off';
 
 // 角色只引用设置页登记的音色（voice_model_id）；引擎地址、模型目录、
 // 参考音频等细节全部收敛在 设置→语音设置。
+// 情感组是角色级配置：每种情感一份参考音频，合成时按情感切换。
+export type EmotionConfigForm = {
+  name: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+};
+
 type TtsConfigForm = {
   voiceModelId: string;
+  language: string;
+  emotions: EmotionConfigForm[];
 };
 
 const EMPTY_TTS_CONFIG: TtsConfigForm = {
   voiceModelId: '',
+  language: '',
+  emotions: [],
 };
 
-function toTtsConfigInput(tts: TtsConfigForm): Record<string, string> {
-  const config: Record<string, string> = {};
+// 从后端 tts_config 反序列化情感组；容错跳过缺名字/非对象的脏条目。
+function parseEmotions(raw: unknown): EmotionConfigForm[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+    .map((entry) => ({
+      name: typeof entry.name === 'string' ? entry.name : '',
+      refAudioPath: typeof entry.ref_audio_path === 'string' ? entry.ref_audio_path : '',
+      refAudioText: typeof entry.ref_audio_text === 'string' ? entry.ref_audio_text : '',
+      refAudioLanguage:
+        typeof entry.ref_audio_language === 'string' ? entry.ref_audio_language : '',
+    }));
+}
+
+function toTtsConfigInput(tts: TtsConfigForm): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
   if (tts.voiceModelId) config.voice_model_id = tts.voiceModelId;
+  if (tts.language) config.language = tts.language;
+  const emotions = tts.emotions
+    .map((emotion) => ({
+      name: emotion.name.trim(),
+      ref_audio_path: emotion.refAudioPath.trim(),
+      ref_audio_text: emotion.refAudioText.trim(),
+      ref_audio_language: emotion.refAudioLanguage.trim(),
+    }))
+    .filter((emotion) => emotion.name);
+  if (emotions.length) config.emotions = emotions;
   return config;
 }
 
@@ -773,6 +809,39 @@ export default function CreateCharacterSimplifiedForm({
   }, []);
   const [autoInputText, setAutoInputText] = useState('');
   const [backgroundFiles, setBackgroundFiles] = useState<ReferenceFile[]>([]);
+  // 情感组的增删改：只动 ttsConfig.emotions，不影响音色/语言字段。
+  const updateEmotion = (index: number, patch: Partial<EmotionConfigForm>) => {
+    setForm((prev) => ({
+      ...prev,
+      ttsConfig: {
+        ...prev.ttsConfig,
+        emotions: prev.ttsConfig.emotions.map((emotion, i) =>
+          i === index ? { ...emotion, ...patch } : emotion,
+        ),
+      },
+    }));
+  };
+  const addEmotion = () => {
+    setForm((prev) => ({
+      ...prev,
+      ttsConfig: {
+        ...prev.ttsConfig,
+        emotions: [
+          ...prev.ttsConfig.emotions,
+          { name: '', refAudioPath: '', refAudioText: '', refAudioLanguage: prev.ttsConfig.language },
+        ],
+      },
+    }));
+  };
+  const removeEmotion = (index: number) => {
+    setForm((prev) => ({
+      ...prev,
+      ttsConfig: {
+        ...prev.ttsConfig,
+        emotions: prev.ttsConfig.emotions.filter((_, i) => i !== index),
+      },
+    }));
+  };
   // 参考文件上传失败的数量：保存前据此提醒用户，避免角色悄悄丢文件。
   const [failedUploadCount, setFailedUploadCount] = useState(0);
   const [autoTargetName, setAutoTargetName] = useState('');
@@ -811,7 +880,7 @@ export default function CreateCharacterSimplifiedForm({
       return;
     }
     loadedCharacterIdRef.current = String(char.id);
-    const charTts = (char.ttsConfig || {}) as Record<string, string>;
+    const charTts = (char.ttsConfig || {}) as Record<string, unknown>;
     const nextForm: FormState = {
       name: char.name || '',
       description: char.description || '',
@@ -831,6 +900,8 @@ export default function CreateCharacterSimplifiedForm({
           charTts.voice_model_id != null && String(charTts.voice_model_id) !== ''
             ? String(charTts.voice_model_id)
             : '',
+        language: typeof charTts.language === 'string' ? charTts.language : '',
+        emotions: parseEmotions(charTts.emotions),
       },
     };
     const nextBackgroundFiles = Array.isArray(char.knowledgeAssets)
@@ -1470,7 +1541,7 @@ export default function CreateCharacterSimplifiedForm({
                     onChange={(e) =>
                       setForm((prev) => ({
                         ...prev,
-                        ttsConfig: { voiceModelId: e.target.value },
+                        ttsConfig: { ...prev.ttsConfig, voiceModelId: e.target.value },
                       }))
                     }
                     className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
@@ -1485,6 +1556,115 @@ export default function CreateCharacterSimplifiedForm({
                   <p className="text-[11px] leading-4 text-gray-400">
                     {copy.characterForm.ttsVoiceModelHint}
                   </p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-gray-500">
+                    {copy.characterForm.ttsLanguageLabel}
+                  </label>
+                  <select
+                    value={form.ttsConfig.language}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        ttsConfig: { ...prev.ttsConfig, language: e.target.value },
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">{copy.characterForm.ttsLanguageEmpty}</option>
+                    <option value="zh">中文</option>
+                    <option value="jp">日本語</option>
+                    <option value="en">English</option>
+                    <option value="ko">한국어</option>
+                  </select>
+                  <p className="text-[11px] leading-4 text-gray-400">
+                    {copy.characterForm.ttsLanguageHint}
+                  </p>
+                </div>
+
+                <div className="space-y-2 border-t border-amber-200/70 pt-3">
+                  <div>
+                    <label className="text-xs font-bold text-gray-700">
+                      {copy.characterForm.emotionSectionTitle}
+                    </label>
+                    <p className="mt-0.5 text-[11px] leading-4 text-gray-400">
+                      {copy.characterForm.emotionSectionHint}
+                    </p>
+                  </div>
+                  {form.ttsConfig.emotions.map((emotion, index) => (
+                    <div
+                      key={index}
+                      className="space-y-2 rounded-xl border border-amber-200 bg-white/70 p-3"
+                    >
+                      <div className="flex items-end gap-2">
+                        <div className="flex-1 space-y-1">
+                          <label className="text-[11px] font-medium text-gray-500">
+                            {copy.characterForm.emotionNameLabel}
+                          </label>
+                          <input
+                            value={emotion.name}
+                            onChange={(e) => updateEmotion(index, { name: e.target.value })}
+                            placeholder={copy.characterForm.emotionNamePlaceholder}
+                            className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeEmotion(index)}
+                          title={copy.characterForm.emotionRemove}
+                          className="mb-0.5 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-100"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-medium text-gray-500">
+                          {copy.characterForm.emotionRefAudioLabel}
+                        </label>
+                        <input
+                          value={emotion.refAudioPath}
+                          onChange={(e) => updateEmotion(index, { refAudioPath: e.target.value })}
+                          placeholder={copy.characterForm.emotionRefAudioPlaceholder}
+                          className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-xs outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-medium text-gray-500">
+                          {copy.characterForm.emotionRefTextLabel}
+                        </label>
+                        <textarea
+                          value={emotion.refAudioText}
+                          onChange={(e) => updateEmotion(index, { refAudioText: e.target.value })}
+                          placeholder={copy.characterForm.emotionRefTextPlaceholder}
+                          rows={2}
+                          className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-medium text-gray-500">
+                          {copy.characterForm.emotionRefLanguageLabel}
+                        </label>
+                        <select
+                          value={emotion.refAudioLanguage}
+                          onChange={(e) => updateEmotion(index, { refAudioLanguage: e.target.value })}
+                          className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                        >
+                          <option value="">{copy.characterForm.ttsLanguageEmpty}</option>
+                          <option value="zh">中文</option>
+                          <option value="jp">日本語</option>
+                          <option value="en">English</option>
+                          <option value="ko">한국어</option>
+                        </select>
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={addEmotion}
+                    className="w-full rounded-lg border border-dashed border-amber-300 bg-white/60 px-3 py-2 text-xs font-medium text-amber-600 transition-colors hover:bg-amber-50"
+                  >
+                    ＋ {copy.characterForm.emotionAdd}
+                  </button>
                 </div>
               </div>
             </div>

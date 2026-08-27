@@ -645,6 +645,7 @@ interface StreamDoneEvent {
   type: 'done';
   message_id: number;
   content: string;
+  tts_segments?: { emotion?: string; text: string }[];
   timestamp: string;
   latency_ms?: number;
   provider?: ModelProvider;
@@ -999,10 +1000,11 @@ class ApiService {
   }
 
   /** 实时模式语音合成：返回音频 Blob（wav）。失败抛错，错误信息可直接展示。
-   *  传 characterId 时使用该角色在"语音模型"区块配置的专属音色。 */
+   *  传 characterId 时使用该角色在"语音模型"区块配置的专属音色；
+   *  传 emotion 时使用该角色情感组里对应情感的参考音频。 */
   async synthesizeSpeech(
     text: string,
-    options?: { provider?: string; characterId?: string },
+    options?: { provider?: string; characterId?: string; emotion?: string },
   ): Promise<Blob> {
     const token = getAuthToken();
     const response = await fetch(buildApiUrl('/chat/tts'), {
@@ -1015,6 +1017,7 @@ class ApiService {
         text,
         ...(options?.provider ? { provider: options.provider } : {}),
         ...(options?.characterId ? { character_id: options.characterId } : {}),
+        ...(options?.emotion ? { emotion: options.emotion } : {}),
       }),
     });
     if (!response.ok) {

@@ -245,24 +245,32 @@ export default function ChatInterface({
     void audio.play().catch(() => reject(new Error('speech autoplay blocked')));
   });
 
-  const speakReply = async (text: string) => {
-    if (!voiceReplyRef.current || !text.trim()) return;
+  /** 语音分段：后端对带【情感】标记的回复做解析后的产物；emotion 空 = 默认情感。 */
+  type TtsSegment = { emotion?: string; text: string };
+
+  const speakReply = async (segments: TtsSegment[]) => {
+    if (!voiceReplyRef.current || !segments.length) return;
     speakCancelRef.current = false;
     const characterId = character?.id;
-    for (const chunk of splitReplyChunks(text)) {
-      if (speakCancelRef.current) return;
-      try {
-        const blob = await apiService.synthesizeSpeech(chunk, { characterId });
+    for (const segment of segments) {
+      for (const chunk of splitReplyChunks(segment.text)) {
         if (speakCancelRef.current) return;
-        await playBlob(blob);
-      } catch {
-        return; // 合成或播放失败即停止本轮朗读
+        try {
+          const blob = await apiService.synthesizeSpeech(chunk, {
+            characterId,
+            emotion: segment.emotion || undefined,
+          });
+          if (speakCancelRef.current) return;
+          await playBlob(blob);
+        } catch {
+          return; // 合成或播放失败即停止本轮朗读
+        }
       }
     }
   };
-  const speakReplyRef = useRef<(text: string) => void>(() => {});
-  speakReplyRef.current = (text) => {
-    void speakReply(text);
+  const speakReplyRef = useRef<(segments: TtsSegment[]) => void>(() => {});
+  speakReplyRef.current = (segments) => {
+    void speakReply(segments);
   };
 
   useEffect(() => cancelSpeech, [cancelSpeech]);
@@ -794,8 +802,12 @@ export default function ChatInterface({
                 error: event.research_payload.error || '',
               } : null,
             }));
-            // 语音回复开启时，回复完成后按句合成朗读。
-            speakReplyRef.current(event.content);
+            // 语音回复开启时，回复完成后按情感分段合成朗读；
+            // 后端没返回分段（角色未配情感组）时退化为整段默认情感。
+            const ttsSegments: TtsSegment[] = Array.isArray(event.tts_segments)
+              ? event.tts_segments.filter((seg) => seg?.text)
+              : [];
+            speakReplyRef.current(ttsSegments.length ? ttsSegments : [{ text: event.content }]);
             return;
           }
 
