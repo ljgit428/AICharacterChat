@@ -1655,6 +1655,9 @@ export default function CreateCharacterSimplifiedForm({
                           <option value="en">English</option>
                           <option value="ko">한국어</option>
                         </select>
+                        <p className="text-[10px] leading-3.5 text-gray-400">
+                          {copy.characterForm.emotionRefLanguageHint}
+                        </p>
                       </div>
                     </div>
                   ))}

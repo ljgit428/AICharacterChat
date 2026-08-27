@@ -399,16 +399,21 @@ def merged_voice_fields(character_tts_config: dict | None, user=None) -> dict:
 def pick_emotion_ref(voice: dict, emotion: str | None) -> dict | None:
     """按情感名从 voice['emotions'] 挑参考音频；未命中返回 None（走默认参考音频）。
 
-    返回 {ref_audio_path, ref_audio_text, ref_audio_language}，路径已解析为
-    服务端绝对路径；情感条目没配参考音频时视为未命中。
+    情感组按语言分组：只挑 ref_audio_language 与合成语言一致的条目（语言为空
+    时视为任意语言，兼容旧数据）。返回 {ref_audio_path, ref_audio_text,
+    ref_audio_language}，路径已解析为服务端绝对路径。
     """
     if not emotion or not isinstance(voice, dict):
         return None
     target = emotion.strip()
+    voice_lang = str(voice.get('language') or '').strip().lower()
     for entry in voice.get('emotions') or []:
         if not isinstance(entry, dict):
             continue
-        if (str(entry.get('name') or '').strip() != target):
+        if str(entry.get('name') or '').strip() != target:
+            continue
+        entry_lang = str(entry.get('ref_audio_language') or '').strip().lower()
+        if voice_lang and entry_lang and entry_lang != voice_lang:
             continue
         path = _resolve_server_path(str(entry.get('ref_audio_path') or '').strip())
         if not path:
@@ -416,9 +421,9 @@ def pick_emotion_ref(voice: dict, emotion: str | None) -> dict | None:
         return {
             'ref_audio_path': path,
             'ref_audio_text': str(entry.get('ref_audio_text') or '').strip(),
-            'ref_audio_language': (str(entry.get('ref_audio_language') or '').strip()
-                                   or voice.get('ref_audio_language') or voice.get('language')
-                                   or DEFAULT_GENIE_LANGUAGE),
+            'ref_audio_language': entry_lang or voice_lang
+                                or voice.get('ref_audio_language') or voice.get('language')
+                                or DEFAULT_GENIE_LANGUAGE,
         }
     return None
 
