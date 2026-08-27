@@ -155,6 +155,13 @@ export type TtsEngine = 'genie' | 'gptsovits' | 'indextts';
 export type TtsConversionStatus = '' | 'pending' | 'converting' | 'ready' | 'failed';
 
 // 设置页「语音设置」里登记的音色；角色通过 tts_config.voice_model_id 引用。
+export interface TtsVoiceEmotionConfig {
+  name: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+}
+
 export interface TtsVoiceModel {
   id: number;
   name: string;
@@ -166,6 +173,7 @@ export interface TtsVoiceModel {
   refAudioPath: string;
   refAudioText: string;
   refAudioLanguage: string;
+  emotions: TtsVoiceEmotionConfig[];
   conversionStatus: TtsConversionStatus;
   conversionError: string;
   createdAt?: string;

@@ -159,8 +159,9 @@ type PromptPreviewLocale = 'zh-CN' | 'en-US';
 type WebSearchMode = 'default' | 'on' | 'off';
 
 // 角色只引用设置页登记的音色（voice_model_id）；引擎地址、模型目录、
-// 参考音频等细节全部收敛在 设置→语音设置。
-// 情感组是角色级配置：每种情感一份参考音频，合成时按情感切换。
+// 参考音频、情感组等细节全部收敛在 设置→语音设置。
+// 情感组随音色保存：角色未配置时沿用所选音色库记录的情感组；角色级
+// emotions 只作为旧数据兼容保留（本表单不再编辑，保存时原样透传）。
 export type EmotionConfigForm = {
   name: string;
   refAudioPath: string;
@@ -841,39 +842,6 @@ export default function CreateCharacterSimplifiedForm({
   }, []);
   const [autoInputText, setAutoInputText] = useState('');
   const [backgroundFiles, setBackgroundFiles] = useState<ReferenceFile[]>([]);
-  // 情感组的增删改：只动 ttsConfig.emotions，不影响音色/语言字段。
-  const updateEmotion = (index: number, patch: Partial<EmotionConfigForm>) => {
-    setForm((prev) => ({
-      ...prev,
-      ttsConfig: {
-        ...prev.ttsConfig,
-        emotions: prev.ttsConfig.emotions.map((emotion, i) =>
-          i === index ? { ...emotion, ...patch } : emotion,
-        ),
-      },
-    }));
-  };
-  const addEmotion = () => {
-    setForm((prev) => ({
-      ...prev,
-      ttsConfig: {
-        ...prev.ttsConfig,
-        emotions: [
-          ...prev.ttsConfig.emotions,
-          { name: '', refAudioPath: '', refAudioText: '', refAudioLanguage: prev.ttsConfig.language },
-        ],
-      },
-    }));
-  };
-  const removeEmotion = (index: number) => {
-    setForm((prev) => ({
-      ...prev,
-      ttsConfig: {
-        ...prev.ttsConfig,
-        emotions: prev.ttsConfig.emotions.filter((_, i) => i !== index),
-      },
-    }));
-  };
   // 参考文件上传失败的数量：保存前据此提醒用户，避免角色悄悄丢文件。
   const [failedUploadCount, setFailedUploadCount] = useState(0);
   // 批量上传进度：done/total 用于进度条与"已上传 X/Y"提示；null 表示不在上传。
@@ -1326,6 +1294,8 @@ export default function CreateCharacterSimplifiedForm({
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
   const isHighlighted = (key: AiDraftKey) =>
     aiFilledFields.has(key) && !aiEditedFields.has(key) && now < highlightDeadline;
+  // 当前选中的音色：用于展示其自带的情感组（在设置→语音设置里管理）。
+  const selectedVoice = voiceModels.find((voice) => String(voice.id) === form.ttsConfig.voiceModelId);
 
   const renderFieldBadge = (key: AiDraftKey) => {
     if (!aiFilledFields.has(key)) {
@@ -1621,6 +1591,12 @@ export default function CreateCharacterSimplifiedForm({
                   <p className="text-[11px] leading-4 text-gray-400">
                     {copy.characterForm.ttsVoiceModelHint}
                   </p>
+                  {selectedVoice && selectedVoice.emotions.length > 0 && (
+                    <p className="text-[11px] leading-4 text-amber-600">
+                      {copy.characterForm.ttsEmotionsActivePrefix}
+                      {selectedVoice.emotions.map((emotion) => emotion.name).filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-gray-500">
@@ -1645,94 +1621,6 @@ export default function CreateCharacterSimplifiedForm({
                   <p className="text-[11px] leading-4 text-gray-400">
                     {copy.characterForm.ttsLanguageHint}
                   </p>
-                </div>
-
-                <div className="space-y-2 border-t border-amber-200/70 pt-3">
-                  <div>
-                    <label className="text-xs font-bold text-gray-700">
-                      {copy.characterForm.emotionSectionTitle}
-                    </label>
-                    <p className="mt-0.5 text-[11px] leading-4 text-gray-400">
-                      {copy.characterForm.emotionSectionHint}
-                    </p>
-                  </div>
-                  {form.ttsConfig.emotions.map((emotion, index) => (
-                    <div
-                      key={index}
-                      className="space-y-2 rounded-xl border border-amber-200 bg-white/70 p-3"
-                    >
-                      <div className="flex items-end gap-2">
-                        <div className="flex-1 space-y-1">
-                          <label className="text-[11px] font-medium text-gray-500">
-                            {copy.characterForm.emotionNameLabel}
-                          </label>
-                          <input
-                            value={emotion.name}
-                            onChange={(e) => updateEmotion(index, { name: e.target.value })}
-                            placeholder={copy.characterForm.emotionNamePlaceholder}
-                            className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => removeEmotion(index)}
-                          title={copy.characterForm.emotionRemove}
-                          className="mb-0.5 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-100"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-medium text-gray-500">
-                          {copy.characterForm.emotionRefAudioLabel}
-                        </label>
-                        <input
-                          value={emotion.refAudioPath}
-                          onChange={(e) => updateEmotion(index, { refAudioPath: e.target.value })}
-                          placeholder={copy.characterForm.emotionRefAudioPlaceholder}
-                          className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-xs outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-medium text-gray-500">
-                          {copy.characterForm.emotionRefTextLabel}
-                        </label>
-                        <textarea
-                          value={emotion.refAudioText}
-                          onChange={(e) => updateEmotion(index, { refAudioText: e.target.value })}
-                          placeholder={copy.characterForm.emotionRefTextPlaceholder}
-                          rows={2}
-                          className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-medium text-gray-500">
-                          {copy.characterForm.emotionRefLanguageLabel}
-                        </label>
-                        <select
-                          value={emotion.refAudioLanguage}
-                          onChange={(e) => updateEmotion(index, { refAudioLanguage: e.target.value })}
-                          className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                        >
-                          <option value="">{copy.characterForm.ttsLanguageEmpty}</option>
-                          <option value="zh">中文</option>
-                          <option value="jp">日本語</option>
-                          <option value="en">English</option>
-                          <option value="ko">한국어</option>
-                        </select>
-                        <p className="text-[10px] leading-3.5 text-gray-400">
-                          {copy.characterForm.emotionRefLanguageHint}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={addEmotion}
-                    className="w-full rounded-lg border border-dashed border-amber-300 bg-white/60 px-3 py-2 text-xs font-medium text-amber-600 transition-colors hover:bg-amber-50"
-                  >
-                    ＋ {copy.characterForm.emotionAdd}
-                  </button>
                 </div>
               </div>
             </div>

@@ -1568,11 +1568,13 @@ def _append_section(sections, title, content):
 
 
 def _character_emotion_names(character) -> list[str]:
-    """角色情感组的情感名（角色 tts_config.emotions[].name），未配置返回空。"""
+    """角色实际生效的情感组名（角色 tts_config.emotions 覆盖，否则所选音色库记录），
+    未配置返回空。"""
+    from chat import tts as chat_tts
+
     cfg = (character.tts_config or {}) if hasattr(character, 'tts_config') else {}
-    emotions = cfg.get('emotions') or []
-    if not isinstance(emotions, list):
-        return []
+    fields = chat_tts.merged_voice_fields(cfg, character.created_by)
+    emotions = fields.get('emotions') if isinstance(fields.get('emotions'), list) else []
     names = []
     for entry in emotions:
         if isinstance(entry, dict):

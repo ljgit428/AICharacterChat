@@ -113,6 +113,42 @@ class TtsVoiceModelCrudTests(TestCase):
         )
         self.assertEqual(create.status_code, 400)
 
+    def test_create_persists_emotions_and_filters_dirty_entries(self):
+        create = self.client.post(
+            '/api/tts-voice-models/',
+            data=json.dumps({
+                'name': 'seia-emotion',
+                'engine': 'genie',
+                'emotions': [
+                    {'name': ' 开心 ', 'ref_audio_path': 'F:/voice/seia/happy.wav',
+                     'ref_audio_text': '今天真开心！', 'ref_audio_language': 'zh'},
+                    {'name': '', 'ref_audio_path': 'F:/voice/junk.wav'},
+                    {'name': '生气'},
+                    'not-a-dict',
+                ],
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(create.status_code, 201, create.content[:300])
+        emotions = create.json()['emotions']
+        self.assertEqual([e['name'] for e in emotions], ['开心', '生气'])
+        self.assertEqual(emotions[0]['ref_audio_path'], 'F:/voice/seia/happy.wav')
+        self.assertEqual(emotions[1]['ref_audio_language'], '')
+
+    def test_patch_replaces_emotions(self):
+        voice = TtsVoiceModel.objects.create(user=self.user, name='seia', engine='genie')
+        patch = self.client.patch(
+            f'/api/tts-voice-models/{voice.pk}/',
+            data=json.dumps({'emotions': [{'name': '平静', 'ref_audio_language': 'jp'}]}),
+            content_type='application/json',
+        )
+        self.assertEqual(patch.status_code, 200, patch.content[:300])
+        self.assertEqual(patch.json()['emotions'], [
+            {'name': '平静', 'ref_audio_path': '', 'ref_audio_text': '', 'ref_audio_language': 'jp'},
+        ])
+        voice.refresh_from_db()
+        self.assertEqual(voice.emotions[0]['name'], '平静')
+
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
 class VoiceLibrarySynthesisResolutionTests(TestCase):
@@ -155,6 +191,57 @@ class VoiceLibrarySynthesisResolutionTests(TestCase):
         _, voice = self._resolve()
         self.assertEqual(voice['ref_audio_path'], 'F:/voice/seia/main.wav')
         self.assertEqual(voice['ref_audio_text'], '参考台词')
+
+    def test_library_emotions_used_when_character_has_none(self):
+        from chat import tts as chat_tts
+
+        self.voice.emotions = [
+            {'name': '开心', 'ref_audio_path': 'F:/voice/seia/happy.wav',
+             'ref_audio_text': '今天真开心！', 'ref_audio_language': 'zh'},
+        ]
+        self.voice.save(update_fields=['emotions'])
+        self.character.tts_config = {'voice_model_id': str(self.voice.pk)}
+        self.character.save(update_fields=['tts_config'])
+        _, voice = self._resolve()
+        self.assertEqual([e['name'] for e in voice['emotions']], ['开心'])
+        picked = chat_tts.pick_emotion_ref(voice, '开心')
+        self.assertEqual(picked['ref_audio_path'], 'F:/voice/seia/happy.wav')
+        self.assertIsNone(chat_tts.pick_emotion_ref(voice, '不存在的'))
+
+    def test_character_emotions_override_library(self):
+        self.voice.emotions = [
+            {'name': '库生气', 'ref_audio_path': 'F:/voice/seia/angry.wav'},
+        ]
+        self.voice.save(update_fields=['emotions'])
+        self.character.tts_config = {
+            'voice_model_id': str(self.voice.pk),
+            'emotions': [{'name': '角色害羞', 'ref_audio_path': 'F:/voice/seia/shy.wav'}],
+        }
+        self.character.save(update_fields=['tts_config'])
+        _, voice = self._resolve()
+        self.assertEqual([e['name'] for e in voice['emotions']], ['角色害羞'])
+
+    def test_character_emotion_names_follow_effective_emotions(self):
+        from chat.tasks import _character_emotion_names
+
+        # 角色未配情感组 → 名字来自音色库记录。
+        self.voice.emotions = [
+            {'name': '开心', 'ref_audio_language': 'zh'},
+            {'name': '开心', 'ref_audio_language': 'jp'},
+            {'name': '生气', 'ref_audio_language': 'zh'},
+        ]
+        self.voice.save(update_fields=['emotions'])
+        self.character.tts_config = {'voice_model_id': str(self.voice.pk)}
+        self.character.save(update_fields=['tts_config'])
+        self.assertEqual(_character_emotion_names(self.character), ['开心', '生气'])
+
+        # 角色级情感组覆盖库记录。
+        self.character.tts_config = {
+            'voice_model_id': str(self.voice.pk),
+            'emotions': [{'name': '傲娇'}],
+        }
+        self.character.save(update_fields=['tts_config'])
+        self.assertEqual(_character_emotion_names(self.character), ['傲娇'])
 
     def test_missing_voice_id_reports_actionable_error(self):
         from chat import tts as chat_tts

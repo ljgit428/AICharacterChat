@@ -373,9 +373,12 @@ def merged_voice_fields(character_tts_config: dict | None, user=None) -> dict:
             return value
         return (getattr(record, key, '') or '').strip() if record else ''
 
-    # 情感组只属于角色级配置（每个情感一份参考音频），不来自音色库记录。
+    # 情感组：角色显式配置优先（旧角色数据兼容）；未配置时用音色库记录的情感组。
     raw_emotions = cfg.get('emotions') or []
     emotions = raw_emotions if isinstance(raw_emotions, list) else []
+    if not emotions and record is not None:
+        record_emotions = record.emotions or []
+        emotions = record_emotions if isinstance(record_emotions, list) else []
 
     ref_audio_language = pick('ref_audio_language')
     language = pick('language')

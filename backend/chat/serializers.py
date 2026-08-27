@@ -260,11 +260,30 @@ class TtsVoiceModelSerializer(serializers.ModelSerializer):
         version = (value or '').strip().lower()
         return TTS_MODEL_VERSION_ALIASES.get(version, version)
 
+    def validate_emotions(self, value):
+        """情感组归一化：只收带名字的对象，其余字段去空白；脏条目丢弃。"""
+        emotions = value if isinstance(value, list) else []
+        cleaned = []
+        for entry in emotions:
+            if not isinstance(entry, dict):
+                continue
+            name = str((entry.get('name') or '').strip())
+            if not name:
+                continue
+            cleaned.append({
+                'name': name,
+                'ref_audio_path': str((entry.get('ref_audio_path') or '').strip()),
+                'ref_audio_text': str((entry.get('ref_audio_text') or '').strip()),
+                'ref_audio_language': str((entry.get('ref_audio_language') or '').strip()),
+            })
+        return cleaned
+
     class Meta:
         model = TtsVoiceModel
         fields = [
             'id', 'name', 'engine', 'model_version', 'language', 'voice_name',
             'onnx_model_dir', 'ref_audio_path', 'ref_audio_text', 'ref_audio_language',
+            'emotions',
             'conversion_status', 'conversion_error',
             'created_at', 'updated_at',
         ]

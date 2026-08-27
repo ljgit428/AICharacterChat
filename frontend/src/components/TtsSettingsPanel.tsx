@@ -11,11 +11,10 @@ import {
   PlusCircle,
   RefreshCw,
   Save,
-  Trash2,
   Upload,
 } from 'lucide-react';
 import { apiService } from '@/utils/api';
-import { TtsEngine, TtsServiceSettings, TtsVoiceModel } from '@/types';
+import { TtsEngine, TtsServiceSettings, TtsVoiceEmotionConfig, TtsVoiceModel } from '@/types';
 import { useI18n } from '@/i18n/provider';
 
 const ENGINES: TtsEngine[] = ['genie', 'gptsovits', 'indextts'];
@@ -35,6 +34,7 @@ interface VoiceFormState {
   onnxModelDir: string;
   refAudioPath: string;
   refAudioText: string;
+  emotions: TtsVoiceEmotionConfig[];
 }
 
 const EMPTY_VOICE_FORM: VoiceFormState = {
@@ -45,7 +45,10 @@ const EMPTY_VOICE_FORM: VoiceFormState = {
   onnxModelDir: '',
   refAudioPath: '',
   refAudioText: '',
+  emotions: [],
 };
+
+const LANGUAGES = ['zh', 'jp', 'en', 'ko'];
 
 const CONVERSION_POLL_MS = 3000;
 
@@ -184,12 +187,37 @@ export default function TtsSettingsPanel() {
       onnxModelDir: voice.onnxModelDir,
       refAudioPath: voice.refAudioPath,
       refAudioText: voice.refAudioText,
+      emotions: (voice.emotions || []).map((emotion) => ({ ...emotion })),
     });
   };
 
   const resetForm = () => {
     setEditingId(null);
     setForm({ ...EMPTY_VOICE_FORM });
+  };
+
+  const updateEmotion = (index: number, patch: Partial<TtsVoiceEmotionConfig>) => {
+    setForm((prev) => ({
+      ...prev,
+      emotions: prev.emotions.map((emotion, i) => (i === index ? { ...emotion, ...patch } : emotion)),
+    }));
+  };
+
+  const addEmotion = () => {
+    setForm((prev) => ({
+      ...prev,
+      emotions: [
+        ...prev.emotions,
+        { name: '', refAudioPath: '', refAudioText: '', refAudioLanguage: prev.language },
+      ],
+    }));
+  };
+
+  const removeEmotion = (index: number) => {
+    setForm((prev) => ({
+      ...prev,
+      emotions: prev.emotions.filter((_, i) => i !== index),
+    }));
   };
 
   const handleSaveVoice = async () => {
@@ -513,6 +541,11 @@ export default function TtsSettingsPanel() {
                       </button>
                     </span>
                   </div>
+                  {voice.emotions && voice.emotions.length > 0 && (
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      {copy.emotionSectionTitle}：{voice.emotions.map((e) => e.name).filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                   {voice.conversionError && (
                     <p className="mt-1.5 flex items-start gap-1.5 text-xs text-amber-600">
                       <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> {voice.conversionError}
@@ -587,6 +620,78 @@ export default function TtsSettingsPanel() {
                 </>
               )}
             </div>
+
+            {/* 情感组：每种情感一份参考音频，合成时按情感名切换；随音色保存。 */}
+            {form.engine !== 'indextts' && (
+              <div className="mt-4 space-y-2 border-t border-dashed border-slate-300 pt-4">
+                <div>
+                  <p className="text-xs font-bold text-slate-700">{copy.emotionSectionTitle}</p>
+                  <p className="mt-0.5 text-[11px] leading-4 text-slate-400">{copy.emotionSectionHint}</p>
+                </div>
+                {form.emotions.map((emotion, index) => (
+                  <div key={index} className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1 space-y-1">
+                        <label className="text-[11px] font-medium text-slate-500">{copy.emotionNameLabel}</label>
+                        <input
+                          value={emotion.name}
+                          onChange={(e) => updateEmotion(index, { name: e.target.value })}
+                          placeholder={copy.emotionNamePlaceholder}
+                          className={inputClassName}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeEmotion(index)}
+                        title={copy.emotionRemove}
+                        className="mb-0.5 rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-500 transition-colors hover:bg-rose-100"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-slate-500">{copy.emotionRefAudioLabel}</label>
+                      <input
+                        value={emotion.refAudioPath}
+                        onChange={(e) => updateEmotion(index, { refAudioPath: e.target.value })}
+                        placeholder={copy.emotionRefAudioPlaceholder}
+                        className={`${inputClassName} font-mono`}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-slate-500">{copy.emotionRefTextLabel}</label>
+                      <textarea
+                        value={emotion.refAudioText}
+                        onChange={(e) => updateEmotion(index, { refAudioText: e.target.value })}
+                        placeholder={copy.emotionRefTextPlaceholder}
+                        rows={2}
+                        className={inputClassName}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-slate-500">{copy.emotionRefLanguageLabel}</label>
+                      <select
+                        value={emotion.refAudioLanguage}
+                        onChange={(e) => updateEmotion(index, { refAudioLanguage: e.target.value })}
+                        className={inputClassName}
+                      >
+                        <option value="">—</option>
+                        {LANGUAGES.map((lang) => (
+                          <option key={lang} value={lang}>{lang}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={addEmotion}
+                  className="w-full rounded-lg border border-dashed border-slate-300 bg-white/60 px-3 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50"
+                >
+                  ＋ {copy.emotionAdd}
+                </button>
+              </div>
+            )}
             <div className="mt-3 flex items-center justify-between gap-3">
               <p className="text-[11px] leading-4 text-slate-400">{copy.manualEntryHint}</p>
               <button

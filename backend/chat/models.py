@@ -244,6 +244,13 @@ class TtsVoiceModel(models.Model):
     ref_audio_path = models.CharField(max_length=500, blank=True, default="", help_text="参考音频服务器路径（绝对路径或 MEDIA_ROOT 相对路径）")
     ref_audio_text = models.TextField(blank=True, default="")
     ref_audio_language = models.CharField(max_length=8, blank=True, default="")
+    # 情感组属于音色资产：每种情感一份参考音频，合成时按情感名切换。
+    # 角色 tts_config.emotions 仍可覆盖（旧角色数据兼容），这里为空时使用。
+    emotions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="情感组列表：[{name, ref_audio_path, ref_audio_text, ref_audio_language}]",
+    )
     conversion_status = models.CharField(max_length=16, choices=ConversionStatus.choices, blank=True, default="")
     conversion_job_id = models.CharField(max_length=64, blank=True, default="")
     conversion_error = models.TextField(blank=True, default="")

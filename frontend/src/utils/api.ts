@@ -458,6 +458,13 @@ interface ApiTtsServiceSettings {
   indextts_url: string;
 }
 
+interface ApiTtsVoiceEmotion {
+  name: string;
+  ref_audio_path?: string;
+  ref_audio_text?: string;
+  ref_audio_language?: string;
+}
+
 interface ApiTtsVoiceModel {
   id: number;
   name: string;
@@ -469,6 +476,7 @@ interface ApiTtsVoiceModel {
   ref_audio_path: string;
   ref_audio_text: string;
   ref_audio_language: string;
+  emotions?: ApiTtsVoiceEmotion[];
   conversion_status: string;
   conversion_error: string;
   created_at?: string;
@@ -496,6 +504,12 @@ function normalizeTtsVoiceModel(apiData: ApiTtsVoiceModel): TtsVoiceModel {
     refAudioPath: apiData.ref_audio_path || '',
     refAudioText: apiData.ref_audio_text || '',
     refAudioLanguage: apiData.ref_audio_language || '',
+    emotions: (apiData.emotions || []).map((emotion) => ({
+      name: emotion.name || '',
+      refAudioPath: emotion.ref_audio_path || '',
+      refAudioText: emotion.ref_audio_text || '',
+      refAudioLanguage: emotion.ref_audio_language || '',
+    })),
     conversionStatus: (apiData.conversion_status || '') as TtsVoiceModel['conversionStatus'],
     conversionError: apiData.conversion_error || '',
     createdAt: apiData.created_at,
@@ -1436,6 +1450,12 @@ class ApiService {
         ref_audio_path: data.refAudioPath,
         ref_audio_text: data.refAudioText,
         ref_audio_language: data.refAudioLanguage,
+        emotions: data.emotions.map((emotion) => ({
+          name: emotion.name,
+          ref_audio_path: emotion.refAudioPath,
+          ref_audio_text: emotion.refAudioText,
+          ref_audio_language: emotion.refAudioLanguage,
+        })),
       }),
     });
     if (response.data) {
@@ -1457,6 +1477,16 @@ class ApiService {
         ref_audio_path: data.refAudioPath,
         ref_audio_text: data.refAudioText,
         ref_audio_language: data.refAudioLanguage,
+        ...(data.emotions
+          ? {
+              emotions: data.emotions.map((emotion) => ({
+                name: emotion.name,
+                ref_audio_path: emotion.refAudioPath,
+                ref_audio_text: emotion.refAudioText,
+                ref_audio_language: emotion.refAudioLanguage,
+              })),
+            }
+          : {}),
       }),
     });
     if (response.data) {
