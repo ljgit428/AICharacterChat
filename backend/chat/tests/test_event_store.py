@@ -318,3 +318,29 @@ class EventStoreProjectionRebuildTests(EventStoreBaseTests):
         total = history_tokens(self.session)
         # 3 × ceil(170/1.7) = 3 × 100
         assert total == 300
+
+    def test_active_history_tokens_excludes_shadowed_events(self):
+        from chat.events.store import EventStore, active_history_tokens, history_tokens
+        from chat.models import ChatEventType
+
+        EventStore.append(self.session, ChatEventType.USER_MESSAGE, {'content': '甲' * 170}, character=self.character)
+        EventStore.append(
+            self.session,
+            ChatEventType.ASSISTANT_MESSAGE,
+            {'content': '乙' * 170},
+            character=self.character,
+        )
+        EventStore.append(
+            self.session,
+            ChatEventType.COMPACTION_SUMMARY,
+            {
+                'summary': '摘要',
+                'shadowed_start_seq': 1,
+                'shadowed_end_seq': 2,
+                'shadowed_count': 2,
+                'tokens_freed': 190,
+            },
+        )
+        # All events: 200 tokens. Active: only the summary is left (0 tokens).
+        assert history_tokens(self.session) == 200
+        assert active_history_tokens(self.session) == 0

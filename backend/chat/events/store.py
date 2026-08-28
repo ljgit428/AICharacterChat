@@ -382,3 +382,43 @@ def history_tokens(chat_session: ChatSession) -> int:
         event_type__in=[ChatEventType.USER_MESSAGE, ChatEventType.ASSISTANT_MESSAGE],
     ).order_by('seq')
     return sum(estimate_event_tokens(e) for e in events.iterator())
+
+
+def active_history_tokens(chat_session: ChatSession) -> int:
+    """Sum of estimated tokens for message events NOT shadowed by compaction.
+
+    This is the metric the dispatch trigger should use — counting shadowed
+    events would keep the token count falsely high after every compaction,
+    causing needless re-dispatches.
+    """
+    events = list(
+        ChatEvent.objects.filter(chat_session=chat_session).order_by('seq')
+    )
+    # Collect shadow ranges.
+    shadow_ranges: list[tuple[int, int]] = []
+    for event in events:
+        if event.event_type == ChatEventType.COMPACTION_SUMMARY:
+            data = event.data or {}
+            start = data.get('shadowed_start_seq')
+            end = data.get('shadowed_end_seq')
+            if start is not None and end is not None:
+                shadow_ranges.append((int(start), int(end)))
+
+    total = 0
+    range_index = 0
+    for event in events:
+        while (
+            range_index < len(shadow_ranges)
+            and shadow_ranges[range_index][1] < event.seq
+        ):
+            range_index += 1
+        if event.event_type not in (ChatEventType.USER_MESSAGE, ChatEventType.ASSISTANT_MESSAGE):
+            continue
+        in_shadow = (
+            range_index < len(shadow_ranges)
+            and shadow_ranges[range_index][0] <= event.seq <= shadow_ranges[range_index][1]
+        )
+        if in_shadow:
+            continue
+        total += estimate_event_tokens(event)
+    return total

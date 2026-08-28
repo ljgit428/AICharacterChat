@@ -217,3 +217,58 @@ class CompactionTaskTests(CompactionBaseTests):
             with override_settings(COMPACTION_ENABLED=True, COMPACTION_MIN_HISTORY_TOKENS=8000):
                 _maybe_dispatch_compaction(self.session, runtime_config)
             mock_delay.assert_called_once()
+
+    def test_no_redispatch_after_compaction(self):
+        """After a compaction, the active token count excludes shadowed events
+        so the next turn does not dispatch another compaction."""
+        from chat.tasks import _maybe_dispatch_compaction, compact_session_history
+
+        self._append_turns(60)
+        with patch('chat.tasks._generate_text', return_value='第一段摘要'):
+            result = compact_session_history(self.session.id)
+        assert result['status'] == 'compacted'
+
+        runtime_config = {'provider': 'openai_compatible', 'model_name': 'm', 'context_window': 8000}
+        with patch('chat.tasks.compact_session_history.delay') as mock_delay:
+            _maybe_dispatch_compaction(self.session, runtime_config)
+        mock_delay.assert_not_called()
+
+    def test_task_skips_when_superseded_by_concurrent_compaction(self):
+        """The race guard: if another compaction appends a summary covering
+        our range while we generate ours, we must not append a duplicate."""
+        from chat.events.store import EventStore
+        from chat.models import ChatEvent, ChatEventType
+        from chat.tasks import compact_session_history
+
+        self._append_turns(60)
+
+        def competing_compaction(*_args, **_kwargs):
+            # Simulate the concurrent task finishing first with the same range.
+            events = EventStore.load(self.session)
+            data = {}
+            for e in events:
+                if e.event_type == ChatEventType.USER_MESSAGE:
+                    data['shadowed_start_seq'] = e.seq
+                    break
+            for e in reversed(events):
+                if e.event_type == ChatEventType.ASSISTANT_MESSAGE:
+                    data['shadowed_end_seq'] = e.seq
+                    break
+            data['summary'] = '竞态摘要'
+            EventStore.append(
+                self.session,
+                ChatEventType.COMPACTION_SUMMARY,
+                data,
+                character=self.character,
+            )
+            return '我们的摘要'
+
+        with patch('chat.tasks._generate_text', side_effect=competing_compaction):
+            result = compact_session_history(self.session.id)
+        assert result['status'] == 'skipped'
+        assert result['reason'] == 'superseded'
+        # Only one compaction/summary event exists (the competitor's).
+        assert ChatEvent.objects.filter(
+            chat_session=self.session,
+            event_type=ChatEventType.COMPACTION_SUMMARY,
+        ).count() == 1

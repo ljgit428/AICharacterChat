@@ -27,7 +27,7 @@ from .events.compaction import (
     select_shadow_range,
     shadowed_token_total,
 )
-from .events.store import EventStore, estimate_str_tokens, history_tokens
+from .events.store import EventStore, active_history_tokens, estimate_str_tokens
 from .events.types import assistant_message_payload, compaction_summary_payload
 from .models import (
     AttachmentKind,
@@ -2688,13 +2688,16 @@ def _compaction_settings():
 
 
 def _maybe_dispatch_compaction(chat_session, runtime_config):
-    """Enqueue history compaction when estimated history tokens cross the
-    routed model's pressure threshold. Fire-and-forget, like memory sync."""
+    """Enqueue history compaction when the *active* history token estimate
+    crosses the routed model's pressure threshold. Fire-and-forget, like
+    memory sync. ``active_history_tokens`` excludes events already shadowed
+    by a compaction, so a session right after compaction does not re-dispatch
+    until the retained history grows past the threshold again."""
     cfg = _compaction_settings()
     if not cfg['enabled']:
         return
     try:
-        total_tokens = history_tokens(chat_session)
+        total_tokens = active_history_tokens(chat_session)
     except Exception as exc:  # noqa: BLE001
         logger.warning('Compaction token estimate failed for session %s: %s', chat_session.id, exc)
         return
@@ -2758,7 +2761,28 @@ def compact_session_history(chat_session_id):
         return {'status': 'skipped', 'reason': 'below-threshold'}
 
     start_seq, end_seq = selected
+
+    # Cap the summarization input to keep the LLM call cheap.
     conversation_text = render_shadowed_conversation(events, start_seq, end_seq)
+    MAX_SUMMARY_CHARS = 30000
+    if len(conversation_text) > MAX_SUMMARY_CHARS:
+        # Trim the oldest messages from the shadowed range (keep the tail).
+        shadowed_message_seqs = [
+            e.seq for e in events
+            if start_seq <= e.seq <= end_seq
+            and e.event_type in (ChatEventType.USER_MESSAGE, ChatEventType.ASSISTANT_MESSAGE)
+        ]
+        for seq in reversed(shadowed_message_seqs):
+            candidate = render_shadowed_conversation(events, seq, end_seq)
+            if len(candidate) <= MAX_SUMMARY_CHARS:
+                start_seq = seq
+                conversation_text = candidate
+                break
+        logger.info(
+            'Compaction summarization trimmed to seq %s..%s (was %s..%s, %d chars)',
+            start_seq, end_seq, selected[0], end_seq, len(conversation_text),
+        )
+
     system, user = build_summary_prompt(conversation_text)
 
     try:
@@ -2788,6 +2812,23 @@ def compact_session_history(chat_session_id):
         provider=runtime_config['provider'],
         model=runtime_config['model_name'],
     )
+
+    # Race guard: another compaction may have appended while we were
+    # generating the summary.  If its shadow range covers the same or
+    # overlapping region, skip the append so we never duplicate summaries
+    # over the same range.
+    fresh_events = EventStore.load(chat_session)
+    for fe in fresh_events:
+        if fe.event_type == ChatEventType.COMPACTION_SUMMARY:
+            fe_data = fe.data or {}
+            fe_end = fe_data.get('shadowed_end_seq', -1)
+            if isinstance(fe_end, int) and fe_end >= start_seq:
+                logger.info(
+                    'Compaction superseded for session %s (another task finished first)',
+                    chat_session.id,
+                )
+                return {'status': 'skipped', 'reason': 'superseded'}
+
     EventStore.append(
         chat_session,
         ChatEventType.COMPACTION_SUMMARY,
