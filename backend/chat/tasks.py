@@ -20,10 +20,20 @@ from .attachments import (
 from .memory.filesystem import CharacterMemoryFilesystem
 from .memory.manager import MemoryManager
 from .memory.prompts import build_memory_extraction_prompt, get_memory_crud_tool_specs
+from .events.compaction import (
+    build_summary_prompt,
+    render_shadowed_conversation,
+    resolve_context_window,
+    select_shadow_range,
+    shadowed_token_total,
+)
+from .events.store import EventStore, estimate_str_tokens, history_tokens
+from .events.types import assistant_message_payload, compaction_summary_payload
 from .models import (
     AttachmentKind,
     Character,
     CharacterMemoryItem,
+    ChatEventType,
     ChatSession,
     Message,
     ModelConfiguration,
@@ -168,6 +178,7 @@ def _model_config_to_runtime(model_config):
         'model_name': model_config.model_name,
         'api_key': model_config.api_key,
         'base_url': model_config.base_url,
+        'context_window': model_config.context_window,
     }
 
 
@@ -2095,7 +2106,7 @@ def _analyze_latest_user_media(visible_history, role_configs, text_config):
         (
             item
             for item in reversed(visible_history)
-            if isinstance(item, Message) and item.role == 'user'
+            if not isinstance(item, dict) and getattr(item, 'role', None) == 'user'
         ),
         None,
     )
@@ -2133,7 +2144,15 @@ def _build_provider_messages(
         formatted_research = _format_research_context(research_context)
         if formatted_research:
             system_prompt = f"{system_prompt}\n\n[LIVE WEB RESEARCH]\n{formatted_research}"
-    visible_history = _get_visible_history_messages(chat_session)
+    # Event-sourced history: the model-facing prompt derives from the event
+    # log (compacted view — compaction summaries replace shadowed ranges).
+    # The Message projection remains the full-history view for the UI.
+    visible_history = EventStore.derive_messages(chat_session, compacted=True)
+    # Fallback for sessions that still have Message rows without an event log
+    # (pre-migration data or direct-ORM test code).  This can be removed once
+    # the event backfill has been deployed and verified.
+    if not visible_history and chat_session.messages.exists():
+        visible_history = _get_visible_history_messages(chat_session)
     _analyze_latest_user_media(visible_history, role_configs, runtime_config)
     character_reference_message = _build_character_reference_message(
         character,
@@ -2157,20 +2176,20 @@ def _build_provider_messages(
         if character_reference_message:
             formatted_history.append(character_reference_message)
         for message in visible_history:
-            if isinstance(message, Message):
-                formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
+            if isinstance(message, dict):
+                formatted_history.append({'role': 'user', 'parts': [message['content']]})
                 continue
-            formatted_history.append({'role': 'user', 'parts': [message['content']]})
+            formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
         return runtime_config, formatted_history, tools
 
     formatted_history = [{'role': 'system', 'content': system_prompt}]
     if character_reference_message:
         formatted_history.append(character_reference_message)
     for message in visible_history:
-        if isinstance(message, Message):
-            formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
+        if isinstance(message, dict):
+            formatted_history.append({'role': 'user', 'content': message['content']})
             continue
-        formatted_history.append({'role': 'user', 'content': message['content']})
+        formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
     return runtime_config, formatted_history, tools
 
 
@@ -2581,15 +2600,22 @@ def _finalize_ai_response(
     tool_calls=None,
     token_usage=None,
 ):
-    ai_message = Message.objects.create(
-        chat_session=chat_session,
-        role='assistant',
+    # Event-sourced history: the assistant reply is appended as an
+    # ``assistant/message`` event; the Message row is its write-through
+    # projection (events.projection.project_event).
+    payload = assistant_message_payload(
         content=ai_response_text,
-        character=character,
-        research_payload={},
         thinking=thinking or '',
         tool_calls=tool_calls or [],
         token_usage=token_usage or {},
+        research_payload=_build_research_payload(chat_session, research_context or {}),
+        latency_ms=latency_ms,
+    )
+    _event, ai_message = EventStore.append(
+        chat_session,
+        ChatEventType.ASSISTANT_MESSAGE,
+        payload,
+        character=character,
     )
 
     update_fields = ['updated_at']
@@ -2612,11 +2638,8 @@ def _finalize_ai_response(
             )
             _dispatch_session_title_update(chat_session, conversation_text_for_title, runtime_config)
 
-    research_payload = _build_research_payload(chat_session, research_context or {})
-    ai_message.research_payload = research_payload
-    ai_message.save(update_fields=['research_payload'])
-
     _dispatch_memory_sync(chat_session, ai_message, character)
+    _maybe_dispatch_compaction(chat_session, runtime_config)
 
     return ai_message
 
@@ -2648,6 +2671,139 @@ def _dispatch_memory_sync(chat_session, ai_message, character):
                 args=[ai_message.id, chat_session.id, character.id],
                 throw=False,
             )
+
+
+def _compaction_settings():
+    from django.conf import settings
+
+    return {
+        'enabled': getattr(settings, 'COMPACTION_ENABLED', True),
+        'threshold_ratio': getattr(settings, 'COMPACTION_THRESHOLD_RATIO', 0.7),
+        'retain_ratio': getattr(settings, 'COMPACTION_RETAIN_RATIO', 0.3),
+        'min_history_tokens': getattr(settings, 'COMPACTION_MIN_HISTORY_TOKENS', 8000),
+        'min_retain_tokens': getattr(settings, 'COMPACTION_MIN_RETAIN_TOKENS', 4000),
+        'summary_max_tokens': getattr(settings, 'COMPACTION_SUMMARY_MAX_TOKENS', 1024),
+        'inline_fallback': getattr(settings, 'COMPACTION_INLINE_FALLBACK', False),
+    }
+
+
+def _maybe_dispatch_compaction(chat_session, runtime_config):
+    """Enqueue history compaction when estimated history tokens cross the
+    routed model's pressure threshold. Fire-and-forget, like memory sync."""
+    cfg = _compaction_settings()
+    if not cfg['enabled']:
+        return
+    try:
+        total_tokens = history_tokens(chat_session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Compaction token estimate failed for session %s: %s', chat_session.id, exc)
+        return
+    context_window = resolve_context_window(runtime_config)
+    threshold = max(
+        cfg['min_history_tokens'],
+        int(context_window * cfg['threshold_ratio']),
+    )
+    if total_tokens < threshold:
+        return
+    try:
+        compact_session_history.delay(chat_session_id=chat_session.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'Failed to enqueue compact_session_history (%s); inline fallback=%s', exc, cfg['inline_fallback'],
+        )
+        if cfg['inline_fallback']:
+            compact_session_history.apply(
+                args=[chat_session.id],
+                throw=False,
+            )
+
+
+@shared_task(retry_backoff=True)
+def compact_session_history(chat_session_id):
+    """Compress the oldest active history of a session into a summary event.
+
+    Appends a ``compaction/summary`` event whose shadowed range hides the
+    compressed events from the model-facing derived view, while the full log
+    (and the Message projection the UI reads) stays untouched. Returns a
+    status dict for observability; never raises on expected outcomes.
+    """
+    from django.conf import settings
+
+    try:
+        chat_session = ChatSession.objects.get(id=chat_session_id)
+    except ChatSession.DoesNotExist:
+        return {'status': 'skipped', 'reason': 'session-missing'}
+
+    cfg = _compaction_settings()
+    try:
+        runtime_config = _get_runtime_model_config(chat_session)
+    except ValueError as exc:
+        logger.warning('Compaction skipped for session %s: %s', chat_session.id, exc)
+        return {'status': 'skipped', 'reason': 'no-model-config'}
+
+    try:
+        events = EventStore.load(chat_session)
+        selected = select_shadow_range(
+            events,
+            context_window=resolve_context_window(runtime_config),
+            threshold_ratio=cfg['threshold_ratio'],
+            retain_ratio=cfg['retain_ratio'],
+            min_history_tokens=cfg['min_history_tokens'],
+            min_retain_tokens=cfg['min_retain_tokens'],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Compaction range selection failed for session %s: %s', chat_session.id, exc)
+        return {'status': 'error', 'reason': str(exc)}
+    if selected is None:
+        return {'status': 'skipped', 'reason': 'below-threshold'}
+
+    start_seq, end_seq = selected
+    conversation_text = render_shadowed_conversation(events, start_seq, end_seq)
+    system, user = build_summary_prompt(conversation_text)
+
+    try:
+        summary_text = _generate_text(
+            runtime_config,
+            [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
+            tools=None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Compaction summary generation failed for session %s: %s', chat_session.id, exc)
+        return {'status': 'error', 'reason': 'summary-generation-failed'}
+
+    summary_text = (summary_text or '').strip()
+    if not summary_text:
+        summary_text = '（对话历史已被压缩，细节见聊天记录。）'
+
+    shadowed_tokens = shadowed_token_total(events, start_seq, end_seq)
+    payload = compaction_summary_payload(
+        summary=summary_text,
+        shadowed_start_seq=start_seq,
+        shadowed_end_seq=end_seq,
+        shadowed_count=sum(
+            1 for e in events if start_seq <= e.seq <= end_seq
+            and e.event_type in (ChatEventType.USER_MESSAGE, ChatEventType.ASSISTANT_MESSAGE)
+        ),
+        tokens_freed=max(0, shadowed_tokens - estimate_str_tokens(summary_text)),
+        provider=runtime_config['provider'],
+        model=runtime_config['model_name'],
+    )
+    EventStore.append(
+        chat_session,
+        ChatEventType.COMPACTION_SUMMARY,
+        payload,
+        character=chat_session.character,
+    )
+    logger.info(
+        'Compacted session %s: shadowed seq %s..%s, freed ~%s tokens',
+        chat_session.id, start_seq, end_seq, payload['tokens_freed'],
+    )
+    return {
+        'status': 'compacted',
+        'shadowed_start_seq': start_seq,
+        'shadowed_end_seq': end_seq,
+        'tokens_freed': payload['tokens_freed'],
+    }
 
 
 @shared_task(retry_backoff=True)

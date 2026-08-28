@@ -1,9 +1,11 @@
 import json
+import os
 from pathlib import Path
 from uuid import uuid4
 
 import requests
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.http import HttpResponse, StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -19,10 +21,13 @@ from . import tts as chat_tts
 from .cleanup import cleanup_character_files
 from .memory.interface import LongTermMemoryInterface as CharacterLongTermMemory
 from .memory.manager import MemoryItemNotFoundError, MemoryManager
+from .events.store import EventStore
+from .events.types import user_message_payload, assistant_message_payload
 from .models import (
     AttachmentKind,
     Character,
     CharacterKnowledgeAsset,
+    ChatEventType,
     ChatSession,
     MemoryAuditSource,
     Message,
@@ -61,6 +66,30 @@ logger = logging.getLogger(__name__)
 
 def _message_serializer(message, request):
     return MessageSerializer(message, context={'request': request})
+
+
+def _persist_attachment_files(attachment_payloads):
+    """Save uploaded files to the chat-attachments storage.
+
+    Each payload dict has a ``file`` key (the uploaded file object) that is
+    replaced by the resulting storage name (``file_name``) so the event
+    payload can reference it. The projection recreates ``MessageAttachment``
+    rows from those names without re-saving the bytes.
+    """
+    persisted = []
+    for payload in attachment_payloads:
+        file_obj = payload.pop('file', None)
+        saved_name = ''
+        if file_obj:
+            saved_name = default_storage.save(
+                os.path.join('chat_attachments', os.path.basename(file_obj.name or 'uploaded_file')),
+                file_obj,
+            )
+        persisted.append({
+            **payload,
+            'file_name': saved_name,
+        })
+    return persisted
 
 
 def _get_required_model_config(user, model_config_id=None):
@@ -1159,38 +1188,30 @@ class ChatViewSet(viewsets.ViewSet):
             and not attachment_payloads
             and not has_existing_messages
         )
+
+        # Event-sourced history: every session gets a ``session/created`` marker
+        # (exactly once — also covers sessions created via GraphQL), and every
+        # user turn becomes a ``user/message`` event. The Message row is the
+        # write-through projection of that event.
+        if not chat_session.events.exists():
+            EventStore.append(
+                chat_session,
+                ChatEventType.SESSION_CREATED,
+                {'origin': chat_session.origin, 'title': chat_session.title},
+            )
+
         user_message = None
         if not generate_greeting:
-            user_message = Message.objects.create(
-                chat_session=chat_session,
-                role='user',
-                content=message_content,
+            # Persist uploaded files first so the event payload can carry the
+            # storage names; the projection recreates MessageAttachment rows
+            # from them without touching the bytes again.
+            attachment_payloads = _persist_attachment_files(attachment_payloads)
+            _, user_message = EventStore.append(
+                chat_session,
+                ChatEventType.USER_MESSAGE,
+                user_message_payload(content=message_content, attachments=attachment_payloads),
                 character=character,
             )
-            created_attachments = []
-            for payload in attachment_payloads:
-                created_attachments.append(
-                    MessageAttachment.objects.create(
-                        message=user_message,
-                        file=payload['file'],
-                        attachment_name=payload['attachment_name'],
-                        attachment_mime_type=payload['attachment_mime_type'],
-                        attachment_kind=payload['attachment_kind'],
-                        attachment_text_content=payload['attachment_text_content'],
-                        sort_order=payload['sort_order'],
-                    )
-                )
-
-            if created_attachments:
-                primary_attachment = created_attachments[0]
-                Message.objects.filter(pk=user_message.pk).update(
-                    attachment=primary_attachment.file.name,
-                    attachment_name=primary_attachment.attachment_name,
-                    attachment_mime_type=primary_attachment.attachment_mime_type,
-                    attachment_kind=primary_attachment.attachment_kind,
-                    attachment_text_content=primary_attachment.attachment_text_content,
-                )
-                user_message.refresh_from_db()
             chat_session.save(update_fields=['updated_at'])
 
         return chat_session, character, user_message, generate_greeting

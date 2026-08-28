@@ -211,6 +211,82 @@
 4. [UI] Refetch List / Remove Card
 
 
+## 10. Event-Sourced Chat History & Compaction (v0.1.4)
+
+**Goal:** Solve context-window overflow by making conversation history an
+append-only event log, deriving the model-facing prompt from it, and
+compacting old events with an LLM summary.
+
+### Core Principle
+The `Message` table is no longer the source of truth. The source of truth is
+the `ChatEvent` table — an append-only log of every conversation event.
+`Message` rows are a **materialized projection** of that log (write-through on
+every append, rebuildable from scratch with
+`python manage.py rebuild_message_projection`).
+
+### Event Vocabulary
+| Event Type | Payload | Produces Message Row? |
+|---|---|---|
+| `session/created` | `{origin, title}` | No |
+| `user/message` | `{content, attachments: […]}` | Yes |
+| `assistant/message` | `{content, thinking, tool_calls, token_usage, research_payload}` | Yes |
+| `compaction/summary` | `{summary, shadowed_start_seq, shadowed_end_seq, shadowed_count, tokens_freed}` | No |
+
+`ChatSession` metadata (title, origin, `is_private_mode`, `is_title_manual`,
+`last_response_latency_ms`) stays in the `ChatSession` table — it is *session
+header state*, not a conversation event (deepseek-harness SessionHeader
+principle).
+
+### Write Path
+1. `views.py:_prepare_chat_turn` → `EventStore.append('user/message', payload)`
+   → projection creates the `Message` + `MessageAttachment` rows.
+2. `tasks.py:_finalize_ai_response` → `EventStore.append('assistant/message', payload)`
+   → projection creates the `Message` row.
+
+### Read Path (Model Prompt)
+`tasks.py:_build_provider_messages` → `EventStore.derive_messages(session, compacted=True)`:
+- Returns `MessageView` dataclasses, duck-typed for the existing prompt builders.
+- Events shadowed by `compaction/summary` events are skipped; the summary
+  pseudo-message (`<compacted-summary>…</compacted-summary>`, user role)
+  replaces them in place.
+- Adjacent same-role messages are merged to prevent alternation conflicts.
+- A fallback keeps sessions that still have `Message` rows without an event log
+  (pre-backfill data) working via the projection.
+
+### UI Read Path (Unchanged)
+`GET /messages` → `MessageSerializer` from the `Message` projection (full
+history — compaction never hides data from the UI).
+
+### Compaction
+**Trigger:** after every assistant reply, `_maybe_dispatch_compaction()`
+estimates total history tokens; if they cross `threshold_ratio × context_window`
+(default 70%), the Celery task `compact_session_history` runs.
+
+**Task logic** (`events.compaction.select_shadow_range`):
+1. Identify *active events* (those not yet shadowed by an earlier compaction).
+2. If active tokens ≥ `min_history_tokens` (8k) and above the threshold:
+   - Retain the newest `retain_tokens` worth of history (default 30% of
+     context_window, clamped by `min_retain_tokens`).
+   - Everything older becomes the *shadow range*.
+   - The retained tail is trimmed to start with an assistant message so the
+     user-role summary never creates a user+user adjacency conflict.
+3. Generate a summary via LLM (reuses `_generate_text`; prompt in
+   `events.compaction.SUMMARY_SYSTEM`).
+4. Append `compaction/summary` event.
+
+**Full history is preserved** in the event log and the Message projection —
+only the derived model prompt is compacted.
+
+### Key Modules
+| Module | Role |
+|---|---|
+| `chat/events/types.py` | Event payload builders |
+| `chat/events/store.py` | `EventStore` (append / load / derive_messages) + `MessageView` + token estimation |
+| `chat/events/projection.py` | Write-through projection: Event → Message / MessageAttachment |
+| `chat/events/compaction.py` | Range selection + summary-prompt builder (pure logic) |
+| `chat/management/commands/rebuild_message_projection.py` | Rebuild Message rows from events (`--session <id> / --all / --check`) |
+
+
 
 
 

@@ -1,6 +1,7 @@
 from django.core.validators import MaxLengthValidator
 from django.db import models
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 LONG_TERM_MEMORY_DESC_LIMIT = 200
 
@@ -484,6 +485,66 @@ class CharacterMemoryItem(models.Model):
 
     def __str__(self):
         return f"[{self.short_id}] {self.section}: {self.description[:40]}"
+
+
+class ChatEventType(models.TextChoices):
+    """The append-only event vocabulary for a chat session's conversation log.
+
+    Every conversation fact that must survive reload/replay is recorded as one
+    of these events. ``Message`` rows are a materialized projection of this
+    log (see ``chat.events.projection``); this table is the single source of
+    truth. ``ChatSession`` metadata (title / origin / private mode / latency)
+    deliberately stays outside the log — it is session header state, not a
+    conversation event (deepseek-harness SessionHeader principle).
+    """
+
+    SESSION_CREATED = 'session/created', 'Session created'
+    USER_MESSAGE = 'user/message', 'User message'
+    ASSISTANT_MESSAGE = 'assistant/message', 'Assistant message'
+    COMPACTION_SUMMARY = 'compaction/summary', 'Compacted-history summary'
+
+
+class ChatEvent(models.Model):
+    """One append-only entry in a chat session's event log.
+
+    ``seq`` is monotonic per ``chat_session`` (allocated inside a transaction
+    by ``EventStore.append``) and ``data`` is a lossless JSON payload. Events
+    are never updated or deleted — compaction appends a ``compaction/summary``
+    event that *shadows* a seq range instead.
+    """
+
+    chat_session = models.ForeignKey(
+        ChatSession,
+        on_delete=models.CASCADE,
+        related_name='events',
+    )
+    character = models.ForeignKey(
+        Character,
+        on_delete=models.CASCADE,
+        related_name='events',
+        null=True,
+        blank=True,
+    )
+    seq = models.PositiveIntegerField()
+    event_type = models.CharField(max_length=40, choices=ChatEventType.choices)
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['seq']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['chat_session', 'seq'],
+                name='unique_chat_event_seq_per_session',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['chat_session', 'seq']),
+            models.Index(fields=['character', 'seq']),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type} #{self.seq} [{self.chat_session_id}]"
 
 
 class MemoryAuditLog(models.Model):

@@ -193,6 +193,22 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ALWAYS_EAGER = env.bool('CELERY_TASK_ALWAYS_EAGER', default=DEBUG)
 MEMORY_SYNC_INLINE_FALLBACK = env.bool('MEMORY_SYNC_INLINE_FALLBACK', default=False)
 
+# Event-sourced chat history compaction (v0.1.4): when the estimated history
+# tokens of a session cross threshold_ratio × context_window, a Celery task
+# condenses the oldest active events into a ``compaction/summary`` event.
+# The full log (and the UI history) stays intact; only the model-facing
+# derived prompt is compacted.
+COMPACTION_ENABLED = env.bool('COMPACTION_ENABLED', default=True)
+COMPACTION_THRESHOLD_RATIO = env.float('COMPACTION_THRESHOLD_RATIO', default=0.7)
+COMPACTION_RETAIN_RATIO = env.float('COMPACTION_RETAIN_RATIO', default=0.3)
+COMPACTION_MIN_HISTORY_TOKENS = env.int('COMPACTION_MIN_HISTORY_TOKENS', default=8000)
+COMPACTION_MIN_RETAIN_TOKENS = env.int('COMPACTION_MIN_RETAIN_TOKENS', default=4000)
+COMPACTION_SUMMARY_MAX_TOKENS = env.int('COMPACTION_SUMMARY_MAX_TOKENS', default=1024)
+# When the broker rejects the enqueue, run the compaction body in-process
+# instead of dropping it. Keep False in production (a dead broker must never
+# block reply finalization).
+COMPACTION_INLINE_FALLBACK = env.bool('COMPACTION_INLINE_FALLBACK', default=False)
+
 DEV_AUTO_LOGIN_ENABLED = env.bool('DEV_AUTO_LOGIN_ENABLED', default=DEBUG)
 DEV_AUTO_LOGIN_USERNAME = env('DEV_AUTO_LOGIN_USERNAME', default='demo_user')
 DEV_AUTO_LOGIN_EMAIL = env('DEV_AUTO_LOGIN_EMAIL', default='demo@example.com')
