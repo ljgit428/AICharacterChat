@@ -232,10 +232,6 @@ class TtsServiceSettingsSerializer(serializers.ModelSerializer):
         read_only_fields = ['updated_at']
 
 
-# 与 chat.tts.TTS_MODEL_VERSION_ALIASES 一致：存量数据曾把 v2pro 写作 v2pr。
-TTS_MODEL_VERSION_ALIASES = {'v2pr': 'v2pro'}
-
-
 class TtsVoiceModelSerializer(serializers.ModelSerializer):
     """音色库条目。model_version 只做归一化不做枚举拦截：genie-tts 升级
     支持更多版本时后端无需改这里，兼容校验在合成时进行。"""
@@ -257,8 +253,7 @@ class TtsVoiceModelSerializer(serializers.ModelSerializer):
         return engine
 
     def validate_model_version(self, value):
-        version = (value or '').strip().lower()
-        return TTS_MODEL_VERSION_ALIASES.get(version, version)
+        return (value or '').strip().lower()
 
     def validate_emotions(self, value):
         """情感组归一化：只收带名字的对象，其余字段去空白；脏条目丢弃。"""

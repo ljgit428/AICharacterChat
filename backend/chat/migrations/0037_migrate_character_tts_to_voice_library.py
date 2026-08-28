@@ -2,8 +2,8 @@
 
 旧模型里每个角色直填 onnx_model_dir/ref_audio_path；迁移后角色只存
 voice_model_id 引用设置页登记的音色。相同 (user, engine, 模型目录,
-参考音频) 的配置去重共用一条音色记录；model_version 顺带把旧写法
-v2pr 归一化为 v2pro。原字段保留在 tts_config 里不删，作为回滚兜底。
+参考音频) 的配置去重共用一条音色记录。原字段保留在 tts_config
+里不删，作为回滚兜底。
 """
 
 from django.db import migrations
@@ -12,8 +12,6 @@ from django.db import migrations
 def migrate_character_tts_to_voice_library(apps, schema_editor):
     TtsVoiceModel = apps.get_model('chat', 'TtsVoiceModel')
     Character = apps.get_model('chat', 'Character')
-
-    aliases = {'v2pr': 'v2pro'}
 
     def voice_fields(cfg):
         onnx_dir = (cfg.get('onnx_model_dir') or '').strip()
@@ -46,7 +44,6 @@ def migrate_character_tts_to_voice_library(apps, schema_editor):
             voice = existing
         else:
             model_version = (cfg.get('model_version') or '').strip().lower()
-            model_version = aliases.get(model_version, model_version)
             fallback_name = (
                 onnx_dir.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1]
                 or ref_audio.replace('\\', '/').rsplit('/', 1)[-1]
@@ -81,7 +78,7 @@ def migrate_character_tts_to_voice_library(apps, schema_editor):
                     ref_audio_language=(cfg.get('ref_audio_language') or '').strip(),
                 )
 
-        cfg['model_version'] = aliases.get((cfg.get('model_version') or '').strip().lower(), (cfg.get('model_version') or '').strip().lower())
+        cfg['model_version'] = (cfg.get('model_version') or '').strip().lower()
         cfg['voice_model_id'] = voice.pk
         character.tts_config = cfg
         character.save(update_fields=['tts_config'])

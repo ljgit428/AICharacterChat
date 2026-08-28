@@ -1,7 +1,7 @@
 """音色库（TtsVoiceModel）与用户级 TTS 引擎设置端点测试。
 
 覆盖：设置页 CRUD 与用户隔离、角色 tts_config 经 voice_model_id 引用音色
-库的合成解析优先级、v2pr→v2pro 别名归一化、上传转换任务投递与进度轮询
+库的合成解析优先级、上传转换任务投递与进度轮询
 （Genie 侧全部 mock，不进真实转换路径）。
 """
 
@@ -95,15 +95,6 @@ class TtsVoiceModelCrudTests(TestCase):
         self.client.force_login(self.user)
         delete = self.client.delete(f'/api/tts-voice-models/{voice_id}/')
         self.assertIn(delete.status_code, (200, 204))
-
-    def test_model_version_alias_normalized(self):
-        create = self.client.post(
-            '/api/tts-voice-models/',
-            data=json.dumps({'name': 'ryuko', 'engine': 'gptsovits', 'model_version': 'V2PR'}),
-            content_type='application/json',
-        )
-        self.assertEqual(create.status_code, 201)
-        self.assertEqual(create.json()['model_version'], 'v2pro')
 
     def test_unknown_engine_rejected(self):
         create = self.client.post(
@@ -261,11 +252,11 @@ class VoiceLibrarySynthesisResolutionTests(TestCase):
         )
         self.assertEqual(provider, 'genie')
         self.assertEqual(voice['onnx_model_dir'], 'D:/m/old_onnx')
-        # 旧写法 v2pr 归一化为 v2pro 后不被 genie 支持，必须拒绝而不是静默加载。
+        # genie 不支持的版本（如 v4）必须拒绝而不是静默加载。
         with self.assertRaises(chat_tts.TtsUnavailableError) as ctx:
             chat_tts.resolve_provider_and_voice(
                 None,
-                {'provider': 'genie', 'model_version': 'v2pr',
+                {'provider': 'genie', 'model_version': 'v4',
                  'onnx_model_dir': 'D:/m/x_onnx'},
                 user=self.user,
             )

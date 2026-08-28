@@ -330,17 +330,13 @@ def build_provider(provider: str, config: dict | None = None):
 # v2pro 与 v4 必须走官方 api_v2 通道。genie-tts 升级支持更多版本时只需改这里。
 GENIE_SUPPORTED_MODEL_VERSIONS = {'', 'v2', 'v2proplus'}
 
-# 存量数据里 model_version 曾写作 v2pr，读取时归一化为 v2pro。
-TTS_MODEL_VERSION_ALIASES = {'v2pr': 'v2pro'}
-
 # 角色未在语音设置里选择语言时的兜底（中文底模最常见）。
 # 仅此一项保留默认值；模型目录、参考音频一律只认音色库/角色自己的配置。
 DEFAULT_GENIE_LANGUAGE = 'zh'
 
 
 def _normalize_model_version(version: str) -> str:
-    version = (version or '').strip().lower()
-    return TTS_MODEL_VERSION_ALIASES.get(version, version)
+    return (version or '').strip().lower()
 
 
 def _resolve_server_path(path: str) -> str:

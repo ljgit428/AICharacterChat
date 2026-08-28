@@ -557,7 +557,6 @@ class TtsVoiceModelViewSet(viewsets.ModelViewSet):
 
         name = (request.data.get('name') or '').strip() or Path(pth.name or '').stem.strip() or 'voice'
         model_version = (request.data.get('model_version') or '').strip().lower()
-        model_version = chat_tts.TTS_MODEL_VERSION_ALIASES.get(model_version, model_version)
         language = (request.data.get('language') or '').strip().lower()
 
         source_dir = Path(settings.MEDIA_ROOT) / 'tts' / 'model_sources' / uuid4().hex

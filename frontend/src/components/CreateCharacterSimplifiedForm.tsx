@@ -1290,7 +1290,7 @@ export default function CreateCharacterSimplifiedForm({
   const aiStages = copy.characterForm.aiAnalyzingStages;
   const aiStageText = aiStages.length > 0 ? aiStages[aiStageIndex % aiStages.length] : '';
   // 仅在「跟随全局（全局可能是 genie）/ 明确 genie」且版本不被 genie 支持时提示；
-  // gptsovits 引擎下 v2pr/v4 是合法组合，不应打扰。
+  // gptsovits 引擎下 v2pro/v4 是合法组合，不应打扰。
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
   const isHighlighted = (key: AiDraftKey) =>
     aiFilledFields.has(key) && !aiEditedFields.has(key) && now < highlightDeadline;

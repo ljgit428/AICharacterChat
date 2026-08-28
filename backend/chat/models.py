@@ -302,7 +302,7 @@ class Character(models.Model):
         help_text="Per-character web search override. None follows the user's global default.",
     )
     # 角色级语音模型配置（TTS）——语音模型配置的唯一入口，全部字段都在角色
-    # 编辑界面的"语音模型"区块：引擎、GPT-SoVITS 模型版本（v2/v2pr/v2proplus/v4）、
+    # 编辑界面的"语音模型"区块：引擎、GPT-SoVITS 模型版本（v2/v2pro/v2proplus/v4）、
     # TTS 服务内音色名、ONNX 模型目录、参考音频及台词。空 dict = 未配置，
     # 合成时回退到全局 TTS_PROVIDER 默认音色。
     tts_config = models.JSONField(default=dict, blank=True)
