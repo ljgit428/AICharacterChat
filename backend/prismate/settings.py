@@ -209,6 +209,11 @@ COMPACTION_SUMMARY_MAX_TOKENS = env.int('COMPACTION_SUMMARY_MAX_TOKENS', default
 # block reply finalization).
 COMPACTION_INLINE_FALLBACK = env.bool('COMPACTION_INLINE_FALLBACK', default=False)
 
+# Event-sourced character-reference assets (v0.1.4): staged uploads live as
+# asset/uploaded AssetEvents with a TTL; unattached staging files are
+# reclaimed lazily (on each upload) and by `manage.py clean_stale_uploads`.
+ASSET_UPLOAD_TTL_DAYS = env.int('ASSET_UPLOAD_TTL_DAYS', default=7)
+
 DEV_AUTO_LOGIN_ENABLED = env.bool('DEV_AUTO_LOGIN_ENABLED', default=DEBUG)
 DEV_AUTO_LOGIN_USERNAME = env('DEV_AUTO_LOGIN_USERNAME', default='demo_user')
 DEV_AUTO_LOGIN_EMAIL = env('DEV_AUTO_LOGIN_EMAIL', default='demo@example.com')

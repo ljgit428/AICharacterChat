@@ -20,8 +20,16 @@ class PrisMateDraft:
 
 @strawberry.input
 class CharacterKnowledgeAssetInput:
-    uploaded_url: str
-    file_name: str
+    """One staged upload to attach to the character.
+
+    ``upload_id`` is the ``asset/uploaded`` AssetEvent id returned by the
+    upload endpoint; ``file_name`` preserves the folder-group relative path.
+    ``uploaded_url`` is kept for backward compatibility with older clients.
+    """
+
+    upload_id: Optional[str] = ""
+    file_name: str = ""
+    uploaded_url: Optional[str] = ""
 
 
 @strawberry.input
@@ -43,6 +51,8 @@ class CharacterInput:
     background_file_url: Optional[str] = ""
     background_file_name: Optional[str] = ""
     background_files: Optional[List[CharacterKnowledgeAssetInput]] = None
+    # 编辑时明确删除的已有资产 id（增量 diff；None/缺省 = 不动资产）
+    detached_asset_ids: Optional[List[str]] = None
     # 角色级联网搜索三态开关：None=跟随用户全局设置
     enable_web_search: Optional[bool] = None
     # 角色级语音模型配置（引擎/模型版本/音色名/ONNX 目录/参考音频）
@@ -51,6 +61,7 @@ class CharacterInput:
 
 @strawberry.type
 class CharacterKnowledgeAssetType:
+    asset_id: Optional[str]
     file_url: str
     file_name: str
     file_type: str
@@ -59,6 +70,7 @@ class CharacterKnowledgeAssetType:
 
 def _serialize_character_knowledge_asset(asset: CharacterKnowledgeAsset) -> CharacterKnowledgeAssetType:
     return CharacterKnowledgeAssetType(
+        asset_id=str(asset.id),
         file_url=asset.file.url if asset.file else "",
         file_name=asset.attachment_name or os.path.basename(asset.file.name or ""),
         file_type=asset.attachment_kind or "",
@@ -129,6 +141,7 @@ class CharacterType:
 
         return [
             CharacterKnowledgeAssetType(
+                asset_id=None,
                 file_url=self.file.url,
                 file_name=os.path.basename(self.file.name or ""),
                 file_type='text',

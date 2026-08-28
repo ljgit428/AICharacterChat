@@ -3,6 +3,7 @@ from typing import List, Optional
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AnonymousUser
 from django.core.files import File
+from django.core.files.storage import default_storage
 import json
 import logging
 import mimetypes
@@ -238,7 +239,12 @@ def _resolve_staged_uploads(file_urls: Optional[List[str]], file_names: Optional
 
     ``file_names`` runs parallel to ``file_urls`` and carries the original
     folder-group relative path (e.g. ``Momotalk/mari/scene_1.txt``) so the
-    staged memory filesystem can preserve the uploaded hierarchy."""
+    staged memory filesystem can preserve the uploaded hierarchy.
+
+    NOTE: This legacy URL-based path is kept for backward compatibility; new
+    clients pass ``upload_ids`` resolved through
+    :func:`_resolve_staged_uploads_from_events` instead.
+    """
     if not file_urls:
         return []
 
@@ -275,6 +281,44 @@ def _resolve_staged_uploads(file_urls: Optional[List[str]], file_names: Optional
                 "file_url": file_url,
             })
 
+    return uploads
+
+
+def _resolve_staged_uploads_from_events(user, upload_ids: Optional[List[str]]) -> List[dict]:
+    """Resolve ``asset/uploaded`` events into staged-upload records for draft
+    generation. Text content comes straight from the event payload; the
+    staging file itself is only referenced by URL.
+    """
+    if not upload_ids:
+        return []
+    from ..assets.store import AssetStore
+
+    ids = []
+    for value in upload_ids:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return []
+
+    payload_map = AssetStore.event_payload_map(user, ids)
+    uploads = []
+    for upload_id in sorted(payload_map):
+        data = payload_map[upload_id]
+        name = (data.get('file_name') or '').strip() or 'uploaded-file'
+        kind = data.get('attachment_kind') or ''
+        mime_type = data.get('attachment_mime_type') or 'application/octet-stream'
+        file_path = data.get('file_path') or ''
+        file_url = default_storage.url(file_path) if file_path else ''
+        uploads.append({
+            "name": name,
+            "relative_path": name,
+            "kind": kind,
+            "mime_type": mime_type,
+            "content": data.get('attachment_text_content') or '',
+            "file_url": file_url,
+        })
     return uploads
 
 
@@ -382,65 +426,60 @@ def _build_character_draft_tool_prompt(
     ]
 
 
-def _normalize_character_reference_inputs(input: CharacterInput):
+def _normalize_character_reference_inputs(input: CharacterInput) -> list[dict] | None:
+    """Extract the attach/detach diff from a CharacterInput.
+
+    Returns ``None`` when the input carries no asset changes at all (keep
+    existing assets untouched). ``[]`` explicitly means "attach nothing".
+    """
+    attach: list[dict] = []
     if input.background_files is not None:
-        return [
-            {
-                "uploaded_url": item.uploaded_url,
-                "file_name": item.file_name,
-            }
-            for item in input.background_files
-            if item.uploaded_url
-        ]
+        for item in input.background_files:
+            if getattr(item, 'upload_id', None):
+                attach.append({'upload_id': int(item.upload_id), 'file_name': item.file_name or ''})
+            elif getattr(item, 'uploaded_url', None):
+                # 兼容旧前端：只保留 URL 没有 upload_id 的条目会被丢弃（staging
+                # 裸文件机制已移除，无法可靠反解析），调用方会得到明确报错。
+                attach.append({'upload_id': None, 'file_name': item.file_name or ''})
+    elif input.background_file_url:
+        # 兼容旧前端单文件路径；没有 upload_id 时无法绑定，交由 diff 校验报错。
+        attach.append({'upload_id': None, 'file_name': input.background_file_name or ''})
 
-    if input.background_file_url:
-        return [{
-            "uploaded_url": input.background_file_url,
-            "file_name": input.background_file_name or os.path.basename(input.background_file_url),
-        }]
+    detached = list(input.detached_asset_ids or []) or []
+    detached_ids = [int(i) for i in detached if str(i).strip().isdigit()]
 
-    return None
+    if not attach and not detached_ids and input.background_files is None and input.background_file_url == "":
+        return None
+
+    return {'attach': attach, 'detached': detached_ids}
 
 
-def _attach_character_reference_assets(character, uploaded_assets, replace_existing=True):
-    if uploaded_assets is None:
+def _apply_asset_diff(character, asset_diff):
+    """Apply an asset diff to a character via the AssetEvent log.
+
+    ``asset_diff`` is the output of ``_normalize_character_reference_inputs``:
+    ``{'attach': [{upload_id, file_name}], 'detached': [asset_id]}``. Attaches
+    are appended as ``asset/attached`` events; detaches as ``asset/detached``.
+    Missing/unowned uploads raise instead of silently dropping (unlike the old
+    URL-copy path).
+    """
+    from ..assets.store import AssetStore
+    from ..assets.projection import AssetFileMissingError
+
+    if asset_diff is None:
         return
 
-    existing_assets = list(character.knowledge_assets.all()) if replace_existing else []
-
-    for index, uploaded_asset in enumerate(uploaded_assets):
-        file_path = _resolve_local_media_path(uploaded_asset.get("uploaded_url"))
-        if not file_path:
-            continue
-
-        file_name = (uploaded_asset.get("file_name") or os.path.basename(file_path)).strip() or os.path.basename(file_path)
-        mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-
-        with open(file_path, 'rb') as source_file:
-            django_file = File(source_file, name=file_name)
-            setattr(django_file, 'content_type', mime_type)
-            attachment_kind, attachment_mime_type = guess_attachment_kind(django_file)
-            if attachment_kind not in SUPPORTED_CHARACTER_REFERENCE_KINDS:
-                raise ValueError("Only text files and images are supported for character reference uploads.")
-
-            validate_attachment_size(django_file, attachment_kind)
-            attachment_text_content = extract_text_attachment_content(django_file) if attachment_kind == AttachmentKind.TEXT else ""
-            django_file.seek(0)
-
-            asset = CharacterKnowledgeAsset(
-                character=character,
-                attachment_name=file_name,
-                attachment_mime_type=attachment_mime_type,
-                attachment_kind=attachment_kind,
-                attachment_text_content=attachment_text_content,
-                sort_order=index,
-            )
-            asset.file.save(file_name, django_file, save=False)
-            asset.save()
-
-    for existing_asset in existing_assets:
-        existing_asset.file.delete(save=False)
-        existing_asset.delete()
+    attach_ids = [entry['upload_id'] for entry in asset_diff['attach']]
+    invalid = [entry for entry in asset_diff['attach'] if entry['upload_id'] is None]
+    if invalid:
+        raise AssetFileMissingError(
+            'Reference files must be uploaded through the staging endpoint first '
+            '(missing upload_id).'
+        )
+    if attach_ids:
+        AssetStore.attach(character, attach_ids)
+    if asset_diff['detached']:
+        AssetStore.detach(character, asset_diff['detached'], reason='user edit')
 
 @strawberry.input
 class ChatSessionInput:
@@ -453,6 +492,7 @@ class Mutation:
     async def generate_character_draft(
         self,
         info,
+        upload_ids: Optional[List[str]] = None,
         file_url: Optional[str] = None,
         file_urls: Optional[List[str]] = None,
         file_names: Optional[List[str]] = None,
@@ -468,6 +508,9 @@ class Mutation:
         group, and the files are exposed through the ``list_memory_files`` /
         ``read_memory_file`` tools so the model reads only what it needs.
         Gemini falls back to reading text files locally.
+
+        ``upload_ids`` are the ``asset/uploaded`` event ids returned by the
+        upload endpoint; they are resolved from the asset event log.
         """
         user = await sync_to_async(_get_authenticated_user)(info)
 
@@ -475,13 +518,15 @@ class Mutation:
             runtime_config = await sync_to_async(_get_draft_runtime_config)(user)
             draft_locale = await sync_to_async(_get_draft_prompt_locale)(user, locale)
 
-            normalized_file_urls = []
-            if file_urls:
-                normalized_file_urls.extend(file_urls)
-            if file_url:
-                normalized_file_urls.append(file_url)
-
-            staged_uploads = _resolve_staged_uploads(normalized_file_urls, file_names)
+            if upload_ids:
+                staged_uploads = _resolve_staged_uploads_from_events(user, upload_ids)
+            else:
+                normalized_file_urls = []
+                if file_urls:
+                    normalized_file_urls.extend(file_urls)
+                if file_url:
+                    normalized_file_urls.append(file_url)
+                staged_uploads = _resolve_staged_uploads(normalized_file_urls, file_names)
 
             # 大量参考文件：走 reduce 流水线（分层精读 → 结构化笔记 → 合并），
             # 避免单次 ReAct loop 无法覆盖全部文件。少量文件仍走 Memory Tools
@@ -620,11 +665,7 @@ class Mutation:
                 tags=input.tags,
                 created_by=user
             )
-            _attach_character_reference_assets(
-                character,
-                _normalize_character_reference_inputs(input),
-                replace_existing=True,
-            )
+            _apply_asset_diff(character, _normalize_character_reference_inputs(input))
             character.save()
             return character
         character = await create_char_sync()
@@ -649,7 +690,7 @@ class Mutation:
         def update_char_sync():
             user = _get_authenticated_user(info)
             character = _get_owned_character(user, id)
-            uploaded_assets = _normalize_character_reference_inputs(input)
+            asset_diff = _normalize_character_reference_inputs(input)
             character.name = input.name
             character.avatar_url = input.avatar_url
             character.description = input.description
@@ -664,11 +705,7 @@ class Mutation:
             character.tags = input.tags
             character.enable_web_search = input.enable_web_search
             character.tts_config = input.tts_config or {}
-            _attach_character_reference_assets(
-                character,
-                uploaded_assets,
-                replace_existing=uploaded_assets is not None,
-            )
+            _apply_asset_diff(character, asset_diff)
             character.save()
             return character
         character = await update_char_sync()

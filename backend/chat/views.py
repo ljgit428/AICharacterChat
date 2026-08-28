@@ -175,43 +175,25 @@ class CharacterViewSet(viewsets.ModelViewSet):
         if not files:
             raise ValidationError({'files': 'At least one file is required.'})
 
-        # Optional parallel array of folder-group relative paths (e.g. from a
-        # browser upload that preserves webkitRelativePath). Files land inside
-        # the memory filesystem tree at raw/character_setup/uploads/<rel>.
+        # Optional parallel array of folder-group relative paths.
         relative_paths = self._extract_relative_paths(request)
         if len(relative_paths) not in (0, len(files)):
             raise ValidationError({'relative_paths': 'relative_paths must match the number of uploaded files.'})
 
-        next_sort_order = (
-            character.knowledge_assets.order_by('-sort_order').values_list('sort_order', flat=True).first() or 0
-        )
-        created_assets = []
-        for index, uploaded_file in enumerate(files, start=1):
-            attachment_kind, attachment_mime_type = guess_attachment_kind(uploaded_file)
-            if attachment_kind not in {AttachmentKind.TEXT, AttachmentKind.IMAGE}:
-                raise ValidationError({'files': 'Only text files and images are supported for character reference uploads.'})
+        from .assets.store import AssetStore
 
-            validate_attachment_size(uploaded_file, attachment_kind)
-            attachment_text_content = ''
-            if attachment_kind == AttachmentKind.TEXT:
-                attachment_text_content = extract_text_attachment_content(uploaded_file)
+        upload_ids = []
+        for index, uploaded_file in enumerate(files):
+            rel_path = sanitize_memory_relative_path(relative_paths[index]) if relative_paths else ''
+            try:
+                event, _metadata = AssetStore.upload(request.user, uploaded_file, rel_path)
+            except ValueError as exc:
+                raise ValidationError({'files': str(exc)}) from exc
+            upload_ids.append(event.id)
 
-            relative_path = sanitize_memory_relative_path(relative_paths[index - 1]) if relative_paths else ''
-            attachment_name = relative_path or (uploaded_file.name or '')
-
-            created_assets.append(
-                CharacterKnowledgeAsset.objects.create(
-                    character=character,
-                    file=uploaded_file,
-                    attachment_name=attachment_name,
-                    attachment_mime_type=attachment_mime_type,
-                    attachment_kind=attachment_kind,
-                    attachment_text_content=attachment_text_content,
-                    sort_order=next_sort_order + index,
-                )
-            )
-
-        serializer = CharacterKnowledgeAssetSerializer(created_assets, many=True, context={'request': request})
+        # Attach all uploaded events to the character and return the assets.
+        assets = AssetStore.attach(character, upload_ids)
+        serializer = CharacterKnowledgeAssetSerializer(assets, many=True, context={'request': request})
         return Response({'assets': serializer.data}, status=status.HTTP_201_CREATED)
 
     @staticmethod
@@ -239,8 +221,8 @@ class CharacterViewSet(viewsets.ModelViewSet):
         except CharacterKnowledgeAsset.DoesNotExist as exc:
             raise ValidationError({'asset_id': 'Knowledge asset not found for this character.'}) from exc
 
-        asset.file.delete(save=False)
-        asset.delete()
+        from .assets.store import AssetStore
+        AssetStore.detach(character, [asset.id], reason='user delete')
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='memory')

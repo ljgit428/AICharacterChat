@@ -2246,6 +2246,30 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             uploaded_file.write(content)
         return f'http://testserver/media/uploads/{filename}'
 
+    def _stage_upload(self, filename, content, *, binary=False):
+        """Create an ``asset/uploaded`` event via AssetStore; returns upload_id.
+
+        Replaces the old bare-file staging writes: the upload endpoint and the
+        GraphQL create/update now flow through the AssetEvent log, so tests
+        must stage through AssetStore.upload to get an upload_id.
+        """
+        from chat.assets.store import AssetStore
+
+        if binary:
+            file_obj = SimpleUploadedFile(
+                filename,
+                content if isinstance(content, bytes) else content.encode('utf-8'),
+                content_type='image/png',
+            )
+        else:
+            file_obj = SimpleUploadedFile(
+                filename,
+                content.encode('utf-8'),
+                content_type='text/plain',
+            )
+        event, _metadata = AssetStore.upload(self.user, file_obj, filename)
+        return event.id
+
     def _build_character_input(self, **overrides):
         payload = {
             'name': 'Imported Character',
@@ -2354,7 +2378,7 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(portrait_doc['content'], '')
 
     def test_create_character_imports_background_text_into_memory_explorer(self):
-        background_url = self._write_uploaded_text(
+        upload_id = self._stage_upload(
             'legacy-dialogue.txt',
             'User: Do you still remember me?\nCharacter: I never forgot.',
         )
@@ -2371,8 +2395,9 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             """,
             variables={
                 'input': self._build_character_input(
-                    backgroundFileUrl=background_url,
-                    backgroundFileName='legacy-dialogue.txt',
+                    backgroundFiles=[
+                        {'uploadId': str(upload_id), 'fileName': 'legacy-dialogue.txt'},
+                    ],
                 ),
             },
         )
@@ -2426,7 +2451,7 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
                 content_type='text/plain',
             ),
         )
-        replacement_url = self._write_uploaded_text(
+        replacement_upload_id = self._stage_upload(
             'replacement.txt',
             'User: New line\nCharacter: New reply',
         )
@@ -2453,8 +2478,9 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
                     exampleDialogue=character.example_dialogue,
                     affiliation=character.affiliation,
                     tags=character.tags,
-                    backgroundFileUrl=replacement_url,
-                    backgroundFileName='replacement.txt',
+                    backgroundFiles=[
+                        {'uploadId': str(replacement_upload_id), 'fileName': 'replacement.txt'},
+                    ],
                 ),
             },
         )
@@ -2473,13 +2499,14 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertNotIn('Original reply', uploaded_doc['content'])
 
     def test_create_character_accepts_multiple_text_and_image_reference_files(self):
-        dialogue_url = self._write_uploaded_text(
+        dialogue_upload_id = self._stage_upload(
             'dialogue.txt',
             'User: Stay with me.\nCharacter: Always.',
         )
-        image_url = self._write_uploaded_binary(
+        image_upload_id = self._stage_upload(
             'portrait.png',
             b'\x89PNG\r\n\x1a\n',
+            binary=True,
         )
 
         response = self.graphql(
@@ -2497,8 +2524,8 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             variables={
                 'input': self._build_character_input(
                     backgroundFiles=[
-                        {'uploadedUrl': dialogue_url, 'fileName': 'dialogue.txt'},
-                        {'uploadedUrl': image_url, 'fileName': 'portrait.png'},
+                        {'uploadId': str(dialogue_upload_id), 'fileName': 'dialogue.txt'},
+                        {'uploadId': str(image_upload_id), 'fileName': 'portrait.png'},
                     ],
                 ),
             },

@@ -323,6 +323,13 @@ class CharacterKnowledgeAsset(models.Model):
     media_analysis = models.TextField(blank=True, default="")
     gemini_file_name = models.TextField(blank=True, default="")
     sort_order = models.PositiveIntegerField(default=0)
+    # 事件溯源关联：创建本行的 asset/uploaded 事件 id（投影重建/解绑时精确
+    # 定位）。事件日志是事实源，本行是物化投影。
+    upload_event_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        help_text='Id of the asset/uploaded AssetEvent this row projects from.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -331,6 +338,55 @@ class CharacterKnowledgeAsset(models.Model):
 
     def __str__(self):
         return f"{self.character.name}: {self.attachment_name or self.file.name}"
+
+
+class AssetEventType(models.TextChoices):
+    """The append-only event vocabulary for character reference assets.
+
+    ``CharacterKnowledgeAsset`` rows are a materialized projection of this
+    log (see ``chat.assets.projection``). Uploads enter the log as
+    ``asset/uploaded`` with a TTL; binding them to a character appends
+    ``asset/attached``; removal appends ``asset/detached``; abandoned uploads
+    are closed with ``asset/expired``. Events are never updated or deleted.
+    """
+
+    UPLOADED = 'asset/uploaded', 'Uploaded (staged, unattached)'
+    ATTACHED = 'asset/attached', 'Attached to character'
+    DETACHED = 'asset/detached', 'Detached from character'
+    EXPIRED = 'asset/expired', 'Expired unattached upload'
+
+
+class AssetEvent(models.Model):
+    """One append-only entry in a user's character-reference asset log.
+
+    Unlike ``ChatEvent`` (which is session-scoped), asset events belong to a
+    user and optionally a character, so they live in their own table with a
+    global identity (no per-session seq). ``data`` is a lossless JSON payload;
+    ``expires_at`` carries the TTL of ``asset/uploaded`` events.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='asset_events')
+    character = models.ForeignKey(
+        Character,
+        on_delete=models.CASCADE,
+        related_name='asset_events',
+        null=True,
+        blank=True,
+    )
+    event_type = models.CharField(max_length=40, choices=AssetEventType.choices)
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-id']
+        indexes = [
+            models.Index(fields=['user', 'event_type']),
+            models.Index(fields=['character', 'event_type']),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type} #{self.id} [{self.user_id}]"
 
 
 class ChatSession(models.Model):

@@ -287,6 +287,53 @@ only the derived model prompt is compacted.
 | `chat/management/commands/rebuild_message_projection.py` | Rebuild Message rows from events (`--session <id> / --all / --check`) |
 
 
+## 11. Event-Sourced Character Reference Assets (v0.1.4)
+
+**Goal:** Replace the bare-file staging mechanism for character-reference
+uploads with an asset event log, and fix the P0/P1 upload defects (unbounded
+staging, anonymous upload, full-replace edits).
+
+### Event Vocabulary
+| Event Type | Payload | Produces Asset? |
+|---|---|---|
+| `asset/uploaded` | `{file_path, file_name, kind, mime, text_content, size, sha256}` + TTL | No |
+| `asset/attached` | `{upload_event_id, sort_order}` | Yes |
+| `asset/detached` | `{upload_event_id, asset_id, reason}` | No |
+| `asset/expired` | `{upload_event_id, reason}` | No |
+
+`AssetEvent` is a user-scoped append-only log (independent of the session-scoped
+`ChatEvent`); `CharacterKnowledgeAsset` rows are a materialized projection.
+
+### Upload Lifecycle
+1. `POST /api/files/upload/` (now `IsAuthenticated` + size-limited) →
+   `AssetStore.upload()` saves the file under
+   `uploads/pending/<user>/<uuid>/<name>` with a TTL and appends
+   `asset/uploaded`; responds with `upload_id`.
+2. `generateCharacterDraft(uploadIds)` resolves staged files from the event log.
+3. `createCharacter`/`updateCharacter` pass `backgroundFiles: [{uploadId,
+   fileName}]` + `detachedAssetIds` — an **incremental diff** (`_apply_asset_diff`):
+   attach appends `asset/attached` (projection copies the file to asset storage
+   and consumes the pending copy); detach appends `asset/detached`. Existing
+   assets are never rebuilt on an unrelated save.
+4. Abandoned uploads are closed with `asset/expired` by the lazy reclamation
+   inside `AssetStore.upload` and by `python manage.py clean_stale_uploads`
+   (also purges the legacy `media/uploads/` orphans with `--purge-legacy-uploads`).
+
+### Key Modules
+| Module | Role |
+|---|---|
+| `chat/assets/types.py` | Asset event payload builders |
+| `chat/assets/store.py` | `AssetStore` (upload / attach / detach / pending / expire_stale) |
+| `chat/assets/projection.py` | Projection: attached/detached → `CharacterKnowledgeAsset`; best-effort rebuild |
+| `chat/management/commands/clean_stale_uploads.py` | TTL reclamation + legacy orphan purge |
+
+### Known Boundaries
+- Legacy `Character.file` single-file field is still read as a fallback by the
+  memory explorer but is not managed by the edit form (no migration).
+- `CharacterKnowledgeAsset.upload_event_id` links rows to their uploaded event;
+  directly-created legacy assets (no event) can still be detached via `asset_id`.
+
+
 
 
 

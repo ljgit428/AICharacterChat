@@ -24,6 +24,10 @@ type ReferenceFile = {
   name: string;
   url: string;
   type: string;
+  /** asset/uploaded 事件 id（新上传）；已有资产无此字段 */
+  uploadId?: string;
+  /** CharacterKnowledgeAsset 行 id（已有资产）；新上传无此字段 */
+  assetId?: string;
 };
 
 type PendingReferenceFile = {
@@ -335,8 +339,8 @@ function buildCharacterSystemPromptPreview(
 }
 
 const GENERATE_DRAFT = gql`
-  mutation GenerateDraft($fileUrls: [String!], $fileNames: [String!], $textContext: String, $locale: String) {
-    generateCharacterDraft(fileUrls: $fileUrls, fileNames: $fileNames, textContext: $textContext, locale: $locale) {
+  mutation GenerateDraft($uploadIds: [String!], $fileUrls: [String!], $fileNames: [String!], $textContext: String, $locale: String) {
+    generateCharacterDraft(uploadIds: $uploadIds, fileUrls: $fileUrls, fileNames: $fileNames, textContext: $textContext, locale: $locale) {
       name
       description
       affiliation
@@ -374,6 +378,7 @@ const GET_CHARACTER = gql`
       enableWebSearch
       ttsConfig
       knowledgeAssets {
+        assetId
         fileUrl
         fileName
         fileType
@@ -862,6 +867,8 @@ export default function CreateCharacterSimplifiedForm({
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const skipNextPromptPreviewSyncRef = useRef(false);
   const loadedCharacterIdRef = useRef<string | null>(null);
+  // 编辑模式加载时的初始资产 id 集合；handleSave 用它计算 detach diff。
+  const initialAssetIdsRef = useRef<Set<string>>(new Set());
 
   const [generateDraft, { loading: aiLoading }] = useMutation(GENERATE_DRAFT);
   const [createCharacter, { loading: saveLoading }] = useMutation(CREATE_CHARACTER);
@@ -909,15 +916,20 @@ export default function CreateCharacterSimplifiedForm({
       },
     };
     const nextBackgroundFiles = Array.isArray(char.knowledgeAssets)
-      ? char.knowledgeAssets.map((asset: { fileName: string; fileUrl: string; fileType: string }) => ({
+      ? char.knowledgeAssets.map((asset: { assetId: string; fileName: string; fileUrl: string; fileType: string }) => ({
           name: asset.fileName,
           url: asset.fileUrl,
           type: asset.fileType,
+          assetId: asset.assetId,
         }))
       : [];
 
     setForm(nextForm);
     setBackgroundFiles(nextBackgroundFiles);
+    // 保存初始 assetId 集合，用于 handleSave 计算 diff
+    initialAssetIdsRef.current = new Set(
+      nextBackgroundFiles.map((f: ReferenceFile) => f.assetId).filter((id: string | undefined): id is string => !!id)
+    );
     setAiFilledFields(new Set());
     setAiEditedFields(new Set());
     setPreAiSnapshot(null);
@@ -1014,6 +1026,7 @@ export default function CreateCharacterSimplifiedForm({
 
     const uploadData = await res.json();
     return {
+      uploadId: String(uploadData.upload_id ?? ''),
       uploadedUrl: uploadData.url || uploadData.uri,
       uploadedName: item.displayName || uploadData.display_name || uploadData.relative_path || uploadData.name || item.file.name,
       uploadedType: item.file.type.startsWith('image/') ? 'image' : 'text',
@@ -1029,7 +1042,7 @@ export default function CreateCharacterSimplifiedForm({
       if (target === 'background') {
         setBackgroundFiles((prev) => [
           ...prev,
-          { name: uploaded.uploadedName, url: uploaded.uploadedUrl, type: uploaded.uploadedType },
+          { name: uploaded.uploadedName, url: uploaded.uploadedUrl, type: uploaded.uploadedType, uploadId: uploaded.uploadId },
         ]);
       } else {
         setForm((prev) => ({ ...prev, avatarUrl: uploaded.uploadedUrl }));
@@ -1069,6 +1082,7 @@ export default function CreateCharacterSimplifiedForm({
             name: uploaded.uploadedName,
             url: uploaded.uploadedUrl,
             type: uploaded.uploadedType,
+            uploadId: uploaded.uploadId,
           })),
         ]);
       }
@@ -1192,8 +1206,7 @@ export default function CreateCharacterSimplifiedForm({
     try {
       const response = await generateDraft({
         variables: {
-          fileUrls: draftSourceFiles.map((file) => file.url),
-          fileNames: draftSourceFiles.map((file) => file.name),
+          uploadIds: draftSourceFiles.map((file) => file.uploadId).filter((id): id is string => !!id),
           textContext: combinedContext,
           locale: promptPreviewLocale,
         }
@@ -1249,6 +1262,15 @@ export default function CreateCharacterSimplifiedForm({
     }
 
     try {
+      // 增量 diff：新上传（有 uploadId）→ attach；编辑模式下初始集合中
+      // 已被移除的资产 → detach。已存在的资产原样不动，不再全量重建。
+      const currentAssetIds = new Set(
+        backgroundFiles.map((file) => file.assetId).filter((id): id is string => !!id)
+      );
+      const detachedAssetIds = isEditMode
+        ? Array.from(initialAssetIdsRef.current).filter((id) => !currentAssetIds.has(id))
+        : [];
+
       const input = {
         name: form.name.trim(),
         description: form.description.trim(),
@@ -1265,10 +1287,13 @@ export default function CreateCharacterSimplifiedForm({
       enableWebSearch:
         form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
       ttsConfig: toTtsConfigInput(form.ttsConfig),
-        backgroundFiles: backgroundFiles.map((file) => ({
-          uploadedUrl: file.url,
-          fileName: file.name,
-        })),
+        backgroundFiles: backgroundFiles
+          .filter((file) => !!file.uploadId)
+          .map((file) => ({
+            uploadId: file.uploadId as string,
+            fileName: file.name,
+          })),
+        detachedAssetIds,
       };
 
       if (isEditMode) {

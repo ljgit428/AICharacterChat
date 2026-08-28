@@ -52,8 +52,12 @@ class UploadFileViewRelativePathTests(TestCase):
         override.enable()
         self.addCleanup(override.disable)
         self.addCleanup(lambda: shutil.rmtree(self.media_root, ignore_errors=True))
+        self.user = User.objects.create_user(username='upload-owner', password='x')
+        self.client.force_login(self.user)
 
     def test_upload_with_relative_path_stores_nested_file(self):
+        from chat.models import AssetEvent
+
         upload = SimpleUploadedFile('scene.txt', b'scene body', content_type='text/plain')
         response = self.client.post('/api/files/upload/', {
             'file': upload,
@@ -62,28 +66,46 @@ class UploadFileViewRelativePathTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         payload = response.json()
+        self.assertIn('upload_id', payload)
         self.assertEqual(payload['relative_path'], 'Momotalk/mari_10105/玛丽_Momotalk_1.txt')
-        stored = os.path.join(
-            self.media_root, 'uploads', 'Momotalk', 'mari_10105', '玛丽_Momotalk_1.txt'
-        )
+
+        # The file is staged under the per-user pending dir, keyed by the
+        # asset/uploaded event.
+        event = AssetEvent.objects.get(id=payload['upload_id'])
+        self.assertIn('uploads/pending/', event.data['file_path'])
+        stored = os.path.join(self.media_root, event.data['file_path'])
         self.assertTrue(os.path.exists(stored))
         with open(stored, 'rb') as stored_file:
             self.assertEqual(stored_file.read(), b'scene body')
 
     def test_upload_rejects_traversal_in_relative_path(self):
+        from chat.models import AssetEvent
+
         upload = SimpleUploadedFile('evil.txt', b'x', content_type='text/plain')
         response = self.client.post('/api/files/upload/', {
             'file': upload,
             'relative_path': '../../../../etc/evil.txt',
         })
 
-        # '..' segments are dropped, so the file must land INSIDE uploads/
-        # ('etc/evil.txt'), never outside the media root.
+        # '..' segments are dropped in the display name; the storage path is
+        # always inside the per-user pending dir, never outside the media root.
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['relative_path'], 'etc/evil.txt')
-        self.assertTrue(os.path.exists(os.path.join(self.media_root, 'uploads', 'etc', 'evil.txt')))
+        payload = response.json()
+        self.assertEqual(payload['relative_path'], 'etc/evil.txt')
+        event = AssetEvent.objects.get(id=payload['upload_id'])
+        self.assertIn('uploads/pending/', event.data['file_path'])
+        stored = os.path.join(self.media_root, event.data['file_path'])
+        self.assertTrue(os.path.exists(stored))
         self.assertFalse(os.path.exists(os.path.join(self.media_root, 'etc')))
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.media_root), 'etc')))
+
+    def test_upload_requires_authentication(self):
+        from django.contrib.auth.models import AnonymousUser
+
+        self.client.logout()
+        upload = SimpleUploadedFile('anon.txt', b'x', content_type='text/plain')
+        response = self.client.post('/api/files/upload/', {'file': upload})
+        self.assertIn(response.status_code, (401, 403))
 
 
 class StagedUploadFilesystemTests(TestCase):
