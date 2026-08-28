@@ -288,18 +288,14 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(self.own_character.name, 'Updated Owner Character')
         self.assertEqual(self.own_character.scenario, 'Updated library')
 
-    def test_rest_delete_character_blocks_when_chat_sessions_exist(self):
+    def test_rest_delete_character_deletes_character_with_chat_sessions(self):
         self.client.force_login(self.user)
 
         response = self.client.delete(f'/api/characters/{self.own_character.id}/')
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.json()['error'],
-            'Cannot delete a character with existing chat sessions',
-        )
-        self.assertTrue(Character.objects.filter(id=self.own_character.id).exists())
-        self.assertTrue(ChatSession.objects.filter(id=self.own_session.id).exists())
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Character.objects.filter(id=self.own_character.id).exists())
+        self.assertFalse(ChatSession.objects.filter(id=self.own_session.id).exists())
 
     def test_rest_delete_character_allows_delete_without_chat_sessions(self):
         self.client.force_login(self.user)

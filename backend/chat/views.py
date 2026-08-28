@@ -920,27 +920,52 @@ class MessageViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(chat_session_id=chat_session_id)
         return queryset
 
-    def perform_create(self, serializer):
-        chat_session_id = self.request.data.get('chat_session_id')
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        chat_session_id = request.data.get('chat_session_id')
         if not chat_session_id:
-            return Response(
-                {'error': 'chat_session_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
+            raise ValidationError('chat_session_id is required')
         try:
-            user = self.request.user
-
             chat_session = ChatSession.objects.get(
                 id=chat_session_id,
-                user=user
+                user=request.user,
             )
-            serializer.save(chat_session=chat_session)
         except ChatSession.DoesNotExist:
-            return Response(
-                {'error': 'Chat session not found or access denied'},
-                status=status.HTTP_404_NOT_FOUND
+            raise ValidationError('Chat session not found or access denied')
+
+        validated = serializer.validated_data
+        role = validated.get('role') or 'user'
+        content = validated.get('content') or ''
+        character = validated.get('character')
+
+        # Every message is a conversation event; the Message row is the
+        # write-through projection.
+        if not chat_session.events.exists():
+            EventStore.append(
+                chat_session,
+                ChatEventType.SESSION_CREATED,
+                {'origin': chat_session.origin, 'title': chat_session.title},
             )
+        if role == 'assistant':
+            _event, message = EventStore.append(
+                chat_session,
+                ChatEventType.ASSISTANT_MESSAGE,
+                assistant_message_payload(content=content),
+                character=character,
+            )
+        else:
+            _event, message = EventStore.append(
+                chat_session,
+                ChatEventType.USER_MESSAGE,
+                user_message_payload(content=content),
+                character=character,
+            )
+        return Response(
+            MessageSerializer(message, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 class ChatViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
