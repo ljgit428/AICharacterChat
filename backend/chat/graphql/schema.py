@@ -519,7 +519,7 @@ class Mutation:
             draft_locale = await sync_to_async(_get_draft_prompt_locale)(user, locale)
 
             if upload_ids:
-                staged_uploads = _resolve_staged_uploads_from_events(user, upload_ids)
+                staged_uploads = await sync_to_async(_resolve_staged_uploads_from_events)(user, upload_ids)
             else:
                 normalized_file_urls = []
                 if file_urls:
