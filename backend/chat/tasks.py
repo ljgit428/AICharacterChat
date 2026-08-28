@@ -986,12 +986,13 @@ def _execute_local_memory_tool(filesystem, tool_name, raw_arguments):
     }
 
 
-def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, event_sink=None):
-    """Run the OpenAI-compatible tool loop and return the final text.
+def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None):
+    """Run the OpenAI-compatible tool loop as a generator.
 
-    When ``event_sink`` (a list) is provided, tool calls and the final round's
-    native reasoning text are appended to it as ``{'type': 'tool' | 'thinking', ...}``
-    dicts so callers can surface them to the user without extra LLM calls.
+    Yields event dicts as they happen so streaming callers can surface tool
+    calls, thinking, and usage in real time (no buffering until the loop
+    finishes): ``{'type': 'tool'|'thinking'|'usage', ...}`` and finally a
+    terminal ``{'type': 'final_text', 'content': ...}``.
     """
     if not tools:
         response_json = _request_openai_compatible_completion(
@@ -1000,11 +1001,11 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             messages=messages,
             base_url=base_url,
         )
-        if event_sink is not None:
-            usage = _extract_token_usage(response_json.get('usage'))
-            if usage:
-                event_sink.append({'type': 'usage', 'usage': usage})
-        return _extract_openai_content(response_json)
+        usage = _extract_token_usage(response_json.get('usage'))
+        if usage:
+            yield {'type': 'usage', 'usage': usage}
+        yield {'type': 'final_text', 'content': _extract_openai_content(response_json)}
+        return
 
     usage_total = None
     history = list(messages)
@@ -1023,21 +1024,22 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                     "OpenAI-compatible backend rejected local memory tools for model %s; retrying without tools.",
                     model_name,
                 )
-                if event_sink is not None:
-                    del event_sink[:]
                 response_json = _request_openai_compatible_completion(
                     model_name=model_name,
                     api_key=api_key,
                     messages=messages,
                     base_url=base_url,
                 )
-                if event_sink is not None:
-                    usage = _extract_token_usage(response_json.get('usage'))
-                    if usage:
-                        event_sink.append({'type': 'usage', 'usage': usage})
-                return _extract_openai_content(response_json)
+                usage = _extract_token_usage(response_json.get('usage'))
+                if usage:
+                    yield {'type': 'usage', 'usage': usage}
+                yield {'type': 'final_text', 'content': _extract_openai_content(response_json)}
+                return
             raise
-        usage_total = _merge_token_usage(usage_total, _extract_token_usage(response_json.get('usage')))
+        usage = _extract_token_usage(response_json.get('usage'))
+        if usage:
+            usage_total = _merge_token_usage(usage_total, usage)
+            yield {'type': 'usage', 'usage': dict(usage_total)}
         assistant_message = _extract_openai_assistant_message(response_json)
         tool_calls = assistant_message.get('tool_calls') or []
         history.append({
@@ -1050,11 +1052,10 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             content = _extract_text_from_content(assistant_message.get('content'))
             if content:
                 reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
-                if reasoning and event_sink is not None:
-                    event_sink.append({'type': 'thinking', 'content': reasoning})
-                if event_sink is not None and usage_total:
-                    event_sink.append({'type': 'usage', 'usage': dict(usage_total)})
-                return content
+                if reasoning:
+                    yield {'type': 'thinking', 'content': reasoning}
+                yield {'type': 'final_text', 'content': content}
+                return
             raise ValueError('OpenAI compatible API returned an empty response after tool execution')
 
         if filesystem is None:
@@ -1068,8 +1069,9 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 tool_arguments = json.loads(raw_arguments or '{}')
             except json.JSONDecodeError:
                 tool_arguments = {}
-            if event_sink is not None:
-                event_sink.append({'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments})
+            # 实时 yield 工具调用事件（关键改动：工具执行前就推送给前端，
+            # 用户在检索过程中就能看到当前正在翻阅哪个文件）。
+            yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
             tool_result = _execute_local_memory_tool(
                 filesystem,
                 tool_name=tool_name,
@@ -1482,18 +1484,20 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
         if not isinstance(prompt_or_messages, list):
             prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
         if tools:
-            event_sink: list[dict] = []
-            buffered_text = _generate_openai_compatible_response(
+            final_parts: list[str] = []
+            for event in _generate_openai_compatible_response(
                 model_name=model_name,
                 api_key=api_key,
                 messages=prompt_or_messages,
                 base_url=runtime_config.get('base_url', ''),
                 tools=tools,
                 filesystem=filesystem,
-                event_sink=event_sink,
-            )
-            yield from event_sink
-            yield from _iter_buffered_chunks(buffered_text)
+            ):
+                if event.get('type') == 'final_text':
+                    final_parts.append(event.get('content') or '')
+                    continue
+                yield event
+            yield from _iter_buffered_chunks(''.join(final_parts))
             return
         yield from _stream_openai_compatible_response(
             model_name=model_name,
@@ -1548,14 +1552,18 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=No
     if provider == 'openai_compatible':
         if not isinstance(prompt_or_messages, list):
             prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
-        return _generate_openai_compatible_response(
+        final_parts: list[str] = []
+        for event in _generate_openai_compatible_response(
             model_name=model_name,
             api_key=api_key,
             messages=prompt_or_messages,
             base_url=runtime_config.get('base_url', ''),
             tools=tools,
             filesystem=filesystem,
-        )
+        ):
+            if event.get('type') == 'final_text':
+                final_parts.append(event.get('content') or '')
+        return ''.join(final_parts)
 
     if provider == 'anthropic':
         if not isinstance(prompt_or_messages, list):

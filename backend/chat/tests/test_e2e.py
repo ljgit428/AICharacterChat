@@ -33,6 +33,24 @@ from chat.models import (
 )
 
 
+def _consume_streaming(response):
+    """Consume a StreamingHttpResponse body, handling both sync and async
+    iterators (the stream_message view now returns an async generator so
+    chunks flow in real time under ASGI)."""
+    content = response.streaming_content
+    if hasattr(content, '__aiter__'):
+        from asgiref.sync import async_to_sync
+
+        async def _collect():
+            chunks = []
+            async for chunk in content:
+                chunks.append(chunk)
+            return b''.join(chunks)
+
+        return async_to_sync(_collect)()
+    return b''.join(content)
+
+
 class ModelConfigMixin:
     """Reusable model-config and character setup (mirrors test_api.py)."""
 
@@ -278,7 +296,7 @@ class StreamingE2ETests(ModelConfigMixin, TestCase):
             # patch must stay active during iteration.
             lines = [
                 json.loads(line)
-                for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+                for line in _consume_streaming(response).decode('utf-8').splitlines()
                 if line.strip()
             ]
 

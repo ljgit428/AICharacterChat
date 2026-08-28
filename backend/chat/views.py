@@ -1022,7 +1022,35 @@ class ChatViewSet(viewsets.ViewSet):
                     'error': str(exc),
                 })
 
-        return StreamingHttpResponse(event_stream(), content_type='application/x-ndjson')
+        # Under ASGI (uvicorn) Django's StreamingHttpResponse handler bridges
+        # sync generators by consuming the whole iterator before sending.
+        # Wrapping it in an async generator keeps each chunk flowing in real
+        # time — the first tool event reaches the client in ~1 s instead of
+        # after the entire generation completes.
+        import asyncio
+        from asgiref.sync import sync_to_async
+
+        _SENTINEL = object()
+
+        def _next_chunk(sync_gen):
+            """Pull the next chunk; return _SENTINEL on exhaustion.
+
+            Avoids raising StopIteration through sync_to_async, which asyncio
+            rejects (``StopIteration interacts badly with generators``)."""
+            try:
+                return next(sync_gen)
+            except StopIteration:
+                return _SENTINEL
+
+        async def async_event_stream():
+            sync_gen = event_stream()
+            while True:
+                chunk = await sync_to_async(_next_chunk)(sync_gen)
+                if chunk is _SENTINEL:
+                    break
+                yield chunk
+
+        return StreamingHttpResponse(async_event_stream(), content_type='application/x-ndjson')
 
     @action(detail=False, methods=['post'])
     def asr(self, request):

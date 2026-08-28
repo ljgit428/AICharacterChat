@@ -60,6 +60,24 @@ from chat.tasks import (
 )
 
 
+def _consume_streaming(response):
+    """Consume a StreamingHttpResponse body, handling both sync and async
+    iterators (the stream_message view now returns an async generator so
+    chunks flow in real time under ASGI)."""
+    content = response.streaming_content
+    if hasattr(content, '__aiter__'):
+        from asgiref.sync import async_to_sync
+
+        async def _collect():
+            chunks = []
+            async for chunk in content:
+                chunks.append(chunk)
+            return b''.join(chunks)
+
+        return async_to_sync(_collect)()
+    return b''.join(content)
+
+
 class ModelConfigTestMixin:
     """模型配置 + 角色槽位的测试辅助，供多个 TestCase 复用（要求 self.user 存在）。"""
 
@@ -824,7 +842,7 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
 
@@ -1557,13 +1575,16 @@ class PromptMemoryTests(TestCase):
             },
         ]
 
-        result = _generate_openai_compatible_response(
-            model_name='gpt-4.1-mini',
-            api_key='secret',
-            messages=[{'role': 'system', 'content': 'Use memory tools.'}],
-            base_url='https://example.com/v1',
-            tools=_build_memory_tool_specs(),
-            filesystem=CharacterMemoryFilesystem(self.character),
+        result = ''.join(
+            e.get('content') or '' for e in _generate_openai_compatible_response(
+                model_name='gpt-4.1-mini',
+                api_key='secret',
+                messages=[{'role': 'system', 'content': 'Use memory tools.'}],
+                base_url='https://example.com/v1',
+                tools=_build_memory_tool_specs(),
+                filesystem=CharacterMemoryFilesystem(self.character),
+            )
+            if e.get('type') == 'final_text'
         )
 
         self.assertEqual(result, 'I still call you Gatewalker.')
@@ -1588,13 +1609,16 @@ class PromptMemoryTests(TestCase):
             },
         ]
 
-        result = _generate_openai_compatible_response(
-            model_name='gpt-4.1-mini',
-            api_key='secret',
-            messages=[{'role': 'system', 'content': 'Use memory tools if available.'}],
-            base_url='https://example.com/v1',
-            tools=_build_memory_tool_specs(),
-            filesystem=CharacterMemoryFilesystem(self.character),
+        result = ''.join(
+            e.get('content') or '' for e in _generate_openai_compatible_response(
+                model_name='gpt-4.1-mini',
+                api_key='secret',
+                messages=[{'role': 'system', 'content': 'Use memory tools if available.'}],
+                base_url='https://example.com/v1',
+                tools=_build_memory_tool_specs(),
+                filesystem=CharacterMemoryFilesystem(self.character),
+            )
+            if e.get('type') == 'final_text'
         )
 
         self.assertEqual(result, 'Fallback answer without tools.')
@@ -1677,7 +1701,7 @@ class ChatAttachmentTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
 
@@ -1726,7 +1750,7 @@ class ChatAttachmentTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
 
@@ -3259,7 +3283,6 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
             }}]},
         ]
 
-        event_sink = []
         result = _generate_openai_compatible_response(
             model_name='deepseek-r1',
             api_key='k',
@@ -3267,11 +3290,14 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
             base_url='https://example.com/v1',
             tools=_build_memory_tool_specs(),
             filesystem=object(),
-            event_sink=event_sink,
         )
+        # The function is now a generator: collect final_text + tool/thinking events.
+        events = list(result)
+        final_text = ''.join(e.get('content') or '' for e in events if e.get('type') == 'final_text')
+        tool_events = [e for e in events if e.get('type') in ('tool', 'thinking')]
 
-        self.assertEqual(result, 'All set.')
-        self.assertEqual(event_sink, [
+        self.assertEqual(final_text, 'All set.')
+        self.assertEqual(tool_events, [
             {'type': 'tool', 'tool': 'list_memory_files', 'arguments': {'path_prefix': 'wiki'}},
             {'type': 'thinking', 'content': 'I should check the wiki first.'},
         ])
@@ -3307,7 +3333,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
         event_types = [line['type'] for line in payload_lines]
