@@ -4,7 +4,7 @@ interface ApiResponse<T> {
 }
 
 import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
-import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
+import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
 
@@ -143,6 +143,10 @@ interface ApiMemoryExplorerFile {
   file_url?: string | null;
   mime_type?: string | null;
   error?: string;
+  offset?: number;
+  next_offset?: number | null;
+  total_chars?: number;
+  has_more?: boolean;
 }
 
 interface ApiKnowledgeAsset {
@@ -329,6 +333,10 @@ function normalizeMemoryExplorerFile(apiData: ApiMemoryExplorerFile): MemoryExpl
     fileUrl,
     mimeType: apiData.mime_type || undefined,
     error: apiData.error,
+    offset: apiData.offset,
+    nextOffset: apiData.next_offset ?? undefined,
+    totalChars: apiData.total_chars,
+    hasMore: apiData.has_more,
   };
 }
 
@@ -443,6 +451,72 @@ function normalizeUserProfile(apiData: ApiUserProfile): UserProfile {
   };
 }
 
+interface ApiTtsServiceSettings {
+  default_provider: string;
+  genie_url: string;
+  gptsovits_url: string;
+  indextts_url: string;
+}
+
+interface ApiTtsVoiceEmotion {
+  name: string;
+  ref_audio_path?: string;
+  ref_audio_text?: string;
+  ref_audio_language?: string;
+}
+
+interface ApiTtsVoiceModel {
+  id: number;
+  name: string;
+  engine: string;
+  model_version: string;
+  language: string;
+  voice_name: string;
+  onnx_model_dir: string;
+  ref_audio_path: string;
+  ref_audio_text: string;
+  ref_audio_language: string;
+  emotions?: ApiTtsVoiceEmotion[];
+  conversion_status: string;
+  conversion_error: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+function normalizeTtsServiceSettings(apiData: ApiTtsServiceSettings): TtsServiceSettings {
+  return {
+    defaultProvider: (apiData.default_provider || '') as TtsServiceSettings['defaultProvider'],
+    genieUrl: apiData.genie_url || '',
+    gptsovitsUrl: apiData.gptsovits_url || '',
+    indexttsUrl: apiData.indextts_url || '',
+  };
+}
+
+function normalizeTtsVoiceModel(apiData: ApiTtsVoiceModel): TtsVoiceModel {
+  return {
+    id: apiData.id,
+    name: apiData.name,
+    engine: (apiData.engine || 'genie') as TtsVoiceModel['engine'],
+    modelVersion: apiData.model_version || '',
+    language: apiData.language || '',
+    voiceName: apiData.voice_name || '',
+    onnxModelDir: apiData.onnx_model_dir || '',
+    refAudioPath: apiData.ref_audio_path || '',
+    refAudioText: apiData.ref_audio_text || '',
+    refAudioLanguage: apiData.ref_audio_language || '',
+    emotions: (apiData.emotions || []).map((emotion) => ({
+      name: emotion.name || '',
+      refAudioPath: emotion.ref_audio_path || '',
+      refAudioText: emotion.ref_audio_text || '',
+      refAudioLanguage: emotion.ref_audio_language || '',
+    })),
+    conversionStatus: (apiData.conversion_status || '') as TtsVoiceModel['conversionStatus'],
+    conversionError: apiData.conversion_error || '',
+    createdAt: apiData.created_at,
+    updatedAt: apiData.updated_at,
+  };
+}
+
 function normalizeWebSearchConfig(apiData: ApiWebSearchConfig): WebSearchConfig {
   return {
     id: apiData.id ? String(apiData.id) : undefined,
@@ -474,6 +548,34 @@ interface SendMessageRequest {
   origin?: 'topic' | 'chat';
   attachment?: File | null;
   attachments?: File[];
+}
+
+export interface AsrTranscription {
+  text: string;
+  language?: string;
+  processing_ms?: number;
+  model_load_ms?: number;
+}
+
+export interface AsrReadiness {
+  available: boolean;
+  installed: boolean;
+  loaded: boolean;
+  provider: string;
+  model: string;
+  device: string;
+  compute_type: string;
+  hint: string;
+}
+
+export interface TtsReadiness {
+  provider: string;
+  configured: boolean;
+  reachable: boolean;
+  available: boolean;
+  label: string;
+  hint: string;
+  providers: Array<{ key: string; label: string }>;
 }
 
 interface CreateModelConfigRequest {
@@ -557,6 +659,7 @@ interface StreamDoneEvent {
   type: 'done';
   message_id: number;
   content: string;
+  tts_segments?: { emotion?: string; text: string }[];
   timestamp: string;
   latency_ms?: number;
   provider?: ModelProvider;
@@ -892,6 +995,58 @@ class ApiService {
     return { data: undefined };
   }
 
+  async transcribeAudio(audio: Blob, language?: string): Promise<ApiResponse<AsrTranscription>> {
+    const formData = new FormData();
+    const extension = audio.type.includes('ogg') ? 'ogg' : audio.type.includes('wav') ? 'wav' : 'webm';
+    formData.append('audio', new File([audio], `speech.${extension}`, { type: audio.type || 'audio/webm' }));
+    if (language) {
+      formData.append('language', language);
+    }
+    return this.request('/chat/asr', { method: 'POST', body: formData });
+  }
+
+  async getAsrReadiness(): Promise<ApiResponse<AsrReadiness>> {
+    return this.request('/chat/asr_readiness');
+  }
+
+  async getTtsReadiness(): Promise<ApiResponse<TtsReadiness>> {
+    return this.request('/chat/tts_readiness');
+  }
+
+  /** 实时模式语音合成：返回音频 Blob（wav）。失败抛错，错误信息可直接展示。
+   *  传 characterId 时使用该角色在"语音模型"区块配置的专属音色；
+   *  传 emotion 时使用该角色情感组里对应情感的参考音频。 */
+  async synthesizeSpeech(
+    text: string,
+    options?: { provider?: string; characterId?: string; emotion?: string },
+  ): Promise<Blob> {
+    const token = getAuthToken();
+    const response = await fetch(buildApiUrl('/chat/tts'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Token ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        text,
+        ...(options?.provider ? { provider: options.provider } : {}),
+        ...(options?.characterId ? { character_id: options.characterId } : {}),
+        ...(options?.emotion ? { emotion: options.emotion } : {}),
+      }),
+    });
+    if (!response.ok) {
+      let message = `TTS failed (${response.status})`;
+      try {
+        const data = await response.json();
+        if (data?.error) message = data.error;
+      } catch {
+        // 非 JSON 错误体，保留默认信息
+      }
+      throw new Error(message);
+    }
+    return response.blob();
+  }
+
   async sendMessage(data: SendMessageRequest): Promise<ApiResponse<{ ai_message: ApiMessage; chat_session_id?: string }>> {
     const attachments = data.attachments?.length
       ? data.attachments
@@ -981,8 +1136,21 @@ class ApiService {
       const decoder = new TextDecoder();
       let buffer = '';
       let chatSessionId: string | undefined;
+      // 收到 done 即终止本轮读取：后端 done 后连接可能不立刻关闭，
+      // 继续 reader.read() 会挂起，导致 isLoading 无法复位（停止按钮/“正在输入”卡死）。
+      let turnFinished = false;
 
-      while (true) {
+      const handleEvent = (event: StreamMessageEvent) => {
+        if (event.type === 'session') {
+          chatSessionId = String(event.chat_session_id);
+        }
+        handlers.onEvent(event);
+        if (event.type === 'done' || event.type === 'error') {
+          turnFinished = true;
+        }
+      };
+
+      while (!turnFinished) {
         const { done, value } = await reader.read();
         if (done) {
           break;
@@ -997,22 +1165,22 @@ class ApiService {
           if (!trimmed) {
             continue;
           }
-
-          const event = JSON.parse(trimmed) as StreamMessageEvent;
-          if (event.type === 'session') {
-            chatSessionId = String(event.chat_session_id);
+          handleEvent(JSON.parse(trimmed) as StreamMessageEvent);
+          if (turnFinished) {
+            break;
           }
-          handlers.onEvent(event);
         }
-      }
 
-      const finalChunk = buffer.trim();
-      if (finalChunk) {
-        const event = JSON.parse(finalChunk) as StreamMessageEvent;
-        if (event.type === 'session') {
-          chatSessionId = String(event.chat_session_id);
+        // 尾部没有换行符的完整事件（尤其 done）也必须立即处理，
+        // 否则会被误判为"不完整行"留在 buffer，循环继续 read() 挂起。
+        if (!turnFinished && buffer.trim()) {
+          try {
+            handleEvent(JSON.parse(buffer.trim()) as StreamMessageEvent);
+            buffer = '';
+          } catch {
+            // 不完整 JSON，等待后续数据块补齐。
+          }
         }
-        handlers.onEvent(event);
       }
 
       return { data: { chat_session_id: chatSessionId } };
@@ -1237,8 +1405,189 @@ class ApiService {
     return { data: undefined };
   }
 
-  async readSoulFile(characterId: string, path: string): Promise<ApiResponse<MemoryExplorerFile>> {
+  // ------------------------------------------------------------------
+  // 语音设置：用户级引擎配置 + 音色库（角色经 tts_config.voice_model_id 引用）
+  // ------------------------------------------------------------------
+
+  async getTtsSettings(): Promise<ApiResponse<TtsServiceSettings>> {
+    const response = await this.request<ApiTtsServiceSettings>('/tts-settings/me');
+    if (response.data) {
+      return { data: normalizeTtsServiceSettings(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async updateTtsSettings(data: Partial<TtsServiceSettings>): Promise<ApiResponse<TtsServiceSettings>> {
+    const response = await this.request<ApiTtsServiceSettings>('/tts-settings/me', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        default_provider: data.defaultProvider,
+        genie_url: data.genieUrl,
+        gptsovits_url: data.gptsovitsUrl,
+        indextts_url: data.indexttsUrl,
+      }),
+    });
+    if (response.data) {
+      return { data: normalizeTtsServiceSettings(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async testTtsEngine(engine: TtsEngine): Promise<ApiResponse<TtsEngineTestResult>> {
+    return this.request<TtsEngineTestResult>('/tts-settings/test', {
+      method: 'POST',
+      body: JSON.stringify({ engine }),
+    });
+  }
+
+  async listTtsVoiceModels(): Promise<ApiResponse<TtsVoiceModel[]>> {
+    const response = await this.request<ApiTtsVoiceModel[]>('/tts-voice-models');
+    if (response.data) {
+      return { data: response.data.map(normalizeTtsVoiceModel) };
+    }
+    return { data: undefined };
+  }
+
+  async createTtsVoiceModel(
+    data: Omit<TtsVoiceModel, 'id' | 'conversionStatus' | 'conversionError' | 'createdAt' | 'updatedAt'>,
+  ): Promise<ApiResponse<TtsVoiceModel>> {
+    const response = await this.request<ApiTtsVoiceModel>('/tts-voice-models', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: data.name,
+        engine: data.engine,
+        model_version: data.modelVersion,
+        language: data.language,
+        voice_name: data.voiceName,
+        onnx_model_dir: data.onnxModelDir,
+        ref_audio_path: data.refAudioPath,
+        ref_audio_text: data.refAudioText,
+        ref_audio_language: data.refAudioLanguage,
+        emotions: data.emotions.map((emotion) => ({
+          name: emotion.name,
+          ref_audio_path: emotion.refAudioPath,
+          ref_audio_text: emotion.refAudioText,
+          ref_audio_language: emotion.refAudioLanguage,
+        })),
+      }),
+    });
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async updateTtsVoiceModel(id: number, data: Partial<TtsVoiceModel>): Promise<ApiResponse<TtsVoiceModel>> {
+    const response = await this.request<ApiTtsVoiceModel>(`/tts-voice-models/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name: data.name,
+        engine: data.engine,
+        model_version: data.modelVersion,
+        language: data.language,
+        voice_name: data.voiceName,
+        onnx_model_dir: data.onnxModelDir,
+        ref_audio_path: data.refAudioPath,
+        ref_audio_text: data.refAudioText,
+        ref_audio_language: data.refAudioLanguage,
+        ...(data.emotions
+          ? {
+              emotions: data.emotions.map((emotion) => ({
+                name: emotion.name,
+                ref_audio_path: emotion.refAudioPath,
+                ref_audio_text: emotion.refAudioText,
+                ref_audio_language: emotion.refAudioLanguage,
+              })),
+            }
+          : {}),
+      }),
+    });
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async deleteTtsVoiceModel(id: number): Promise<ApiResponse<void>> {
+    return this.request(`/tts-voice-models/${id}`, { method: 'DELETE' });
+  }
+
+  async uploadTtsRefAudio(file: File): Promise<ApiResponse<{ path: string; name: string }>> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.request<{ path: string; name: string }>('/tts-voice-models/upload_ref_audio/', {
+      method: 'POST',
+      body: formData,
+    });
+    if (response.data) {
+      return { data: response.data };
+    }
+    return { data: undefined };
+  }
+
+  async uploadTtsOnnxDir(
+    files: File[],
+    relativePaths: string[],
+    name: string,
+  ): Promise<ApiResponse<{ path: string; name: string }>> {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    relativePaths.forEach((rel) => formData.append('relative_paths[]', rel));
+    if (name) {
+      formData.append('name', name);
+    }
+    const response = await this.request<{ path: string; name: string }>('/tts-voice-models/upload_onnx_dir/', {
+      method: 'POST',
+      body: formData,
+    });
+    if (response.data) {
+      return { data: response.data };
+    }
+    return { data: undefined };
+  }
+
+  async uploadConvertVoiceModel(data: UploadConvertRequest): Promise<ApiResponse<TtsVoiceModel>> {
+    const formData = new FormData();
+    formData.append('ckpt', data.ckpt);
+    formData.append('pth', data.pth);
+    if (data.refAudio) {
+      formData.append('ref_audio', data.refAudio);
+    }
+    if (data.name) {
+      formData.append('name', data.name);
+    }
+    if (data.language) {
+      formData.append('language', data.language);
+    }
+    if (data.modelVersion) {
+      formData.append('model_version', data.modelVersion);
+    }
+    if (data.refAudioText) {
+      formData.append('ref_audio_text', data.refAudioText);
+    }
+    const response = await this.request<ApiTtsVoiceModel>('/tts-voice-models/upload_convert', {
+      method: 'POST',
+      body: formData,
+    });
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async pollTtsConversionStatus(voiceModelId: number): Promise<ApiResponse<TtsVoiceModel>> {
+    const response = await this.request<ApiTtsVoiceModel>(`/tts-voice-models/${voiceModelId}/conversion_status`);
+    if (response.data) {
+      return { data: normalizeTtsVoiceModel(response.data) };
+    }
+    return { data: undefined };
+  }
+
+  async readSoulFile(characterId: string, path: string, offset = 0): Promise<ApiResponse<MemoryExplorerFile>> {
     const query = new URLSearchParams({ path, max_chars: '12000' });
+    if (offset > 0) {
+      query.set('offset', String(offset));
+    }
     const response = await this.request<ApiMemoryExplorerFile>(`/characters/${characterId}/soul_file?${query.toString()}`);
     if (response.data) {
       return { data: normalizeMemoryExplorerFile(response.data) };
@@ -1246,14 +1595,29 @@ class ApiService {
     return { data: undefined };
   }
 
-  async uploadKnowledgeAssets(characterId: string, files: File[]): Promise<ApiResponse<KnowledgeAsset[]>> {
+  async uploadKnowledgeAssets(
+    characterId: string,
+    files: File[],
+    relativePaths?: string[],
+  ): Promise<ApiResponse<KnowledgeAsset[]>> {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
+    if (relativePaths && relativePaths.length === files.length) {
+      formData.append('relative_paths', JSON.stringify(relativePaths));
+    }
 
     const response = await this.request<ApiKnowledgeAssetUploadResponse>(`/characters/${characterId}/knowledge_assets`, {
       method: 'POST',
       body: formData,
     });
+    if (response.data) {
+      return { data: (response.data.assets || []).map(normalizeKnowledgeAsset) };
+    }
+    return { data: undefined };
+  }
+
+  async listKnowledgeAssets(characterId: string): Promise<ApiResponse<KnowledgeAsset[]>> {
+    const response = await this.request<{ assets?: ApiKnowledgeAsset[] }>(`/characters/${characterId}/knowledge_assets`);
     if (response.data) {
       return { data: (response.data.assets || []).map(normalizeKnowledgeAsset) };
     }

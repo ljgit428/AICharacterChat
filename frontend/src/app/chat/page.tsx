@@ -132,12 +132,16 @@ function DiscordChatPageContent() {
 
   const handleSelectCharacter = useCallback(
     (characterId: string) => {
-      dispatch(clearChat());
+      // 不能在 setState updater 里 dispatch（渲染阶段副作用，React 会报错）；
+      // 用当前 state 比较：重复点击已选中的角色不清空，否则历史不重载会白屏。
+      if (selectedCharacterId !== characterId) {
+        dispatch(clearChat());
+      }
       setSelectedCharacterId(characterId);
       setSelectedSessionId(latestSessionByCharacter.get(characterId)?.id || null);
       setIsSidebarOpen(false);
     },
-    [dispatch, latestSessionByCharacter]
+    [dispatch, latestSessionByCharacter, selectedCharacterId]
   );
 
   useEffect(() => {

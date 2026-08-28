@@ -1,0 +1,3 @@
+# Optional local speech stack for the realtime chat mode (CPU only).
+# Install with: pip install -r backend/requirements-asr.txt
+faster-whisper>=1.0,<2

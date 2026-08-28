@@ -197,6 +197,33 @@ DEV_AUTO_LOGIN_ENABLED = env.bool('DEV_AUTO_LOGIN_ENABLED', default=DEBUG)
 DEV_AUTO_LOGIN_USERNAME = env('DEV_AUTO_LOGIN_USERNAME', default='demo_user')
 DEV_AUTO_LOGIN_EMAIL = env('DEV_AUTO_LOGIN_EMAIL', default='demo@example.com')
 
+# Realtime voice input (ASR). The package dependency is optional and lives in
+# backend/requirements-asr.txt; with it missing the endpoints degrade to a
+# readable readiness hint instead of erroring.
+ASR_PROVIDER = env('ASR_PROVIDER', default='faster_whisper')
+# base 是延迟实测后的默认档（短句中位 ~1.4s，见 docs/latency-v0.1.3.md）；
+# small 质量更好但约 3 倍延迟，追求识别质量时手动切换。
+ASR_MODEL = env('ASR_MODEL', default='base')
+ASR_DEVICE = env('ASR_DEVICE', default='cpu')
+ASR_COMPUTE_TYPE = env('ASR_COMPUTE_TYPE', default='int8')
+
+# Realtime voice reply (TTS). Engines run as standalone HTTP services;
+# Django only talks to them. genie = Genie-TTS (GPT-SoVITS ONNX, CPU by
+# default — start scripts/genie_server.py with --device cuda for NVIDIA GPU;
+# supports v2/v2ProPlus converted characters); gptsovits = official
+# api_v2 (all four model versions, best deployed on a GPU); indextts reserved.
+TTS_PROVIDER = env('TTS_PROVIDER', default='genie')
+TTS_GENIE_URL = env('TTS_GENIE_URL', default='http://127.0.0.1:8050')
+# 每个角色的模型目录/参考音频/语言是角色属性，只在角色编辑页「语音模型」
+# 区块配置（Character.tts_config），不设全局环境变量兜底。
+TTS_GPTSOVITS_URL = env('TTS_GPTSOVITS_URL', default='http://127.0.0.1:9880')
+TTS_GPTSOVITS_TEXT_LANG = env('TTS_GPTSOVITS_TEXT_LANG', default='zh')
+TTS_GPTSOVITS_REF_AUDIO_PATH = env('TTS_GPTSOVITS_REF_AUDIO_PATH', default='')
+TTS_GPTSOVITS_PROMPT_TEXT = env('TTS_GPTSOVITS_PROMPT_TEXT', default='')
+TTS_GPTSOVITS_PROMPT_LANG = env('TTS_GPTSOVITS_PROMPT_LANG', default='zh')
+TTS_INDEXTTS_URL = env('TTS_INDEXTTS_URL', default='')
+TTS_INDEXTTS_TEXT_FIELD = env('TTS_INDEXTTS_TEXT_FIELD', default='text')
+
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'

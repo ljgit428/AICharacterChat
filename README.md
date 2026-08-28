@@ -70,24 +70,31 @@ See `backend/chat/urls.py` for the full route map.
 
 ```
 backend/
-  prismate/            # Django project (settings, celery, urls)
-  chat/                # models, views, serializers, graphql, tasks, soul, memory
-  chat/character_reduce.py   # reduce pipeline (tier → batch notes → merge → PrisMateDraft)
-  chat/memory/filesystem.py  # Memory Tools filesystem backends (character / staged uploads)
-  chat/management/commands/run_character_reduce.py  # run reduce with a user's real model config
-  scripts/             # pure-rules map prototype (character_file_indexer.py) + reduce prototype
+  chat/                # the single business app: models, views, graphql, tasks,
+                       #   soul, asr/tts, character_reduce, memory/, tests/
+  prismate/            # Django project assembly (settings, celery, root urls)
+  scripts/             # standalone tooling (prototypes, genie_server launcher)
 frontend/src/
-  app/                 # Next.js routes (/, /create-character, /edit-character/[id], /memory)
-  components/          # ChatInterface, ChatWindow, MemoryPanel, SoulPanel, ModelApiSettingsPanel…
+  app/                 # Next.js routes (/, /chat, /create-character,
+                       #   /edit-character/[id], /memory, /settings)
+  components/          # ChatInterface, ChatWindow, MemoryPanel, SoulPanel…
+  constants/           # compile-time constants + provider presets
   store/               # Redux Toolkit slices
   i18n/                # zh-CN / en-US
   utils/api.ts         # REST client
   lib/apolloClient.ts  # GraphQL client
-spec/memory-system-spec.md
-ARCHITECTURE.md        # internal data-flow reference
+docs/
+  architecture.md      # internal data-flow reference
+  design/              # system & feature specs (memory system, natural chat…)
+  guides/              # daily-commands cheat-sheet
+  benchmarks/          # latency reports
+  versions/            # release notes
 ```
+
+See [`docs/project-structure.md`](./docs/project-structure.md) for the full
+directory responsibility spec — what belongs where.
 
 ## Daily Commands
 
-See [`everydaycommand.md`](./everydaycommand.md) for the full cheat-sheet (setup, run,
+See [`docs/guides/daily-commands.md`](./docs/guides/daily-commands.md) for the full cheat-sheet (setup, run,
 migrate, troubleshooting).

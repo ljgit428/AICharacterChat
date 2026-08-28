@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Character, Message, MessageAttachment, RootState, ToolCallInfo } from '@/types';
+import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Expand, FileText, ImageIcon, Music, Plus, Sparkles, Square, Video, X } from 'lucide-react';
+import { BrainCircuit, Check, Cpu, Download, Expand, FileText, ImageIcon, Loader2, Music, Plus, Sparkles, Square, Video, Volume2, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { useI18n } from '@/i18n/provider';
@@ -24,6 +24,14 @@ interface ImmersiveChatWindowProps {
   memoryNotice?: string;
   /** 联网搜索已开启但未配置 key 时的一次性提示（memory/search v2）。 */
   webSearchHint?: string;
+  /** 可选的主模型（text 角色）快速切换：配置列表 + 当前生效项 + 切换回调。 */
+  modelConfigs?: ModelConfig[];
+  activeTextModel?: ModelConfig | null;
+  onTextModelChange?: (modelId: string) => void | Promise<void>;
+  /** 单段朗读（气泡喇叭按钮）：不依赖全局自动朗读开关。 */
+  onSpeakSegment?: (text: string, emotion?: string) => void;
+  /** 单段音频下载（气泡下载按钮）：合成该段并保存为 .wav。 */
+  onDownloadSegment?: (text: string) => void;
 }
 
 export interface PendingAttachment {
@@ -101,6 +109,12 @@ function formatFileSize(size: number) {
   return `${(size / 1024 / 1024).toFixed(2)} MB`;
 }
 
+/**
+ * 角色长回复按自然段落拆分为多个气泡：空行分隔的块（markdown 段落/列表）。
+ * 整段保持原样（不切句），气泡之间留小间距，配合每段喇叭/下载按钮。
+ */
+import { splitReplyParagraphs } from '@/utils/replyParagraphs';
+
 function buildPreviewAttachment(attachment: PendingAttachment | MessageAttachment): PreviewAttachment | null {
   if ('file' in attachment) {
     if (!attachment.previewUrl || attachment.kind === 'text') {
@@ -141,12 +155,18 @@ export default function ImmersiveChatWindow({
   pendingQueueTexts,
   memoryNotice,
   webSearchHint,
+  modelConfigs,
+  activeTextModel,
+  onTextModelChange,
+  onSpeakSegment,
+  onDownloadSegment,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const COMPOSER_MAX_HEIGHT = 192; // ~8 lines of leading-6 + py-2.5
   const [draftMessage, setDraftMessage] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -154,6 +174,26 @@ export default function ImmersiveChatWindow({
   const [previewAttachment, setPreviewAttachment] = useState<PreviewAttachment | null>(null);
   const messages = useSelector((state: RootState) => state.chat.messages);
   const character = useSelector((state: RootState) => state.chat.character);
+  const chatError = useSelector((state: RootState) => state.chat.error);
+  // 历史加载一旦出现过 loading，空状态就保持占位条直到消息真正渲染。
+  // 否则"loading 复位但消息未落地"的中间帧会闪出空场景卡
+  // （2026-08-24 用户视频逐帧实证：spinner→场景卡1帧→历史）。
+  // 注意：loading 结束后经过缓冲窗口（loadingSettled）就允许回落到场景卡，
+  // 否则新会话（无历史消息）会永远卡在"正在准备对话"，场景卡不出现。
+  const [sawInitialLoading, setSawInitialLoading] = useState(false);
+  const [loadingSettled, setLoadingSettled] = useState(false);
+  useEffect(() => {
+    if (isLoading) {
+      setSawInitialLoading(true);
+      setLoadingSettled(false);
+    } else if (sawInitialLoading && !loadingSettled) {
+      // 给消息落地留出缓冲窗口，超时后回退到场景卡（空会话可见）。
+      const timer = window.setTimeout(() => setLoadingSettled(true), 800);
+      return () => window.clearTimeout(timer);
+    }
+  }, [isLoading, sawInitialLoading, loadingSettled]);
+  const showLoadingPlaceholder =
+    messages.length === 0 && (isLoading || (sawInitialLoading && !chatError && !loadingSettled));
 
   const usageStats = useMemo(() => {
     const withUsage = messages.filter(
@@ -179,7 +219,32 @@ export default function ImmersiveChatWindow({
     pendingAttachmentsRef.current = pendingAttachments;
   }, [pendingAttachments]);
 
-  useEffect(() => {
+  // 打开会话/批量加载历史时必须用 useLayoutEffect：在浏览器绘制前同步钉底，
+  // 否则会先画出一帧顶部再跳底部（可见闪烁）。逐条新消息仍走平滑滚动。
+  // 头像等图片晚于首帧加载会把内容再撑高，下一帧与 250ms 各补钉一次。
+  const lastAnchorIdRef = useRef<string | null>(null);
+  const lastCountRef = useRef(0);
+  useLayoutEffect(() => {
+    const firstId = messages[0]?.id ?? null;
+    const isBulkChange =
+      firstId !== lastAnchorIdRef.current || messages.length - lastCountRef.current > 1;
+    lastAnchorIdRef.current = firstId;
+    lastCountRef.current = messages.length;
+    const container = scrollAreaRef.current;
+    if (isBulkChange) {
+      if (!container) return;
+      container.scrollTop = container.scrollHeight;
+      const raf = requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+      });
+      const timer = window.setTimeout(() => {
+        container.scrollTop = container.scrollHeight;
+      }, 250);
+      return () => {
+        cancelAnimationFrame(raf);
+        window.clearTimeout(timer);
+      };
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
@@ -227,8 +292,9 @@ export default function ImmersiveChatWindow({
     // explicitText comes straight from the textarea element on Enter so a
     // state flush lag can never drop a submission.
     const message = (explicitText ?? draftMessage).trim();
-    if (!message && pendingAttachments.length === 0 && !isFirstMessage) {
-      return;
+    if (!message && pendingAttachments.length === 0) {
+      if (!isFirstMessage) return;
+      // isFirstMessage 且空文本 → 发送问候（角色先开口）
     }
 
     onSendMessage(message, pendingAttachments);
@@ -245,9 +311,6 @@ export default function ImmersiveChatWindow({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      if (isFirstMessage) {
-        return;
-      }
       submitMessage(event.currentTarget.value);
     }
   };
@@ -370,6 +433,49 @@ export default function ImmersiveChatWindow({
     return allGroups;
   }, []);
 
+  // 左侧索引条（minimap）：每个用户发言为一格，预览该轮"用户消息 / 助手回复"。
+  const turns = useMemo(() => {
+    const result: Array<{
+      key: string;
+      anchor: string;
+      userPreview: string;
+      assistantPreview: string;
+    }> = [];
+    groups.forEach((group, index) => {
+      if (group.role !== 'user') return;
+      const userPreview = group.messages
+        .map((message) => message.content)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      let assistantPreview = '';
+      for (let next = index + 1; next < groups.length; next += 1) {
+        if (groups[next].role === 'user') break;
+        if (groups[next].role === 'assistant') {
+          assistantPreview = groups[next].messages
+            .map((message) => message.content)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          break;
+        }
+      }
+      result.push({
+        key: group.messages[0].id,
+        anchor: `${group.senderKey}-${group.messages[0].id}`,
+        userPreview,
+        assistantPreview,
+      });
+    });
+    return result;
+  }, [groups]);
+
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const jumpToTurn = (anchor: string) => {
+    const target = scrollAreaRef.current?.querySelector<HTMLElement>(`[data-chat-anchor="${anchor}"]`);
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(243,247,250,0.95))] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
       <div className="border-b border-slate-200/70 bg-[radial-gradient(circle_at_top,#ffffff_0%,#f7fafc_100%)] px-5 py-4">
@@ -387,8 +493,42 @@ export default function ImmersiveChatWindow({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-5 md:px-6">
+      <div className="relative min-h-0 flex-1">
+        {turns.length > 1 && (
+          <div className="absolute left-1 top-1/2 z-10 hidden -translate-y-1/2 flex-col items-center gap-1 md:flex">
+            {turns.map((turn) => (
+              <div key={turn.key} className="group/tick relative flex items-center">
+                <button
+                  type="button"
+                  onClick={() => jumpToTurn(turn.anchor)}
+                  className="flex h-3 w-5 items-center justify-center"
+                  title={turn.userPreview}
+                >
+                  <span className="h-0.5 w-2.5 rounded-full bg-slate-400/60 transition-all group-hover/tick:h-1 group-hover/tick:w-4 group-hover/tick:bg-slate-700" />
+                </button>
+                <div className="pointer-events-none absolute left-6 z-20 hidden w-64 rounded-2xl border border-white/10 bg-slate-950/90 px-4 py-3 shadow-[0_18px_50px_rgba(15,23,42,0.4)] backdrop-blur group-hover/tick:block">
+                  <p className="line-clamp-2 text-sm font-medium leading-6 text-white">
+                    {turn.userPreview || copy.immersiveChat.minimapNoText}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
+                    {turn.assistantPreview || copy.immersiveChat.minimapNoReply}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div ref={scrollAreaRef} className="h-full overflow-y-auto px-4 py-5 md:px-6">
         {messages.length === 0 ? (
+          showLoadingPlaceholder ? (
+            // 历史加载中：不渲染场景卡，避免"先看到空/顶部内容再跳底部"的闪现。
+            <div className="flex h-full items-center justify-center">
+              <div className="flex items-center gap-2 rounded-full bg-white/80 px-4 py-2 text-sm text-slate-500 ring-1 ring-slate-200">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{copy.immersiveChat.preparingConversation}</span>
+              </div>
+            </div>
+          ) : (
           <div className="flex h-full items-center justify-center">
             <div className="max-w-xl rounded-[2rem] border border-white/80 bg-white/80 px-6 py-8 text-center shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
               <div className="mx-auto flex h-20 w-20 items-center justify-center overflow-hidden rounded-[1.5rem] bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 shadow-sm">
@@ -413,6 +553,7 @@ export default function ImmersiveChatWindow({
               </p>
             </div>
           </div>
+          )
         ) : (
           <div className="space-y-6">
             {groups.map((group) => {
@@ -429,7 +570,11 @@ export default function ImmersiveChatWindow({
               );
 
               return (
-                <div key={`${group.senderKey}-${group.messages[0].id}`} className="space-y-3">
+                <div
+                  key={`${group.senderKey}-${group.messages[0].id}`}
+                  data-chat-anchor={`${group.senderKey}-${group.messages[0].id}`}
+                  className="space-y-3"
+                >
                   {metaMessages.length > 0 && (
                     <div className="max-w-[min(48rem,86vw)] space-y-2">
                       {metaMessages.map((message) => (
@@ -462,27 +607,67 @@ export default function ImmersiveChatWindow({
                         </div>
 
                         <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
-                          {contentMessages.map((message, index) => (
-                            <div
-                              key={message.id}
-                              className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
-                                group.role === 'user'
-                                  ? 'bg-slate-900 text-white'
-                                  : 'border border-white/80 bg-white/90 text-slate-800'
-                              } ${
-                                group.role === 'user'
-                                  ? index === contentMessages.length - 1
-                                    ? 'rounded-br-md'
-                                    : ''
-                                  : index === contentMessages.length - 1
-                                    ? 'rounded-bl-md'
-                                    : ''
-                              }`}
-                            >
-                              <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
-                              {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
-                            </div>
-                          ))}
+                          {contentMessages.map((message, index) => {
+                            // 角色长回复按自然段落拆成多个小气泡，每段带朗读/下载按钮；
+                            // 用户消息保持单气泡整段显示。
+                            const paragraphs =
+                              group.role !== 'user' && message.content
+                                ? splitReplyParagraphs(message.content)
+                                : [message.content || ''];
+                            const isLast = index === contentMessages.length - 1;
+                            const bubbleBase =
+                              group.role === 'user'
+                                ? 'bg-slate-900 text-white'
+                                : 'border border-white/80 bg-white/90 text-slate-800';
+                            const corner =
+                              group.role === 'user'
+                                ? isLast
+                                  ? 'rounded-br-md'
+                                  : ''
+                                : isLast
+                                  ? 'rounded-bl-md'
+                                  : '';
+
+                            return (
+                              <div key={message.id} className={`flex flex-col gap-1.5 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
+                                {paragraphs.map((paragraph, paraIndex) => (
+                                  <div
+                                    key={`${message.id}-p${paraIndex}`}
+                                    className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${bubbleBase} ${
+                                      paragraphs.length > 1 && paraIndex === paragraphs.length - 1 ? corner : ''
+                                    }`}
+                                  >
+                                    <div className="flex flex-col gap-1">
+                                      <p className="whitespace-pre-wrap">{paragraph}</p>
+                                      {group.role !== 'user' && onSpeakSegment && (
+                                        <div className="flex items-center gap-1 pt-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => onSpeakSegment(paragraph)}
+                                            title={copy.immersiveChat.speakSegment}
+                                            className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                                          >
+                                            <Volume2 className="h-3.5 w-3.5" />
+                                          </button>
+                                          {onDownloadSegment && (
+                                            <button
+                                              type="button"
+                                              onClick={() => onDownloadSegment(paragraph)}
+                                              title={copy.immersiveChat.downloadSegment}
+                                              className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
+                                            >
+                                              <Download className="h-3.5 w-3.5" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -522,6 +707,7 @@ export default function ImmersiveChatWindow({
         )}
 
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       <div className="border-t border-slate-200/70 bg-white/80 p-4 backdrop-blur">
@@ -616,17 +802,15 @@ export default function ImmersiveChatWindow({
             accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.xml,.ini,.cfg,.conf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,text/*,image/*,audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,video/*"
             multiple
             onChange={handleAttachmentChange}
-            disabled={isFirstMessage}
           />
           <textarea
             ref={textareaRef}
             className="max-h-48 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 pb-1 pt-1.5 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-            placeholder={isFirstMessage ? copy.immersiveChat.clickStart : copy.immersiveChat.writeNextMessage}
+            placeholder={copy.immersiveChat.writeNextMessage}
             rows={2}
             value={draftMessage}
             onChange={(event) => setDraftMessage(event.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isFirstMessage}
             title={copy.immersiveChat.enterToSend}
           />
           <div className="mt-1 flex items-center justify-between gap-3 px-1">
@@ -635,11 +819,12 @@ export default function ImmersiveChatWindow({
                 type="button"
                 onClick={() => attachmentInputRef.current?.click()}
                 className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={isFirstMessage}
                 title={copy.immersiveChat.attachFile}
               >
                 <Plus className="h-5 w-5" />
               </button>
+            </div>
+            <div className="flex items-center gap-2">
               {usageStats && (
                 <ComposerContextRing
                   progress={usageStats.contextTokens / contextWindow}
@@ -662,28 +847,82 @@ export default function ImmersiveChatWindow({
                   ]}
                 />
               )}
+              {modelConfigs && modelConfigs.length > 0 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setModelMenuOpen((open) => !open)}
+                    title={copy.immersiveChat.mainModelTitle}
+                    className="flex h-9 max-w-[11rem] items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                  >
+                    <Cpu className="h-3.5 w-3.5 flex-shrink-0 text-slate-400" />
+                    <span className="truncate">{activeTextModel?.name || copy.immersiveChat.mainModelNone}</span>
+                  </button>
+                  {modelMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setModelMenuOpen(false)} />
+                      <div className="absolute bottom-11 right-0 z-20 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.18)]">
+                        <p className="px-3 pb-1 pt-2.5 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
+                          {copy.immersiveChat.mainModel}
+                        </p>
+                        <div className="max-h-56 overflow-y-auto pb-1">
+                          {modelConfigs.map((config) => (
+                            <button
+                              key={config.id}
+                              type="button"
+                              onClick={() => {
+                                setModelMenuOpen(false);
+                                void onTextModelChange?.(config.id);
+                              }}
+                              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                config.id === activeTextModel?.id
+                                  ? 'bg-sky-50 text-sky-700'
+                                  : 'text-slate-700 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{config.name}</span>
+                              <span className="flex-shrink-0 text-[10px] uppercase tracking-wide text-slate-400">
+                                {config.provider}
+                              </span>
+                              {config.id === activeTextModel?.id && (
+                                <Check className="h-3.5 w-3.5 flex-shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+              {isLoading ? (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  disabled={!onStop}
+                  title={copy.immersiveChat.stop}
+                  aria-label={copy.immersiveChat.stop}
+                  className="flex h-9 items-center gap-2 rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Square className="h-3.5 w-3.5" fill="currentColor" />
+                  {copy.immersiveChat.stop}
+                </button>
+              ) : (
+                <button
+                  className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  onClick={() => submitMessage()}
+                  disabled={
+                    !isFirstMessage &&
+                    !draftMessage.trim() &&
+                    pendingAttachments.length === 0
+                  }
+                >
+                  {isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0
+                    ? copy.immersiveChat.start
+                    : copy.immersiveChat.send}
+                </button>
+              )}
             </div>
-            {isLoading ? (
-              <button
-                type="button"
-                onClick={onStop}
-                disabled={!onStop}
-                title={copy.immersiveChat.stop}
-                aria-label={copy.immersiveChat.stop}
-                className="flex h-9 items-center gap-2 rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Square className="h-3.5 w-3.5" fill="currentColor" />
-                {copy.immersiveChat.stop}
-              </button>
-            ) : (
-              <button
-                className="rounded-full bg-slate-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                onClick={() => submitMessage()}
-                disabled={!isFirstMessage && !draftMessage.trim() && pendingAttachments.length === 0}
-              >
-                {isFirstMessage ? copy.immersiveChat.start : copy.immersiveChat.send}
-              </button>
-            )}
           </div>
         </div>
         {composerError && (

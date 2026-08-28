@@ -1,28 +1,28 @@
-# Ignore development notes folder
+# ===== Local-only scratch space ======================================
+# tmp/ holds every transient local artifact: ad-hoc test media
+# (tmp/test-assets), GUI verification screenshots
+# (tmp/gui-test-screenshots), archived one-off junk (tmp/archive).
+# Nothing under tmp/ is ever committed.
+tmp/
+
+# Private development notes
 dev_notes/
 
 # Code assistant scratch plans
 .zcode/
 
-# Ignore temporary cleanup script
-clean_comments.py
-
-# Local test artifacts and transient UI verification outputs
-tmp_Photos.sqlite
-tmp_ui_screenshots/
-gui-test-screenshots/
-frontend/logs/
+# One-off diagnostic scripts and screenshots dropped at the repo root
+tmp_*.ps1
 step*.png
 
-# One-off PowerShell diagnostics and cleanup scripts (defender, orphan chrome, IO scan)
-tmp_*.ps1
-
-# Throwaway browser-test scripts and their outputs
+# ===== Frontend transients ===========================================
+frontend/logs/
 frontend/scripts/
 frontend/test-results/
 
-# Throwaway source material dropped at the repo root for ad-hoc testing
-test/
-
-# Leftover from a manual login via curl/python during debugging
-backend/cookies.txt
+# ===== Backend local assets ==========================================
+# Downloaded TTS/ASR model weights + HuggingFace cache live here.
+backend/ml_models/
+# Genie-TTS base resources (G2P/HuBERT/speaker encoder, ~392MB) auto-downloaded
+# into the working dir on first start; reuse via GENIE_DATA_DIR, never commit.
+backend/GenieData/

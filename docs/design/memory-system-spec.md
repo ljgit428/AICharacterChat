@@ -938,7 +938,7 @@ These were floated during the rounds and deliberately deferred:
   the PR.
 
 Frontend smoke relies on the backend integration test suite in
-`backend/chat/tests_memory.py` (the Celery `sync_long_term_memory`
+`backend/chat/tests/test_memory.py` (the Celery `sync_long_term_memory`
 happy-path test exercises the same full pipeline that a browser
 smoke test would assert on). Browser-driven Playwright smoke was
 originally planned under `frontend/e2e` but was removed before

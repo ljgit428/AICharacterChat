@@ -45,6 +45,10 @@ export interface MemoryExplorerFile {
   fileUrl?: string;
   mimeType?: string;
   error?: string;
+  offset?: number;
+  nextOffset?: number;
+  totalChars?: number;
+  hasMore?: boolean;
 }
 
 export interface KnowledgeAsset {
@@ -111,6 +115,8 @@ export interface Character {
   avatarUrl?: string;
   /** 角色级联网搜索三态开关：null/undefined = 跟随用户全局设置 */
   enableWebSearch?: boolean | null;
+  /** 角色级语音模型配置（引擎/模型版本/音色名/ONNX 目录/参考音频/情感组），空 = 跟随全局 */
+  ttsConfig?: Record<string, unknown> | null;
   fileUrl?: string;
   filePreviewUrl?: string;
   affiliation: string;
@@ -143,6 +149,59 @@ export interface ModelConfig {
 }
 
 export type ModelRoleAssignments = Record<ModelRoleKey, ModelConfig | null>;
+
+export type TtsEngine = 'genie' | 'gptsovits' | 'indextts';
+
+export type TtsConversionStatus = '' | 'pending' | 'converting' | 'ready' | 'failed';
+
+// 设置页「语音设置」里登记的音色；角色通过 tts_config.voice_model_id 引用。
+export interface TtsVoiceEmotionConfig {
+  name: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+}
+
+export interface TtsVoiceModel {
+  id: number;
+  name: string;
+  engine: TtsEngine;
+  modelVersion: string;
+  language: string;
+  voiceName: string;
+  onnxModelDir: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+  emotions: TtsVoiceEmotionConfig[];
+  conversionStatus: TtsConversionStatus;
+  conversionError: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 用户级 TTS 引擎服务设置；空字段 = 跟随环境变量默认。
+export interface TtsServiceSettings {
+  defaultProvider: TtsEngine | '';
+  genieUrl: string;
+  gptsovitsUrl: string;
+  indexttsUrl: string;
+}
+
+export interface TtsEngineTestResult {
+  ok: boolean;
+  hint: string;
+}
+
+export interface UploadConvertRequest {
+  ckpt: File;
+  pth: File;
+  refAudio?: File;
+  name?: string;
+  language?: string;
+  modelVersion?: string;
+  refAudioText?: string;
+}
 
 export interface WebSearchConfig {
   id?: string;
@@ -241,6 +300,8 @@ export interface MemoryNarrative {
 
 export interface ChatState {
   messages: Message[];
+  /** 会话消息缓存：sessionId → 上次加载的消息。切换回会话时第一帧直接渲染，无加载占位。 */
+  messagesBySession: Record<string, Message[]>;
   character: Character | null;
   chatSession: ChatSession | null;
   isLoading: boolean;

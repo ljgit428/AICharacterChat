@@ -24,3 +24,19 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), sans-serif;
 }
+
+/* Indeterminate progress bar for long-running AI tasks where the backend
+   does not report a concrete percentage yet. */
+@keyframes indeterminate-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.progress-indeterminate {
+  width: 33%;
+  animation: indeterminate-slide 1.4s ease-in-out infinite;
+}

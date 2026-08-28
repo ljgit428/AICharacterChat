@@ -1,9 +1,9 @@
-﻿"use client";
+"use client";
 
 import Image from 'next/image';
 import { useState } from 'react';
 import { useQuery, useMutation, gql } from '@apollo/client';
-import { Edit2, MessageCircle, Trash2, X } from 'lucide-react';
+import { ChevronDown, Edit2, MessageCircle, Trash2, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useI18n } from '@/i18n/provider';
 
@@ -73,7 +73,7 @@ function CharacterAvatar({
 }) {
   if (!avatarUrl) {
     return (
-      <div className={`flex h-full w-full items-center justify-center bg-blue-50 text-xl font-semibold text-blue-700 ${roundedClassName}`}>
+      <div className={`flex h-full w-full items-center justify-center bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 text-xl font-semibold text-sky-700 ${roundedClassName}`}>
         {getCharacterInitial(name)}
       </div>
     );
@@ -98,8 +98,8 @@ function CharacterField({ label, value }: { label: string; value?: string | null
 
   return (
     <div className="space-y-1.5">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">{label}</p>
-      <p className="whitespace-pre-wrap text-sm leading-6 text-gray-700">{value.trim()}</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</p>
+      <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{value.trim()}</p>
     </div>
   );
 }
@@ -116,6 +116,10 @@ function CharacterDetailDialog({
   onEdit: (id: string) => void;
 }) {
   const { messages } = useI18n();
+  const hasVoiceBehavior = Boolean(
+    character.personality?.trim() || character.responseGuidelines?.trim() || character.exampleDialogue?.trim(),
+  );
+  const hasWorldLore = Boolean(character.scenario?.trim() || character.appearance?.trim());
 
   return (
     <div
@@ -124,15 +128,15 @@ function CharacterDetailDialog({
       role="presentation"
     >
       <div
-        className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-gray-200 bg-white shadow-2xl"
+        className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-slate-200 bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={`${character.name} ${messages.gallery.details}`}
       >
-        <div className="sticky top-0 z-10 flex items-start justify-between border-b border-gray-100 bg-white/95 px-6 py-5 backdrop-blur">
+        <div className="sticky top-0 z-10 flex items-start justify-between border-b border-slate-100 bg-white/95 px-6 py-5 backdrop-blur">
           <div className="flex items-start gap-4">
-            <div className="relative h-16 w-16 overflow-hidden rounded-2xl border border-gray-200 bg-gray-100">
+            <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-2xl bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 shadow-sm ring-1 ring-slate-200/70">
               <CharacterAvatar
                 name={character.name}
                 avatarUrl={character.avatarUrl}
@@ -140,16 +144,16 @@ function CharacterDetailDialog({
               />
             </div>
             <div>
-              <div className="mb-2 inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
+              <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">
                 {messages.gallery.characterOverview}
-              </div>
-              <h2 className="text-2xl font-bold text-gray-900">{character.name}</h2>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-600">{character.description || messages.gallery.noCoreBriefYet}</p>
+              </p>
+              <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">{character.name}</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">{character.description || messages.gallery.noCoreBriefYet}</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="rounded-full p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+            className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
             type="button"
             aria-label={messages.gallery.closeDetails}
           >
@@ -157,30 +161,30 @@ function CharacterDetailDialog({
           </button>
         </div>
 
-        <div className="space-y-6 px-6 py-6">
-          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5">
+        <div className="space-y-5 px-6 py-6">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-5">
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div className="space-y-3">
                 {character.affiliation?.trim() && (
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">{messages.gallery.affiliation}</p>
-                    <p className="mt-1 text-sm text-gray-700">{character.affiliation}</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{messages.gallery.affiliation}</p>
+                    <p className="mt-1 text-sm text-slate-700">{character.affiliation}</p>
                   </div>
                 )}
                 {character.userAddress?.trim() && (
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">{messages.gallery.userAddress}</p>
-                    <p className="mt-1 text-sm text-gray-700">{character.userAddress}</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{messages.gallery.userAddress}</p>
+                    <p className="mt-1 text-sm text-slate-700">{character.userAddress}</p>
                   </div>
                 )}
               </div>
               <div className="flex flex-wrap gap-2 md:max-w-[40%] md:justify-end">
                 {character.tags?.length ? character.tags.map((tag) => (
-                  <span key={tag} className="rounded-full bg-white px-3 py-1 text-xs font-medium text-gray-600 ring-1 ring-gray-200">
+                  <span key={tag} className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-600 ring-1 ring-slate-200">
                     {tag}
                   </span>
                 )) : (
-                  <span className="text-sm text-gray-400">{messages.gallery.noTags}</span>
+                  <span className="text-sm text-slate-400">{messages.gallery.noTags}</span>
                 )}
               </div>
             </div>
@@ -188,7 +192,7 @@ function CharacterDetailDialog({
             <div className="mt-5 flex flex-wrap gap-3">
               <button
                 onClick={() => onChat(character.id)}
-                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-800"
                 type="button"
               >
                 <MessageCircle size={16} />
@@ -196,7 +200,7 @@ function CharacterDetailDialog({
               </button>
               <button
                 onClick={() => onEdit(character.id)}
-                className="inline-flex items-center gap-2 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/90 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100"
                 type="button"
               >
                 <Edit2 size={16} />
@@ -205,26 +209,32 @@ function CharacterDetailDialog({
             </div>
           </div>
 
-          <details className="rounded-2xl border border-gray-200 bg-white p-5">
-            <summary className="cursor-pointer list-none text-base font-semibold text-gray-900">
-              {messages.gallery.voiceBehavior}
-            </summary>
-            <div className="mt-4 space-y-5 border-t border-gray-100 pt-4">
-              <CharacterField label={messages.gallery.personalityNotes} value={character.personality} />
-              <CharacterField label={messages.gallery.speakingRules} value={character.responseGuidelines} />
-              <CharacterField label={messages.gallery.exampleDialogue} value={character.exampleDialogue} />
-            </div>
-          </details>
+          {hasVoiceBehavior && (
+            <details className="group/section rounded-2xl border border-slate-200 bg-white p-5">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-base font-semibold text-slate-900">
+                {messages.gallery.voiceBehavior}
+                <ChevronDown size={16} className="flex-shrink-0 text-slate-400 transition-transform duration-200 group-open/section:rotate-180" />
+              </summary>
+              <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
+                <CharacterField label={messages.gallery.personalityNotes} value={character.personality} />
+                <CharacterField label={messages.gallery.speakingRules} value={character.responseGuidelines} />
+                <CharacterField label={messages.gallery.exampleDialogue} value={character.exampleDialogue} />
+              </div>
+            </details>
+          )}
 
-          <details className="rounded-2xl border border-gray-200 bg-white p-5">
-            <summary className="cursor-pointer list-none text-base font-semibold text-gray-900">
-              {messages.gallery.worldLore}
-            </summary>
-            <div className="mt-4 space-y-5 border-t border-gray-100 pt-4">
-              <CharacterField label={messages.gallery.scenario} value={character.scenario} />
-              <CharacterField label={messages.gallery.appearance} value={character.appearance} />
-            </div>
-          </details>
+          {hasWorldLore && (
+            <details className="group/section rounded-2xl border border-slate-200 bg-white p-5">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-base font-semibold text-slate-900">
+                {messages.gallery.worldLore}
+                <ChevronDown size={16} className="flex-shrink-0 text-slate-400 transition-transform duration-200 group-open/section:rotate-180" />
+              </summary>
+              <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
+                <CharacterField label={messages.gallery.scenario} value={character.scenario} />
+                <CharacterField label={messages.gallery.appearance} value={character.appearance} />
+              </div>
+            </details>
+          )}
         </div>
       </div>
     </div>
@@ -258,7 +268,7 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
           }
           void refetch();
         } else {
-          alert(messages.gallery.deleteCharacterBlocked);
+          alert(messages.gallery.deleteCharacterError);
         }
       } catch (deleteError) {
         console.error(deleteError);
@@ -282,25 +292,33 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
   };
 
   if (loading) {
-    return <div className="p-10 text-center text-gray-500">{messages.gallery.loadingCharacters}</div>;
+    return (
+      <div className="flex justify-center py-24">
+        <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-slate-900"></div>
+      </div>
+    );
   }
 
   if (error) {
     console.error('GraphQL Error:', error);
-    return <div className="p-10 text-center text-red-500">{messages.gallery.errorLoadingCharacters}: {error.message}</div>;
+    return <div className="p-10 text-center text-rose-500">{messages.gallery.errorLoadingCharacters}: {error.message}</div>;
   }
 
   return (
     <>
-      <div className="mx-auto h-full max-w-7xl p-8">
+      <div className="mx-auto h-full max-w-7xl p-6 md:p-8">
         <div className="mb-8">
-          <h1 className="text-2xl font-bold text-gray-800">{messages.gallery.myCharacters}</h1>
-          <p className="text-gray-500">{messages.gallery.browseEssentials}</p>
+          <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">{messages.shell.characterStudio}</p>
+          <h2 className="mt-1 text-3xl font-semibold tracking-tight text-slate-900">{messages.gallery.myCharacters}</h2>
+          <p className="mt-2 text-sm text-slate-500">{messages.gallery.browseEssentials}</p>
         </div>
 
         {characters.length === 0 && (
-          <div className="mb-6 rounded-2xl border border-dashed border-gray-200 bg-white px-8 py-16 text-center text-gray-500">
-            {messages.gallery.noCharactersYet}
+          <div className="mb-6 rounded-[1.75rem] border border-dashed border-slate-200 bg-white/70 px-8 py-20 text-center text-slate-500 shadow-[0_18px_60px_rgba(15,23,42,0.05)]">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50">
+              <MessageCircle size={30} className="text-sky-700" />
+            </div>
+            <p className="mx-auto max-w-md text-sm leading-7">{messages.gallery.noCharactersYet}</p>
           </div>
         )}
 
@@ -308,47 +326,44 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
           {characters.map((character) => (
             <div
               key={character.id}
-              className="group flex h-[320px] flex-col rounded-2xl border border-gray-200 bg-white p-5 transition-all hover:border-blue-300 hover:shadow-md"
+              className="group flex h-[320px] flex-col rounded-[1.75rem] border border-white/70 bg-white/72 p-5 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur transition-all duration-200 hover:-translate-y-0.5 hover:border-sky-200/70 hover:shadow-[0_26px_70px_rgba(15,23,42,0.13)]"
             >
               <button
                 onClick={() => handleOpenDetails(character)}
                 className="flex flex-1 flex-col text-left"
                 type="button"
               >
-                <div className="mb-4 flex items-start justify-between gap-3">
-                  <div className="relative h-16 w-16 overflow-hidden rounded-full border border-gray-100 bg-gray-100">
-                    <CharacterAvatar
-                      name={character.name}
-                      avatarUrl={character.avatarUrl}
-                      roundedClassName="rounded-full"
-                    />
-                  </div>
-                  <div className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">
-                    {messages.gallery.character}
-                  </div>
+                <div className="relative mb-4 h-16 w-16 overflow-hidden rounded-2xl bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 shadow-sm ring-1 ring-slate-200/70">
+                  <CharacterAvatar
+                    name={character.name}
+                    avatarUrl={character.avatarUrl}
+                    roundedClassName="rounded-2xl"
+                  />
                 </div>
 
-                <h3 className="mb-1 truncate text-lg font-bold text-gray-900">{character.name}</h3>
-                <p className="min-h-[72px] text-sm leading-6 text-gray-500">{getSummary(character.description) || messages.gallery.noCharacterBriefYet}</p>
+                <h3 className="mb-1 truncate text-lg font-bold tracking-tight text-slate-900 transition-colors group-hover:text-sky-800">{character.name}</h3>
+                <p className="min-h-[72px] text-sm leading-6 text-slate-500">{getSummary(character.description) || messages.gallery.noCharacterBriefYet}</p>
 
                 <div className="mt-4 flex min-h-[28px] flex-wrap gap-2 overflow-hidden">
                   {character.tags?.slice(0, 3).map((tag) => (
-                    <span key={tag} className="max-w-[120px] truncate rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                    <span key={tag} className="max-w-[120px] truncate rounded-full bg-slate-100/85 px-2 py-0.5 text-xs text-slate-500">
                       {tag}
                     </span>
                   ))}
                   {character.tags && character.tags.length > 3 && (
-                    <span className="py-0.5 text-xs text-gray-400">+{character.tags.length - 3}</span>
+                    <span className="py-0.5 text-xs text-slate-400">+{character.tags.length - 3}</span>
                   )}
                 </div>
 
-                <span className="mt-4 text-sm font-medium text-blue-600">{messages.gallery.viewDetails}</span>
+                <span className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-sky-700 transition-colors group-hover:text-sky-600">
+                  {messages.gallery.viewDetails}
+                </span>
               </button>
 
-              <div className="mt-4 flex items-center gap-2 border-t border-gray-100 pt-4">
+              <div className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-4">
                 <button
                   onClick={() => handleStartChat(character.id)}
-                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-800"
                   type="button"
                 >
                   <MessageCircle size={16} />
@@ -356,14 +371,14 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
                 </button>
                 <button
                   onClick={() => handleOpenDetails(character)}
-                  className="inline-flex items-center justify-center rounded-xl border border-gray-200 px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                  className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white/80 px-3 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:bg-white hover:text-slate-900"
                   type="button"
                 >
                   {messages.gallery.details}
                 </button>
                 <button
                   onClick={(event) => handleEdit(event, character.id)}
-                  className="inline-flex items-center justify-center rounded-xl border border-gray-200 px-3 py-2.5 text-gray-600 transition-colors hover:bg-gray-50"
+                  className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white/80 px-3 py-2.5 text-slate-600 transition-colors hover:bg-white hover:text-slate-900"
                   title={messages.gallery.editCharacter}
                   type="button"
                 >
@@ -371,7 +386,7 @@ export default function CharacterGallery({ onSelect }: { onSelect: (id: string) 
                 </button>
                 <button
                   onClick={(event) => handleDelete(event, character.id, character.name)}
-                  className="inline-flex items-center justify-center rounded-xl border border-red-100 px-3 py-2.5 text-red-500 transition-colors hover:bg-red-50"
+                  className="inline-flex items-center justify-center rounded-xl border border-rose-100 bg-white/80 px-3 py-2.5 text-rose-500 transition-colors hover:bg-rose-50"
                   title={messages.gallery.deleteCharacter}
                   type="button"
                 >

@@ -1,0 +1,21 @@
+# Optional local TTS engine for the realtime chat mode.
+#
+# The TTS engine runs as a STANDALONE service (Django only calls it over
+# HTTP), so this file is for the environment that HOSTS the engine:
+#
+#   pip install genie-tts
+#
+# NOTE (Windows): genie-tts depends on jieba_fast, which has no prebuilt
+# wheel and requires MSVC Build Tools to compile. Without MSVC, install
+# pure-Python `jieba` and drop a `jieba_fast` shim package next to it:
+#
+#   site-packages/jieba_fast/__init__.py:  from jieba import *
+#                                          from jieba import setLogLevel, lcut, cut, add_word, initialize
+#                                          import jieba.posseg as _posseg
+#                                          posseg = _posseg
+#   site-packages/jieba_fast/posseg.py:    from jieba.posseg import *
+#
+# First import downloads ~391MB of resources from HuggingFace
+# (or set GENIE_DATA_DIR to a pre-populated directory).
+genie-tts
+soundfile

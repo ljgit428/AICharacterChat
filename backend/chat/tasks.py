@@ -1567,6 +1567,58 @@ def _append_section(sections, title, content):
         sections.append(f"[{title}]\n{normalized}")
 
 
+def _character_emotion_names(character) -> list[str]:
+    """角色实际生效的情感组名（角色 tts_config.emotions 覆盖，否则所选音色库记录），
+    未配置返回空。"""
+    from chat import tts as chat_tts
+
+    cfg = (character.tts_config or {}) if hasattr(character, 'tts_config') else {}
+    fields = chat_tts.merged_voice_fields(cfg, character.created_by)
+    emotions = fields.get('emotions') if isinstance(fields.get('emotions'), list) else []
+    names = []
+    for entry in emotions:
+        if isinstance(entry, dict):
+            name = str(entry.get('name') or '').strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _parse_emotion_segments(text: str, emotion_names: list[str]) -> tuple[str, list[dict]]:
+    """把带【情感名】标记的回复拆成 (干净文本, 语音分段)。
+
+    分段格式：{emotion, text}。标记只认情感组里存在的名字，其余【】原样保留。
+    无任何标记时返回单段（emotion 为空 → 合成走默认参考音频）。
+    标签前的无主文本并入第一个标签段；空段被丢弃。
+    """
+    text = text or ''
+    if not emotion_names:
+        return text, ([{'emotion': '', 'text': text}] if text.strip() else [])
+    pattern = re.compile('|'.join(re.escape(f'【{name}】') for name in emotion_names))
+    names = [match.group(0)[1:-1] for match in pattern.finditer(text)]
+    if not names:
+        return text, ([{'emotion': '', 'text': text}] if text.strip() else [])
+    tokens = pattern.split(text)  # len(tokens) == len(names) + 1
+
+    segments: list[dict] = []
+    pending = tokens[0]
+    for idx, name in enumerate(names):
+        body = tokens[idx + 1] if idx + 1 < len(tokens) else ''
+        if segments and segments[-1]['emotion'] == name and not segments[-1]['text'].strip():
+            # 连续同情感标签且前段为空：只追加文本
+            segments[-1]['text'] += body
+        else:
+            if pending.strip() and not segments:
+                body = pending + body
+            segments.append({'emotion': name, 'text': body})
+            pending = ''
+    clean = ''.join(tokens)
+    result = [{'emotion': s['emotion'], 'text': s['text'].strip()} for s in segments if s['text'].strip()]
+    if not result and clean.strip():
+        result.append({'emotion': '', 'text': clean.strip()})
+    return clean, result
+
+
 def _truncate_text(value, max_length):
     normalized = (value or '').strip()
     if len(normalized) <= max_length:
@@ -1899,6 +1951,17 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
     _append_section(sections, "ACCOUNT CONTEXT", account_runtime_sections.get("context", ""))
     _append_section(sections, "ACCOUNT BOUNDARIES", account_runtime_sections.get("boundaries", ""))
     _append_section(sections, "MEMORY CONSENT", account_runtime_sections.get("memory_rules", ""))
+
+    # 角色配了情感组（tts_config.emotions）时，让模型给每句话打情感标签，
+    # 语音回复据此按句切换参考音频；没配情感组就不注入这段，保持原有行为。
+    emotion_names = _character_emotion_names(character)
+    if emotion_names:
+        tags = ' '.join(f'【{name}】' for name in emotion_names)
+        _append_section(sections, "VOICE EMOTION TAGGING", "\n".join([
+            f"Prefix every sentence of your reply with exactly one of these emotion tags: {tags}",
+            "Example: 【开心】听说新游戏要发售了！【战斗】目标确认！",
+            f"Use 【{emotion_names[0]}】 when you are unsure. Never mention or explain the tags themselves.",
+        ]))
 
     if use_memory_tools:
         _append_section(
@@ -2700,11 +2763,15 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     if not ai_response_text:
         raise ValueError('The model returned an empty response')
 
+    # 情感标记：解析成分段供语音朗读，同时剥掉标记存干净的正文。
+    emotion_names = _character_emotion_names(character)
+    clean_text, tts_segments = _parse_emotion_segments(ai_response_text, emotion_names)
+
     ai_message = _finalize_ai_response(
         chat_session=chat_session,
         character=character,
         runtime_config=runtime_config,
-        ai_response_text=ai_response_text,
+        ai_response_text=clean_text,
         user_message=user_message,
         latency_ms=latency_ms,
         research_context=research_context,
@@ -2717,6 +2784,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         'type': 'done',
         'message_id': ai_message.id,
         'content': ai_message.content,
+        'tts_segments': tts_segments,
         'timestamp': ai_message.timestamp.isoformat(),
         'latency_ms': latency_ms,
         'provider': runtime_config['provider'],

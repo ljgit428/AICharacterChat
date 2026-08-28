@@ -3,9 +3,12 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, gql } from '@apollo/client';
-import { UPLOAD_API_URL } from '@/constants';
+import { FILES_UPLOAD_API_URL } from '@/constants';
+import { apiService } from '@/utils/api';
+import { TtsVoiceModel } from '@/types';
 import { useI18n } from '@/i18n/provider';
 import AvatarCropper from '@/components/AvatarCropper';
+import FileTree, { FileTreeNode } from '@/components/FileTree';
 import {
   Upload,
   Sparkles,
@@ -14,7 +17,6 @@ import {
   Loader2,
   FileText,
   ArrowLeft,
-  X,
   Undo2,
 } from 'lucide-react';
 
@@ -27,6 +29,7 @@ type ReferenceFile = {
 type PendingReferenceFile = {
   file: File;
   displayName: string;
+  relativePath: string;
 };
 
 type ReferenceFileSkipSummary = {
@@ -110,7 +113,7 @@ async function collectReferenceFilesFromEntry(
       fileEntry.file((value: File) => resolve(value), () => resolve(null));
     });
     if (file) {
-      collected.push({ file, displayName: entryPath });
+      collected.push({ file, displayName: entryPath, relativePath: entryPath });
     }
     return;
   }
@@ -143,7 +146,7 @@ async function collectFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
     .filter((entry): entry is FileSystemEntry => entry !== null);
 
   if (!entries.length) {
-    return Array.from(dataTransfer.files || []).map((file) => ({ file, displayName: file.name }));
+    return Array.from(dataTransfer.files || []).map((file) => ({ file, displayName: file.name, relativePath: file.name }));
   }
 
   const collected: PendingReferenceFile[] = [];
@@ -154,6 +157,67 @@ async function collectFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
 type PromptPreviewLocale = 'zh-CN' | 'en-US';
 
 type WebSearchMode = 'default' | 'on' | 'off';
+
+// 角色只引用设置页登记的音色（voice_model_id）；引擎地址、模型目录、
+// 参考音频、情感组等细节全部收敛在 设置→语音设置。
+// 情感组随音色保存：角色未配置时沿用所选音色库记录的情感组；角色级
+// emotions 只作为旧数据兼容保留（本表单不再编辑，保存时原样透传）。
+export type EmotionConfigForm = {
+  name: string;
+  refAudioPath: string;
+  refAudioText: string;
+  refAudioLanguage: string;
+};
+
+type TtsConfigForm = {
+  voiceModelId: string;
+  language: string;
+  emotions: EmotionConfigForm[];
+};
+
+const EMPTY_TTS_CONFIG: TtsConfigForm = {
+  voiceModelId: '',
+  language: '',
+  emotions: [],
+};
+
+// 从后端 tts_config 反序列化情感组；容错跳过缺名字/非对象的脏条目。
+function parseEmotions(raw: unknown): EmotionConfigForm[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+    .map((entry) => ({
+      name: typeof entry.name === 'string' ? entry.name : '',
+      refAudioPath: typeof entry.ref_audio_path === 'string' ? entry.ref_audio_path : '',
+      refAudioText: typeof entry.ref_audio_text === 'string' ? entry.ref_audio_text : '',
+      refAudioLanguage:
+        typeof entry.ref_audio_language === 'string' ? entry.ref_audio_language : '',
+    }));
+}
+
+function toTtsConfigInput(tts: TtsConfigForm): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
+  if (tts.voiceModelId) config.voice_model_id = tts.voiceModelId;
+  if (tts.language) config.language = tts.language;
+  const emotions = tts.emotions
+    .map((emotion) => ({
+      name: emotion.name.trim(),
+      ref_audio_path: emotion.refAudioPath.trim(),
+      ref_audio_text: emotion.refAudioText.trim(),
+      ref_audio_language: emotion.refAudioLanguage.trim(),
+    }))
+    .filter((emotion) => emotion.name);
+  if (emotions.length) config.emotions = emotions;
+  return config;
+}
+
+// 音色库下拉的展示标签：名字之外带上引擎/版本，方便区分同名条目。
+function ttsOptionLabel(voice: TtsVoiceModel): string {
+  const parts = [voice.name];
+  if (voice.engine) parts.push(voice.engine);
+  if (voice.modelVersion) parts.push(voice.modelVersion);
+  return parts.join(' · ');
+}
 
 type FormState = {
   name: string;
@@ -168,6 +232,7 @@ type FormState = {
   tags: string;
   avatarUrl: string;
   webSearchMode: WebSearchMode;
+  ttsConfig: TtsConfigForm;
 };
 
 type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'affiliation' | 'tags' | 'exampleDialogue'>;
@@ -270,8 +335,8 @@ function buildCharacterSystemPromptPreview(
 }
 
 const GENERATE_DRAFT = gql`
-  mutation GenerateDraft($fileUrls: [String!], $textContext: String, $locale: String) {
-    generateCharacterDraft(fileUrls: $fileUrls, textContext: $textContext, locale: $locale) {
+  mutation GenerateDraft($fileUrls: [String!], $fileNames: [String!], $textContext: String, $locale: String) {
+    generateCharacterDraft(fileUrls: $fileUrls, fileNames: $fileNames, textContext: $textContext, locale: $locale) {
       name
       description
       affiliation
@@ -307,6 +372,7 @@ const GET_CHARACTER = gql`
       tags
       avatarUrl
       enableWebSearch
+      ttsConfig
       knowledgeAssets {
         fileUrl
         fileName
@@ -341,7 +407,9 @@ function pickFormState(form: FormState, keys: readonly AiDraftKey[]): Partial<Fo
 interface ReferenceAndAiPanelProps {
   files: ReferenceFile[];
   isUploading: boolean;
+  uploadProgress: { done: number; total: number } | null;
   isGenerating: boolean;
+  aiStageText: string;
   canUndo: boolean;
   textReferenceCount: number;
   autoTargetName: string;
@@ -359,7 +427,9 @@ interface ReferenceAndAiPanelProps {
 function ReferenceAndAiPanel({
   files,
   isUploading,
+  uploadProgress,
   isGenerating,
+  aiStageText,
   canUndo,
   textReferenceCount,
   autoTargetName,
@@ -372,10 +442,95 @@ function ReferenceAndAiPanel({
   onUndo,
   copy,
 }: ReferenceAndAiPanelProps) {
+  const { locale } = useI18n();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
   const [skipNotice, setSkipNotice] = useState<string | null>(null);
+  const [expandedGroupDirs, setExpandedGroupDirs] = useState<Set<string>>(new Set());
+
+  // 把扁平的文件列表按 relative_path 组装成分层树（本地待保存状态，与后端 VFS 无关）。
+  const groupedFileNodes = useMemo<FileTreeNode[]>(() => {
+    const roots: FileTreeNode[] = [];
+    const dirNodes = new Map<string, FileTreeNode>();
+    const ensureDir = (dirPath: string): FileTreeNode => {
+      const existing = dirNodes.get(dirPath);
+      if (existing) {
+        return existing;
+      }
+      const node: FileTreeNode = {
+        path: `folder:${dirPath}`,
+        title: dirPath.split('/').pop() || dirPath,
+        isDirectory: true,
+        children: [],
+      };
+      dirNodes.set(dirPath, node);
+      const slashIndex = dirPath.lastIndexOf('/');
+      if (slashIndex > -1) {
+        ensureDir(dirPath.slice(0, slashIndex)).children!.push(node);
+      } else {
+        roots.push(node);
+      }
+      return node;
+    };
+
+    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    for (const file of sorted) {
+      const segments = file.name.split('/');
+      const title = segments.pop() || file.name;
+      const leaf: FileTreeNode = {
+        path: file.url,
+        title,
+        isDirectory: false,
+        previewKind: file.type === 'image' ? 'image' : 'text',
+      };
+      if (segments.length) {
+        ensureDir(segments.join('/')).children!.push(leaf);
+      } else {
+        roots.push(leaf);
+      }
+    }
+    return roots;
+  }, [files]);
+
+  // 新出现的顶层文件夹默认展开，用户手动收起的保持收起。
+  useEffect(() => {
+    setExpandedGroupDirs((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const node of groupedFileNodes) {
+        if (node.isDirectory && !next.has(node.path)) {
+          next.add(node.path);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [groupedFileNodes]);
+
+  const toggleGroupDir = (node: FileTreeNode) => {
+    setExpandedGroupDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(node.path)) {
+        next.delete(node.path);
+      } else {
+        next.add(node.path);
+      }
+      return next;
+    });
+  };
+
+  const handleRemoveNode = (node: FileTreeNode) => {
+    if (node.isDirectory) {
+      const prefix = `${node.path.slice('folder:'.length)}/`;
+      files
+        .filter((file) => file.name.startsWith(prefix))
+        .forEach((file) => onRemoveFile(file.url));
+      return;
+    }
+    onRemoveFile(node.path);
+  };
+
 
   const attachFolderInputRef = (element: HTMLInputElement | null) => {
     folderInputRef.current = element;
@@ -421,7 +576,7 @@ function ReferenceAndAiPanel({
     const fileList = Array.from(event.target.files || []);
     event.target.value = '';
     if (fileList.length) {
-      submitPendingFiles(fileList.map((file) => ({ file, displayName: file.name })));
+      submitPendingFiles(fileList.map((file) => ({ file, displayName: file.name, relativePath: file.name })));
     }
   };
 
@@ -433,6 +588,7 @@ function ReferenceAndAiPanel({
         fileList.map((file) => ({
           file,
           displayName: formatReferencePath(file.webkitRelativePath || file.name),
+          relativePath: formatReferencePath(file.webkitRelativePath || file.name),
         })),
       );
     }
@@ -529,9 +685,23 @@ function ReferenceAndAiPanel({
           onChange={handleFolderChange}
         />
         {isUploading ? (
-          <div className="flex flex-col items-center text-amber-700">
-            <Loader2 className="mb-1 animate-spin" size={24} />
-            <span className="text-xs font-medium">{copy.uploadingBackgroundFile}</span>
+          <div className="flex w-full max-w-[260px] flex-col items-center gap-1.5 text-amber-700">
+            <Loader2 className="mb-0.5 animate-spin" size={24} />
+            <span className="text-xs font-medium">
+              {uploadProgress && uploadProgress.total > 1
+                ? copy.uploadProgress(uploadProgress.done, uploadProgress.total)
+                : copy.uploadingBackgroundFile}
+            </span>
+            {uploadProgress && uploadProgress.total > 1 && (
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-amber-200/80">
+                <div
+                  className="h-full rounded-full bg-amber-500 transition-all duration-300"
+                  style={{
+                    width: `${Math.round((uploadProgress.done / uploadProgress.total) * 100)}%`,
+                  }}
+                />
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -559,30 +729,20 @@ function ReferenceAndAiPanel({
       )}
 
       {files.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {files.map((file) => (
-            <div
-              key={file.url}
-              className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-white px-2.5 py-1 text-[11px] text-gray-700"
-            >
-              <span className="font-medium text-gray-500">
-                {file.type === 'image' ? copy.imageReferenceLabel : copy.textReferenceLabel}
-              </span>
-              <span className="max-w-[160px] truncate">{file.name}</span>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onRemoveFile(file.url);
-                }}
-                className="rounded-full p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
-                aria-label={copy.removeBackgroundFile}
-                title={copy.removeBackgroundFile}
-              >
-                <X size={10} />
-              </button>
-            </div>
-          ))}
+        <div className="mt-3 max-h-60 overflow-y-auto rounded-xl border border-amber-100 bg-white/80 p-1.5">
+          <FileTree
+            nodes={groupedFileNodes}
+            expandedPaths={expandedGroupDirs}
+            onToggleDir={toggleGroupDir}
+            onSelectFile={() => {}}
+            removable
+            onRemoveNode={handleRemoveNode}
+            removeTitle={copy.removeBackgroundFile}
+            emptyDirLabel={locale === 'zh-CN' ? '（空文件夹）' : '(empty folder)'}
+          />
+          <p className="px-2 pb-1 pt-1.5 text-[11px] leading-4 text-gray-400">
+            {copy.groupedFilesHint(files.length)}
+          </p>
         </div>
       )}
 
@@ -624,6 +784,20 @@ function ReferenceAndAiPanel({
         <span>{buttonLabel}</span>
       </button>
 
+      {isGenerating && (
+        <div className="mt-2 space-y-1.5">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-violet-100">
+            <div className="progress-indeterminate h-full rounded-full bg-violet-500" />
+          </div>
+          <p className="text-center text-[11px] leading-4 text-gray-500">{aiStageText}</p>
+          {textReferenceCount > 0 && (
+            <p className="text-center text-[11px] text-gray-400">
+              {copy.aiAnalyzingCount(textReferenceCount)}
+            </p>
+          )}
+        </div>
+      )}
+
       <p className="mt-2 text-[11px] leading-4 text-gray-500">{copy.aiScopeHintShort}</p>
     </div>
   );
@@ -651,9 +825,29 @@ export default function CreateCharacterSimplifiedForm({
     tags: '',
     avatarUrl: '',
     webSearchMode: 'default',
+    ttsConfig: { ...EMPTY_TTS_CONFIG },
   });
+  const [voiceModels, setVoiceModels] = useState<TtsVoiceModel[]>([]);
+  // 音色库来自 设置→语音设置；这里只做引用，不维护模型细节。
+  useEffect(() => {
+    let cancelled = false;
+    void apiService.listTtsVoiceModels().then((response) => {
+      if (!cancelled && response.data) {
+        setVoiceModels(response.data);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [autoInputText, setAutoInputText] = useState('');
   const [backgroundFiles, setBackgroundFiles] = useState<ReferenceFile[]>([]);
+  // 参考文件上传失败的数量：保存前据此提醒用户，避免角色悄悄丢文件。
+  const [failedUploadCount, setFailedUploadCount] = useState(0);
+  // 批量上传进度：done/total 用于进度条与"已上传 X/Y"提示；null 表示不在上传。
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  // AI 分析阶段的解说词轮换下标；aiLoading 期间按固定间隔推进。
+  const [aiStageIndex, setAiStageIndex] = useState(0);
   const [autoTargetName, setAutoTargetName] = useState('');
   const [systemPromptPreview, setSystemPromptPreview] = useState('');
   const [uploadingTarget, setUploadingTarget] = useState<'avatar' | 'background' | null>(null);
@@ -667,6 +861,7 @@ export default function CreateCharacterSimplifiedForm({
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const skipNextPromptPreviewSyncRef = useRef(false);
+  const loadedCharacterIdRef = useRef<string | null>(null);
 
   const [generateDraft, { loading: aiLoading }] = useMutation(GENERATE_DRAFT);
   const [createCharacter, { loading: saveLoading }] = useMutation(CREATE_CHARACTER);
@@ -683,6 +878,13 @@ export default function CreateCharacterSimplifiedForm({
     }
 
     const char = data.character;
+    // 同一角色只在首次加载时预填：Apollo 窗口聚焦会自动 refetch，
+    // 不设防的话每次 refetch 都会用服务端旧值覆盖用户正在编辑的表单。
+    if (loadedCharacterIdRef.current === String(char.id)) {
+      return;
+    }
+    loadedCharacterIdRef.current = String(char.id);
+    const charTts = (char.ttsConfig || {}) as Record<string, unknown>;
     const nextForm: FormState = {
       name: char.name || '',
       description: char.description || '',
@@ -697,6 +899,14 @@ export default function CreateCharacterSimplifiedForm({
       avatarUrl: char.avatarUrl || '',
       webSearchMode:
         char.enableWebSearch === true ? 'on' : char.enableWebSearch === false ? 'off' : 'default',
+      ttsConfig: {
+        voiceModelId:
+          charTts.voice_model_id != null && String(charTts.voice_model_id) !== ''
+            ? String(charTts.voice_model_id)
+            : '',
+        language: typeof charTts.language === 'string' ? charTts.language : '',
+        emotions: parseEmotions(charTts.emotions),
+      },
     };
     const nextBackgroundFiles = Array.isArray(char.knowledgeAssets)
       ? char.knowledgeAssets.map((asset: { fileName: string; fileUrl: string; fileType: string }) => ({
@@ -760,6 +970,22 @@ export default function CreateCharacterSimplifiedForm({
     return () => clearTimeout(handle);
   }, [now, highlightDeadline, aiUndoDeadline]);
 
+  // AI 分析阶段：await 期间用轮换解说词让用户感知进展。
+  useEffect(() => {
+    if (!aiLoading) {
+      setAiStageIndex(0);
+      return;
+    }
+    const stages = copy.characterForm.aiAnalyzingStages;
+    if (!stages || stages.length === 0) {
+      return;
+    }
+    const handle = setInterval(() => {
+      setAiStageIndex((i) => (i + 1) % stages.length);
+    }, 2600);
+    return () => clearInterval(handle);
+  }, [aiLoading, copy.characterForm.aiAnalyzingStages]);
+
   const updateForm = (field: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     if (aiFilledFields.has(field as AiDraftKey)) {
@@ -777,8 +1003,11 @@ export default function CreateCharacterSimplifiedForm({
   const uploadSingleFile = useCallback(async (item: PendingReferenceFile) => {
     const formData = new FormData();
     formData.append('file', item.file);
+    // Keep the folder-group hierarchy so the memory filesystem can expose the
+    // uploaded tree (Momotalk/xxx/scene.txt) instead of a flat name list.
+    formData.append('relative_path', item.relativePath || item.file.name);
 
-    const res = await fetch(UPLOAD_API_URL, { method: 'POST', body: formData });
+    const res = await fetch(FILES_UPLOAD_API_URL, { method: 'POST', body: formData });
     if (!res.ok) {
       throw new Error(copy.characterForm.uploadFailed);
     }
@@ -786,7 +1015,7 @@ export default function CreateCharacterSimplifiedForm({
     const uploadData = await res.json();
     return {
       uploadedUrl: uploadData.url || uploadData.uri,
-      uploadedName: item.displayName || uploadData.display_name || uploadData.name || item.file.name,
+      uploadedName: item.displayName || uploadData.display_name || uploadData.relative_path || uploadData.name || item.file.name,
       uploadedType: item.file.type.startsWith('image/') ? 'image' : 'text',
       file: item.file,
     };
@@ -795,7 +1024,7 @@ export default function CreateCharacterSimplifiedForm({
   const processFileUpload = useCallback(async (file: File, target: 'avatar' | 'background') => {
     setUploadingTarget(target);
     try {
-      const uploaded = await uploadSingleFile({ file, displayName: file.name });
+      const uploaded = await uploadSingleFile({ file, displayName: file.name, relativePath: file.name });
 
       if (target === 'background') {
         setBackgroundFiles((prev) => [
@@ -819,8 +1048,16 @@ export default function CreateCharacterSimplifiedForm({
     }
 
     setUploadingTarget('background');
+    setUploadProgress({ done: 0, total: items.length });
     try {
-      const results = await Promise.allSettled(items.map((item) => uploadSingleFile(item)));
+      // 并行上传，每完成一个就把进度 +1：进度条和"已上传 X/Y"随之推进。
+      const results = await Promise.allSettled(
+        items.map(async (item) => {
+          const result = await uploadSingleFile(item);
+          setUploadProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+          return result;
+        }),
+      );
       const uploadedFiles = results
         .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof uploadSingleFile>>> => result.status === 'fulfilled')
         .map((result) => result.value);
@@ -837,11 +1074,13 @@ export default function CreateCharacterSimplifiedForm({
       }
 
       const failedCount = items.length - uploadedFiles.length;
+      setFailedUploadCount((prev) => prev + failedCount);
       if (failedCount) {
         alert(copy.characterForm.uploadSomeFailed(failedCount));
       }
     } finally {
       setUploadingTarget(null);
+      setUploadProgress(null);
     }
   }, [copy.characterForm, uploadSingleFile]);
 
@@ -954,6 +1193,7 @@ export default function CreateCharacterSimplifiedForm({
       const response = await generateDraft({
         variables: {
           fileUrls: draftSourceFiles.map((file) => file.url),
+          fileNames: draftSourceFiles.map((file) => file.name),
           textContext: combinedContext,
           locale: promptPreviewLocale,
         }
@@ -995,6 +1235,19 @@ export default function CreateCharacterSimplifiedForm({
       return;
     }
 
+    // 参考文件组还没传完就保存，是“角色存了但文件丢了”的直接原因：
+    // 这里必须等上传结束，失败的部分要用户确认后才能继续。
+    if (uploadingTarget) {
+      alert(copy.characterForm.saveBlockedWhileUploading);
+      return;
+    }
+    if (failedUploadCount > 0) {
+      const proceed = window.confirm(copy.characterForm.saveWithFailedUploads(failedUploadCount));
+      if (!proceed) {
+        return;
+      }
+    }
+
     try {
       const input = {
         name: form.name.trim(),
@@ -1009,8 +1262,9 @@ export default function CreateCharacterSimplifiedForm({
         scenario: form.scenario.trim(),
         exampleDialogue: form.exampleDialogue.trim(),
         tags: form.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
-        enableWebSearch:
-          form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
+      enableWebSearch:
+        form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
+      ttsConfig: toTtsConfigInput(form.ttsConfig),
         backgroundFiles: backgroundFiles.map((file) => ({
           uploadedUrl: file.url,
           fileName: file.name,
@@ -1033,9 +1287,15 @@ export default function CreateCharacterSimplifiedForm({
   const isUploadingAvatar = uploadingTarget === 'avatar';
   const isUploadingBackground = uploadingTarget === 'background';
   const textReferenceCount = backgroundFiles.filter((file) => file.type === 'text').length;
+  const aiStages = copy.characterForm.aiAnalyzingStages;
+  const aiStageText = aiStages.length > 0 ? aiStages[aiStageIndex % aiStages.length] : '';
+  // 仅在「跟随全局（全局可能是 genie）/ 明确 genie」且版本不被 genie 支持时提示；
+  // gptsovits 引擎下 v2pro/v4 是合法组合，不应打扰。
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
   const isHighlighted = (key: AiDraftKey) =>
     aiFilledFields.has(key) && !aiEditedFields.has(key) && now < highlightDeadline;
+  // 当前选中的音色：用于展示其自带的情感组（在设置→语音设置里管理）。
+  const selectedVoice = voiceModels.find((voice) => String(voice.id) === form.ttsConfig.voiceModelId);
 
   const renderFieldBadge = (key: AiDraftKey) => {
     if (!aiFilledFields.has(key)) {
@@ -1144,7 +1404,9 @@ export default function CreateCharacterSimplifiedForm({
             <ReferenceAndAiPanel
               files={backgroundFiles}
               isUploading={isUploadingBackground}
+              uploadProgress={uploadProgress}
               isGenerating={aiLoading}
+              aiStageText={aiStageText}
               canUndo={canUndoAiFill}
               textReferenceCount={textReferenceCount}
               autoTargetName={autoTargetName}
@@ -1297,6 +1559,70 @@ export default function CreateCharacterSimplifiedForm({
                 </select>
                 <p className="text-xs text-gray-400">{copy.characterForm.webSearchHint}</p>
               </div>
+
+              <div className="space-y-3 rounded-2xl border border-amber-100 bg-amber-50/50 p-4">
+                <div>
+                  <label className="text-sm font-bold text-gray-700">
+                    {copy.characterForm.ttsSectionTitle}
+                  </label>
+                  <p className="mt-1 text-xs text-gray-400">{copy.characterForm.ttsSectionHint}</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-gray-500">
+                    {copy.characterForm.ttsVoiceModelLabel}
+                  </label>
+                  <select
+                    value={form.ttsConfig.voiceModelId}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        ttsConfig: { ...prev.ttsConfig, voiceModelId: e.target.value },
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">{copy.characterForm.ttsVoiceModelEmpty}</option>
+                    {voiceModels.map((voice) => (
+                      <option key={voice.id} value={String(voice.id)}>
+                        {ttsOptionLabel(voice)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] leading-4 text-gray-400">
+                    {copy.characterForm.ttsVoiceModelHint}
+                  </p>
+                  {selectedVoice && selectedVoice.emotions.length > 0 && (
+                    <p className="text-[11px] leading-4 text-amber-600">
+                      {copy.characterForm.ttsEmotionsActivePrefix}
+                      {selectedVoice.emotions.map((emotion) => emotion.name).filter(Boolean).join(' · ')}
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-gray-500">
+                    {copy.characterForm.ttsLanguageLabel}
+                  </label>
+                  <select
+                    value={form.ttsConfig.language}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        ttsConfig: { ...prev.ttsConfig, language: e.target.value },
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">{copy.characterForm.ttsLanguageEmpty}</option>
+                    <option value="zh">中文</option>
+                    <option value="jp">日本語</option>
+                    <option value="en">English</option>
+                    <option value="ko">한국어</option>
+                  </select>
+                  <p className="text-[11px] leading-4 text-gray-400">
+                    {copy.characterForm.ttsLanguageHint}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1336,7 +1662,7 @@ export default function CreateCharacterSimplifiedForm({
           <button
             type="button"
             onClick={handleSave}
-            disabled={saveLoading}
+            disabled={saveLoading || uploadingTarget !== null}
             className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-70"
           >
             {saveLoading ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
