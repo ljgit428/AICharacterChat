@@ -80,6 +80,7 @@ export default function ModelApiSettingsPanel({
     error: null,
   });
   const [probePanelOpen, setProbePanelOpen] = useState(false);
+  const [probeFilter, setProbeFilter] = useState('');
   const [roleSelection, setRoleSelection] = useState<Record<ModelRoleKey, string>>({
     text: '',
     image: '',
@@ -123,6 +124,7 @@ export default function ModelApiSettingsPanel({
     setError(null);
     setProbeState({ busy: false, models: [], error: null });
     setProbePanelOpen(false);
+    setProbeFilter('');
     setFormState({ ...EMPTY_FORM });
   };
 
@@ -131,6 +133,7 @@ export default function ModelApiSettingsPanel({
     setError(null);
     setProbeState({ busy: false, models: [], error: null });
     setProbePanelOpen(false);
+    setProbeFilter('');
     const preset = matchProviderPreset(config.provider, config.baseUrl || '');
     setFormState({
       name: config.name,
@@ -167,6 +170,7 @@ export default function ModelApiSettingsPanel({
   const handleProbeModels = async () => {
     setProbeState({ busy: true, models: [], error: null });
     setProbePanelOpen(false);
+    setProbeFilter('');
     try {
       const response = await apiService.probeProviderModels({
         provider: formState.provider,
@@ -549,22 +553,40 @@ export default function ModelApiSettingsPanel({
                           </span>
                         </button>
                         {probePanelOpen && (
-                          <div className="mt-1.5 max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-sm">
-                            {probeState.models.map((model) => (
-                              <button
-                                key={model}
-                                type="button"
-                                onClick={() => {
-                                  setFormState((prev) => ({ ...prev, modelName: model }));
-                                  setProbePanelOpen(false);
-                                }}
-                                className={`block w-full truncate px-3 py-1.5 text-left text-sm transition-colors hover:bg-slate-50 ${
-                                  formState.modelName === model ? 'bg-sky-50 text-sky-700' : 'text-slate-700'
-                                }`}
-                              >
-                                {model}
-                              </button>
-                            ))}
+                          <div className="mt-1.5 rounded-lg border border-slate-200 bg-white shadow-sm">
+                            <div className="border-b border-slate-100 p-1.5">
+                              <input
+                                type="text"
+                                value={probeFilter}
+                                onChange={(e) => setProbeFilter(e.target.value)}
+                                placeholder={messages.modelApi.fetchModelsSearchPlaceholder}
+                                autoFocus
+                                className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                              />
+                            </div>
+                            <div className="max-h-48 overflow-y-auto">
+                              {probeState.models
+                                .filter((model) => model.toLowerCase().includes(probeFilter.trim().toLowerCase()))
+                                .map((model) => (
+                                  <button
+                                    key={model}
+                                    type="button"
+                                    onClick={() => {
+                                      setFormState((prev) => ({ ...prev, modelName: model }));
+                                      setProbePanelOpen(false);
+                                    }}
+                                    className={`block w-full truncate px-3 py-1.5 text-left text-sm transition-colors hover:bg-slate-50 ${
+                                      formState.modelName === model ? 'bg-sky-50 text-sky-700' : 'text-slate-700'
+                                    }`}
+                                  >
+                                    {model}
+                                  </button>
+                                ))}
+                              {probeFilter.trim() &&
+                                !probeState.models.some((model) => model.toLowerCase().includes(probeFilter.trim().toLowerCase())) && (
+                                  <p className="px-3 py-2 text-sm text-slate-400">{messages.modelApi.fetchModelsNoMatch}</p>
+                                )}
+                            </div>
                           </div>
                         )}
                       </div>

@@ -150,6 +150,8 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     fetchModelsSuccess: (count: number) => `Fetched ${count} models — click one to fill it in`,
     fetchModelsShowList: "Show list",
     fetchModelsHideList: "Hide list",
+    fetchModelsSearchPlaceholder: "Search models…",
+    fetchModelsNoMatch: "No matching models",
     fetchModelsKeyRequiredGemini: "A Gemini API key is required to fetch the model list.",
     fetchModelsKeyRequiredAnthropic: "An Anthropic API key is required to fetch the model list.",
     apiKey: "API Key",

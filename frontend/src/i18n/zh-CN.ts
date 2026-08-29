@@ -139,6 +139,8 @@ export const zhCNMessages = {
     fetchModelsSuccess: (count: number) => `已获取 ${count} 个模型，点击填入`,
     fetchModelsShowList: "展开列表",
     fetchModelsHideList: "收起列表",
+    fetchModelsSearchPlaceholder: "搜索模型…",
+    fetchModelsNoMatch: "没有匹配的模型",
     fetchModelsKeyRequiredGemini: "获取 Gemini 模型列表需要先填写 API Key。",
     fetchModelsKeyRequiredAnthropic: "获取 Anthropic 模型列表需要先填写 API Key。",
     apiKey: "API Key",
