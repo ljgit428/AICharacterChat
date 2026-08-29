@@ -250,7 +250,7 @@ type FormState = {
   ttsConfig: TtsConfigForm;
 };
 
-type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'affiliation' | 'tags' | 'exampleDialogue'>;
+type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'userAddress' | 'affiliation' | 'personality' | 'tags' | 'exampleDialogue'>;
 
 const AI_HIGHLIGHT_MS = 1200;
 const AI_UNDO_WINDOW_MS = 30000;
@@ -378,6 +378,8 @@ const DRAFT_JOB = gql`
         name
         description
         affiliation
+        personality
+        userAddress
         tags
         exampleDialogue
       }
@@ -1302,7 +1304,9 @@ export default function CreateCharacterSimplifiedForm({
   const applyDraftToForm = useCallback((draft: {
     name?: string;
     description?: string;
+    userAddress?: string;
     affiliation?: string;
+    personality?: string;
     tags?: string[];
     exampleDialogue?: string;
   }) => {
@@ -1325,6 +1329,14 @@ export default function CreateCharacterSimplifiedForm({
       if (draft.affiliation && draft.affiliation !== prev.affiliation) {
         next.affiliation = draft.affiliation;
         filled.push('affiliation');
+      }
+      if (draft.userAddress && draft.userAddress !== prev.userAddress) {
+        next.userAddress = draft.userAddress;
+        filled.push('userAddress');
+      }
+      if (draft.personality && draft.personality !== prev.personality) {
+        next.personality = draft.personality;
+        filled.push('personality');
       }
       if (Array.isArray(draft.tags) && draft.tags.length) {
         const nextTags = draft.tags.join(', ');
@@ -1728,12 +1740,15 @@ export default function CreateCharacterSimplifiedForm({
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-bold text-gray-700">{copy.characterForm.userAddress}</label>
+                <label className="text-sm font-bold text-gray-700">
+                  {copy.characterForm.userAddress}
+                  {renderFieldBadge('userAddress')}
+                </label>
                 <input
                   value={form.userAddress}
                   onChange={(e) => updateForm('userAddress', e.target.value)}
                   placeholder={copy.characterForm.userAddressPlaceholder}
-                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  className={`w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${fieldHighlightClass('userAddress')}`}
                 />
                 <p className="text-xs text-gray-500">
                   {copy.characterForm.userAddressHelp}
@@ -1742,12 +1757,15 @@ export default function CreateCharacterSimplifiedForm({
 
               <div className="grid gap-6 xl:grid-cols-2">
                 <div className="space-y-2">
-                  <label className="text-sm font-bold text-gray-700">{copy.characterForm.personalityNotes}</label>
+                  <label className="text-sm font-bold text-gray-700">
+                    {copy.characterForm.personalityNotes}
+                    {renderFieldBadge('personality')}
+                  </label>
                   <textarea
                     value={form.personality}
                     onChange={(e) => updateForm('personality', e.target.value)}
                     rows={5}
-                    className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    className={`w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${fieldHighlightClass('personality')}`}
                   />
                 </div>
 

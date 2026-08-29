@@ -17,6 +17,8 @@ class PrisMateDraft:
     tags: List[str]
     visual_summary: str
     example_dialogue: str = ""
+    # 角色对用户的直接称呼（从语料台词归纳，如 老师/前辈/指挥官）。
+    user_address: str = ""
 
 
 @strawberry.type

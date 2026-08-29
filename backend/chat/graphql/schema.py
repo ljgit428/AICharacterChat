@@ -155,6 +155,7 @@ def _build_character_draft_prompt(locale: str, text_context: Optional[str], uplo
                 "- personality（字符串）：1~2 句话概括角色的语气 / 性格 / 价值倾向，用于快速定调\n"
                 "- example_dialogue（字符串）：5 段不同的示例对话。每段格式必须是\n"
                 "  \"User: <一句提问或陈述>\\nCharacter: <一句完整回答>\"\n"
+                "- user_address（字符串）：角色对用户的直接称呼，从台词里高频出现的第二人称称呼归纳（如 老师/前辈/指挥官/主人）；语料中找不到明确称呼时返回空字符串\n\n"
                 "- tags（字符串数组）：3 到 6 个关键词\n\n"
                 "要求：\n"
                 "- 优先直接从源材料提取；不要发明设定、场景、外貌、长篇 lore 总结。\n"
@@ -189,6 +190,7 @@ def _build_character_draft_prompt(locale: str, text_context: Optional[str], uplo
             "- personality (string): 1-2 sentences capturing the character's tone / demeanor / values for quick framing\n"
             "- example_dialogue (string): Exactly 5 distinct example exchanges. Each MUST follow the format\n"
             '  "User: <one short prompt or statement>\\nCharacter: <one reply of up to 2 sentences>"\n'
+            "- user_address (string): how the character addresses the user, generalized from recurring direct-address terms in the dialogue (e.g. Sensei/Commander/Master); empty string if not found\n"
             "- tags (list of strings): 3-6 keywords\n"
             "\n"
             "Rules:\n"
@@ -486,6 +488,7 @@ def _build_character_draft_tool_prompt(
             "- personality（字符串）：1~2 句话概括角色的语气 / 性格 / 价值倾向，用于快速定调\n"
             "- example_dialogue（字符串）：5 段不同的示例对话。每段格式必须是\n"
             "  \"User: <一句提问或陈述>\\nCharacter: <一句完整回答>\"\n"
+            "- user_address（字符串）：角色对用户的直接称呼，从台词里高频出现的第二人称称呼归纳（如 老师/前辈/指挥官/主人）；语料中找不到明确称呼时返回空字符串\n\n"
             "- tags（字符串数组）：3 到 6 个关键词\n\n"
             "要求：\n"
             "- 优先直接从读取到的源材料提取；不要发明设定、场景、外貌、长篇 lore 总结。\n"
@@ -522,6 +525,7 @@ def _build_character_draft_tool_prompt(
         "- personality (string): 1-2 sentences capturing the character's tone / demeanor / values for quick framing\n"
         "- example_dialogue (string): Exactly 5 distinct example exchanges. Each MUST follow the format\n"
         '  "User: <one short prompt or statement>\\nCharacter: <one reply of up to 2 sentences>"\n'
+        "- user_address (string): how the character addresses the user, generalized from recurring direct-address terms in the dialogue (e.g. Sensei/Commander/Master); empty string if not found\n"
         "- tags (list of strings): 3-6 keywords\n"
         "\n"
         "Rules:\n"
@@ -669,7 +673,8 @@ def _compute_character_draft(
                     "description": data.get("description", ""),
                     "affiliation": data.get("affiliation", ""),
                     "personality": (data.get("personality") or "").strip(),
-                    "appearance": "",
+                    "appearance": (data.get("appearance") or "").strip(),
+                    "user_address": (data.get("user_address") or "").strip(),
                     "tags": data.get("tags", []) or [],
                     "visual_summary": "",
                     "example_dialogue": (data.get("example_dialogue") or "").strip(),
@@ -741,6 +746,7 @@ def _compute_character_draft(
         "affiliation": data.get("affiliation", ""),
         "personality": (data.get("personality") or "").strip(),
         "appearance": "",
+        "user_address": (data.get("user_address") or "").strip(),
         "tags": data.get("tags", []) or [],
         "visual_summary": "",
         "example_dialogue": (data.get("example_dialogue") or "").strip(),

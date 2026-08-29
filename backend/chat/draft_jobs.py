@@ -36,18 +36,26 @@ class DraftJobCanceled(Exception):
     """canceling 状态检查命中时抛出，终止任务。"""
 
 
-def compute_content_fingerprint(staged_uploads: list, text_context: str, locale: str) -> str:
-    """全部文件内容哈希 + 提示语 + 语言 → 内容指纹。
+def compute_content_fingerprint(staged_uploads: list, text_context: str, locale: str, model_id: str = '') -> str:
+    """全部文件内容哈希 + 提示语 + 语言 + 模型身份 → 内容指纹。
 
     同一语料重传后 upload_ids 全变，但 sha256 不变；指纹相同即可直接
-    复用已完成任务的最终结果（秒级出卡）。
+    复用已完成任务的最终结果（秒级出卡）。模型身份参与指纹：换模型时
+    旧缓存自然失效，避免返回另一个模型的旧结果。
     """
     hashes = sorted(
         str(upload.get('content_hash') or '')
         for upload in staged_uploads
     )
     payload = json.dumps(
-        {'files': hashes, 'context': text_context or '', 'locale': locale or ''},
+        {
+            'files': hashes,
+            'context': text_context or '',
+            'locale': locale or '',
+            'model': model_id or '',
+            # 提取契约变更（新增/修改要求模型输出的字段）时递增，让旧缓存失效。
+            'prompt_version': 2,
+        },
         ensure_ascii=False, sort_keys=True,
     )
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
@@ -139,9 +147,18 @@ def execute_draft_job(job_id: int) -> None:
             seen_urls.add(dedup_key)
             deduped_uploads.append(upload)
 
-        # 结果级缓存：同一内容指纹（文件 sha256 集合 + 提示语 + 语言）的
-        # 历史任务直接复用最终结果，0 次 LLM 调用，秒级完成。
-        content_fingerprint = compute_content_fingerprint(deduped_uploads, text_context, locale)
+        # 结果级缓存：同一内容指纹（文件 sha256 集合 + 提示语 + 语言 + 模型
+        # 身份）的历史任务直接复用最终结果，0 次 LLM 调用，秒级完成。
+        try:
+            runtime_config = _get_draft_runtime_config(job.user)
+            model_id = '{}:{}@{}'.format(
+                runtime_config.get('provider', ''),
+                runtime_config.get('model_name', ''),
+                runtime_config.get('base_url', ''),
+            )
+        except Exception:  # noqa: BLE001 - 无可用模型时 _compute 阶段会明确报错
+            model_id = ''
+        content_fingerprint = compute_content_fingerprint(deduped_uploads, text_context, locale, model_id=model_id)
         job.content_fingerprint = content_fingerprint
         job.save(update_fields=['content_fingerprint', 'updated_at'])
         previous = (
