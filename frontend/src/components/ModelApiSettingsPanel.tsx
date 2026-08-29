@@ -79,6 +79,7 @@ export default function ModelApiSettingsPanel({
     models: [],
     error: null,
   });
+  const [probePanelOpen, setProbePanelOpen] = useState(false);
   const [roleSelection, setRoleSelection] = useState<Record<ModelRoleKey, string>>({
     text: '',
     image: '',
@@ -121,6 +122,7 @@ export default function ModelApiSettingsPanel({
     setEditingId(null);
     setError(null);
     setProbeState({ busy: false, models: [], error: null });
+    setProbePanelOpen(false);
     setFormState({ ...EMPTY_FORM });
   };
 
@@ -128,6 +130,7 @@ export default function ModelApiSettingsPanel({
     setEditingId(config.id);
     setError(null);
     setProbeState({ busy: false, models: [], error: null });
+    setProbePanelOpen(false);
     const preset = matchProviderPreset(config.provider, config.baseUrl || '');
     setFormState({
       name: config.name,
@@ -154,8 +157,16 @@ export default function ModelApiSettingsPanel({
     }));
   };
 
+  // 后端 probe 只回英文报错；按可识别的关键词映射成当前界面语言的提示。
+  const localizeProbeError = (raw?: string | null): string => {
+    if (raw?.includes('Gemini API key is required')) return messages.modelApi.fetchModelsKeyRequiredGemini;
+    if (raw?.includes('Anthropic API key is required')) return messages.modelApi.fetchModelsKeyRequiredAnthropic;
+    return messages.modelApi.fetchModelsFailed;
+  };
+
   const handleProbeModels = async () => {
     setProbeState({ busy: true, models: [], error: null });
+    setProbePanelOpen(false);
     try {
       const response = await apiService.probeProviderModels({
         provider: formState.provider,
@@ -163,17 +174,21 @@ export default function ModelApiSettingsPanel({
         apiKey: formState.apiKey,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error || messages.modelApi.fetchModelsFailed);
+        throw new Error(localizeProbeError(response.error));
       }
-      setProbeState({ busy: false, models: response.data.models, error: null });
-      if (response.data.models.length === 0) {
+      const models = response.data.models;
+      if (models.length === 0) {
         setProbeState({ busy: false, models: [], error: messages.modelApi.fetchModelsEmpty });
+        return;
       }
+      setProbeState({ busy: false, models, error: null });
+      // 结果必须立即可见：直接展开候选列表，而不是只写进 datalist 让用户自己发现。
+      setProbePanelOpen(true);
     } catch (probeError) {
       setProbeState({
         busy: false,
         models: [],
-        error: probeError instanceof Error ? probeError.message : messages.modelApi.fetchModelsFailed,
+        error: probeError instanceof Error ? probeError.message : localizeProbeError(null),
       });
     }
   };
@@ -502,17 +517,11 @@ export default function ModelApiSettingsPanel({
                     <div className="flex gap-2">
                       <input
                         type="text"
-                        list="probe-model-options"
                         value={formState.modelName}
                         onChange={(e) => setFormState((prev) => ({ ...prev, modelName: e.target.value }))}
                         placeholder={messages.modelApi.modelNamePlaceholder}
                         className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                       />
-                      <datalist id="probe-model-options">
-                        {probeState.models.map((model) => (
-                          <option key={model} value={model} />
-                        ))}
-                      </datalist>
                       <button
                         type="button"
                         onClick={handleProbeModels}
@@ -525,6 +534,40 @@ export default function ModelApiSettingsPanel({
                     </div>
                     {probeState.error && (
                       <p className="mt-1 text-xs text-amber-600">{probeState.error}</p>
+                    )}
+                    {!probeState.busy && probeState.models.length > 0 && (
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => setProbePanelOpen((open) => !open)}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 transition-colors hover:text-emerald-700"
+                        >
+                          <CheckCircle2 size={14} />
+                          <span>{messages.modelApi.fetchModelsSuccess(probeState.models.length)}</span>
+                          <span className="underline decoration-dotted underline-offset-2">
+                            {probePanelOpen ? messages.modelApi.fetchModelsHideList : messages.modelApi.fetchModelsShowList}
+                          </span>
+                        </button>
+                        {probePanelOpen && (
+                          <div className="mt-1.5 max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-sm">
+                            {probeState.models.map((model) => (
+                              <button
+                                key={model}
+                                type="button"
+                                onClick={() => {
+                                  setFormState((prev) => ({ ...prev, modelName: model }));
+                                  setProbePanelOpen(false);
+                                }}
+                                className={`block w-full truncate px-3 py-1.5 text-left text-sm transition-colors hover:bg-slate-50 ${
+                                  formState.modelName === model ? 'bg-sky-50 text-sky-700' : 'text-slate-700'
+                                }`}
+                              >
+                                {model}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
 
