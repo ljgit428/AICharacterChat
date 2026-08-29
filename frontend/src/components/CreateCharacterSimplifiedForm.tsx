@@ -243,6 +243,8 @@ type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'affiliation
 
 const AI_HIGHLIGHT_MS = 1200;
 const AI_UNDO_WINDOW_MS = 30000;
+// 与后端 REDUCE_PIPELINE_MIN_FILES 对齐：达到该数量走分批精读流水线，耗时以分钟计。
+const LARGE_BATCH_HINT_FILES = 12;
 
 function normalizePromptPreviewLocale(value: string): PromptPreviewLocale {
   return value === 'en-US' ? 'en-US' : 'zh-CN';
@@ -415,6 +417,7 @@ interface ReferenceAndAiPanelProps {
   uploadProgress: { done: number; total: number } | null;
   isGenerating: boolean;
   aiStageText: string;
+  aiElapsedText: string;
   canUndo: boolean;
   textReferenceCount: number;
   autoTargetName: string;
@@ -429,12 +432,22 @@ interface ReferenceAndAiPanelProps {
   locale: PromptPreviewLocale;
 }
 
+function formatAiElapsed(seconds: number, locale: string): string {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (locale === 'zh-CN') {
+    return minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+  }
+  return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
+}
+
 function ReferenceAndAiPanel({
   files,
   isUploading,
   uploadProgress,
   isGenerating,
   aiStageText,
+  aiElapsedText,
   canUndo,
   textReferenceCount,
   autoTargetName,
@@ -763,6 +776,9 @@ function ReferenceAndAiPanel({
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none transition-all focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20"
           />
           <p className="text-[11px] text-gray-500">{copy.targetNameHelper}</p>
+          {textReferenceCount >= LARGE_BATCH_HINT_FILES && !autoTargetName.trim() && (
+            <p className="text-[11px] leading-4 text-amber-700">{copy.targetNameRecommendedHint}</p>
+          )}
         </div>
 
         <div className="space-y-1">
@@ -798,6 +814,12 @@ function ReferenceAndAiPanel({
           {textReferenceCount > 0 && (
             <p className="text-center text-[11px] text-gray-400">
               {copy.aiAnalyzingCount(textReferenceCount)}
+              {aiElapsedText ? ` · ${aiElapsedText}` : ''}
+            </p>
+          )}
+          {textReferenceCount >= LARGE_BATCH_HINT_FILES && (
+            <p className="rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-center text-[11px] leading-4 text-violet-800">
+              {copy.aiGenerationLargeSetHint}
             </p>
           )}
         </div>
@@ -997,6 +1019,18 @@ export default function CreateCharacterSimplifiedForm({
     }, 2600);
     return () => clearInterval(handle);
   }, [aiLoading, copy.characterForm.aiAnalyzingStages]);
+
+  // 大批量资料分析以分钟计：每秒刷新一次计时，避免用户面对无反馈的转圈。
+  const [aiStartedAt, setAiStartedAt] = useState(0);
+  useEffect(() => {
+    if (!aiLoading) {
+      setAiStartedAt(0);
+      return;
+    }
+    setAiStartedAt(Date.now());
+    const handle = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(handle);
+  }, [aiLoading]);
 
   const updateForm = (field: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -1314,6 +1348,9 @@ export default function CreateCharacterSimplifiedForm({
   const textReferenceCount = backgroundFiles.filter((file) => file.type === 'text').length;
   const aiStages = copy.characterForm.aiAnalyzingStages;
   const aiStageText = aiStages.length > 0 ? aiStages[aiStageIndex % aiStages.length] : '';
+  const aiElapsedText = aiStartedAt
+    ? copy.characterForm.aiGenerationElapsed(formatAiElapsed(Math.max(0, Math.floor((now - aiStartedAt) / 1000)), locale))
+    : '';
   // 仅在「跟随全局（全局可能是 genie）/ 明确 genie」且版本不被 genie 支持时提示；
   // gptsovits 引擎下 v2pro/v4 是合法组合，不应打扰。
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
@@ -1432,6 +1469,7 @@ export default function CreateCharacterSimplifiedForm({
               uploadProgress={uploadProgress}
               isGenerating={aiLoading}
               aiStageText={aiStageText}
+              aiElapsedText={aiElapsedText}
               canUndo={canUndoAiFill}
               textReferenceCount={textReferenceCount}
               autoTargetName={autoTargetName}

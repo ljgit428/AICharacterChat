@@ -888,6 +888,89 @@ class ReducePipelineHelperTests(TestCase):
         self.assertNotIn("not-a-dict", draft["example_dialogue"])
         self.assertNotIn("not-a-list", draft["example_dialogue"])
 
+    def test_batch_prompt_clamps_oversized_files(self):
+        """单文件正文进入批次 prompt 前必须限量：200+ 文件 × 全文会让每批 prompt 爆炸。"""
+        from chat.character_reduce import (
+            MAX_BATCH_FILE_CHARS,
+            MAX_NO_TARGET_FILE_CHARS,
+            _build_batch_prompt,
+        )
+
+        body = "玛丽: 这是台词\n旁白: 描述\n" * 2000
+        upload = {"name": "big.txt", "content": body, "line_count": 2000}
+
+        windowed = _build_batch_prompt([upload], "玛丽", "main")
+        self.assertIn("中段省略", windowed)
+        self.assertLess(len(windowed), MAX_BATCH_FILE_CHARS * 3)
+
+        # 未指定目标名时所有文件都落客串层，退化为逐文件限量截断。
+        no_target = _build_batch_prompt([upload], "", "cameo")
+        self.assertIn("中段省略", no_target)
+        self.assertLess(len(no_target), MAX_NO_TARGET_FILE_CHARS + 200)
+
+    def test_batch_note_failure_degrades_instead_of_raising(self):
+        """单批 LLM 调用/解析失败时降级为空笔记，不再让整条管线报废。"""
+        from chat.character_reduce import _produce_batch_notes
+
+        def broken_llm_call(system_prompt, user_prompt):
+            raise RuntimeError("boom")
+
+        notes = _produce_batch_notes(
+            [{"name": "a.txt", "content": "玛丽: 你好", "line_count": 1}],
+            "玛丽",
+            "cameo",
+            broken_llm_call,
+        )
+        self.assertEqual(notes.get("batch_summary"), "")
+        self.assertEqual(notes.get("citations"), [])
+        self.assertIn("_error", notes)
+
+    def test_large_batch_count_merges_in_two_levels(self):
+        """批次笔记超过 MERGE_GROUP_SIZE 时按组部分合并，控制合并输入体积。"""
+        from chat.character_reduce import MERGE_GROUP_SIZE, _merge_notes
+
+        calls = []
+
+        def ok_llm_call(system_prompt, user_prompt):
+            calls.append(user_prompt)
+            return json.dumps({
+                "profile_summary": {},
+                "dialogue_library": {},
+                "behavior_samples": [],
+                "evolution": [],
+            })
+
+        notes = [
+            {"batch_summary": f"批 {i}", "citations": []}
+            for i in range(MERGE_GROUP_SIZE + 3)
+        ]
+        _merge_notes(notes, ok_llm_call)
+        # 13 批 → 两组部分合并 + 一次最终合并 = 3 次调用
+        self.assertEqual(len(calls), 3)
+
+    def test_run_reduce_pipeline_runs_parallel_batches_and_reports_failures(self):
+        from chat.character_reduce import run_reduce_pipeline
+
+        uploads = [
+            {"name": f"f{i}.txt", "content": f"玛丽: 第{i}句台词", "line_count": 1}
+            for i in range(20)
+        ]
+
+        def llm_call(system_prompt, user_prompt):
+            if "角色分析师" in system_prompt:
+                return json.dumps({"batch_summary": "s", "citations": []})
+            return json.dumps({
+                "profile_summary": {"name": "玛丽"},
+                "dialogue_library": {},
+            })
+
+        result = run_reduce_pipeline(uploads, "玛丽", llm_call)
+        self.assertEqual(result["batch_count"], 4)  # 20 files / 6 per batch
+        self.assertEqual(result["failed_batches"], 0)
+        self.assertEqual(result["result"]["profile_summary"]["name"], "玛丽")
+        # 每批 6 个文件都要被精读过：合并前每个上传文件都出现在某个批次 prompt 里
+        self.assertEqual(result["tier_counts"]["cameo"], 20)
+
 
 @override_settings(DATABASES=SQLITE_TEST_DATABASES)
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)

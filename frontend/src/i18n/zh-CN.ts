@@ -514,6 +514,9 @@ export const zhCNMessages = {
     aiPrimaryActionLoading: "正在分析资料...",
     aiPrimaryActionDisabledHint: "请先上传文本文件或写点提示。",
     aiAnalyzingCount: (count: number) => `正在分析 ${count} 个文本文件`,
+    aiGenerationElapsed: (time: string) => `已用时 ${time}`,
+    aiGenerationLargeSetHint: "资料较多，AI 正在分批精读，约需几分钟，请保持页面打开。",
+    targetNameRecommendedHint: "文件较多时，填写目标角色名可明显提升分析速度与精度。",
     aiAnalyzingStages: [
       "正在读取资料文件...",
       "正在定位目标角色台词...",

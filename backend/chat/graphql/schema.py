@@ -557,6 +557,16 @@ class Mutation:
                     target_name,
                     llm_call=reduce_llm_call,
                 )
+                failed_batches = pipeline_result.get("failed_batches") or 0
+                if failed_batches:
+                    logger.warning(
+                        "Reduce pipeline produced %s/%s batches with degraded notes "
+                        "(files=%s, target=%r).",
+                        failed_batches,
+                        pipeline_result.get("batch_count"),
+                        len(text_uploads),
+                        target_name,
+                    )
                 draft_data = reduce_result_to_draft(pipeline_result)
                 return PrisMateDraft(
                     name=draft_data.get("name", "Unknown"),
