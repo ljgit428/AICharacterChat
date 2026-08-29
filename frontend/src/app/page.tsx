@@ -430,6 +430,14 @@ function AIStudioLayoutContent() {
                 <span className="text-slate-400"><Database size={18} /></span>
                 <span className="min-w-0 flex-1 truncate text-left">{messages.memory.pageTitle}</span>
               </button>
+              <button
+                type="button"
+                onClick={() => router.push('/soul')}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200 hover:bg-white/80 hover:text-slate-900"
+              >
+                <span className="text-slate-400"><FolderTree size={18} /></span>
+                <span className="min-w-0 flex-1 truncate text-left">{messages.soul.pageTitle}</span>
+              </button>
               <NavItem
                 icon={<PlusCircle size={18} />}
                 label={messages.shell.newCharacter}

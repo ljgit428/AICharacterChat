@@ -375,6 +375,10 @@ export const zhCNMessages = {
   },
   soul: {
     title: (characterName?: string) => `记忆文件系统${characterName ? ` / ${characterName}` : ""}`,
+    pageTitle: "记忆文件系统",
+    pageSubtitle: "全量浏览与管理角色的记忆树：上传的资料、长期记忆与会话记录，与聊天侧栏同一文件系统。",
+    backlinkToWorkspace: "回工作区",
+    selectCharacterToBrowse: "从左侧选择一个角色，即可全量浏览它的记忆文件系统。",
     files: "文件",
     loadingFiles: "正在加载文件...",
     loadingFile: "正在加载文件...",
