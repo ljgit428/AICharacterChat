@@ -425,6 +425,77 @@ class AssetEvent(models.Model):
         return f"{self.event_type} #{self.id} [{self.user_id}]"
 
 
+class CharacterDraftJob(models.Model):
+    """一次角色草稿提取任务（后台线程执行，前端轮询进度）。
+
+    同步 mutation 跑 reduce 管线要以分钟计，HTTP 请求超时/页面刷新就前功尽
+    弃。任务行即进度与结果的持久化：stage/progress 随管线推进更新；批次
+    笔记随批写入 ``checkpoint``，重试同一批文件时已完成批次不再重复调用
+    模型（断点续跑）。 runner 进程崩溃留下的 running 行由下次 start 时的
+    过期清扫标记为 failed。
+    """
+
+    class Status(models.TextChoices):
+        RUNNING = 'running', 'Running'
+        SUCCEEDED = 'succeeded', 'Succeeded'
+        FAILED = 'failed', 'Failed'
+        CANCELING = 'canceling', 'Canceling'
+        CANCELED = 'canceled', 'Canceled'
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='character_draft_jobs')
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.RUNNING)
+    stage = models.CharField(max_length=32, blank=True, default='')
+    progress_done = models.PositiveIntegerField(default=0)
+    progress_total = models.PositiveIntegerField(default=0)
+    detail = models.TextField(blank=True, default='')
+    # 同一输入组合的指纹（upload_ids + asset_ids + text_context + locale），
+    # 用于重试时找回可复用的批次笔记 checkpoint。
+    fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    # 内容指纹（全部文件 sha256 + text_context + locale）：同一语料重传后
+    # upload_ids 会变而内容指纹不变，据此直接复用已完成任务的结果（秒级）。
+    content_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    inputs = models.JSONField(default=dict, blank=True)
+    checkpoint = models.JSONField(default=list, blank=True)
+    result = models.JSONField(null=True, blank=True)
+    error = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-id']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+        ]
+
+    def __str__(self):
+        return f"draft job #{self.id} [{self.user_id}] {self.status}"
+
+
+class CharacterProfileNote(models.Model):
+    """按内容寻址的批次笔记缓存表（预留）。
+
+    预筛 + 单请求是当前主链路，本表暂不在请求路径上；保留给未来语料
+    超出单上下文预算、需要恢复多批精读时使用（signature 见
+    character_reduce._batch_signature，内容寻址，重传不失效）。
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='character_profile_notes')
+    signature = models.CharField(max_length=1024, db_index=True)
+    tier = models.CharField(max_length=16, blank=True, default='')
+    files = models.JSONField(default=list, blank=True)
+    note = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'signature'], name='uniq_profile_note_per_user_signature'),
+        ]
+
+    def __str__(self):
+        return f"profile note #{self.id} [{self.user_id}] {self.tier}"
+
+
 class ChatSession(models.Model):
     ORIGIN_CHOICES = [
         ('topic', 'Topic workspace'),

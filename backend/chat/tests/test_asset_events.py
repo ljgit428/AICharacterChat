@@ -255,3 +255,141 @@ class AssetProjectionRebuildTests(AssetEventBaseTests):
         )
         # Not authenticated → 401/403, never a 201 with a stored file.
         self.assertIn(response.status_code, (401, 403))
+
+
+class StagingUploadSizeLimitTests(AssetEventBaseTests):
+    """角色资料暂存上限（20MB）与聊天附件上限（2MB）拆分后的行为。"""
+
+    def test_text_upload_between_chat_and_staging_limits_is_accepted(self):
+        from chat.assets.store import AssetStore
+        from chat.attachments import MAX_TEXT_ATTACHMENT_BYTES
+
+        # 2MB ~ 20MB 之间：旧聊天上限会拒，语料暂存必须收。
+        content = b'x' * (MAX_TEXT_ATTACHMENT_BYTES + 1024)
+        file_obj = SimpleUploadedFile('big.txt', content, content_type='text/plain')
+        event, _ = AssetStore.upload(self.user, file_obj, 'big.txt')
+        self.assertEqual(event.event_type, 'asset/uploaded')
+
+    def test_text_upload_over_staging_limit_is_rejected(self):
+        from chat.assets.store import AssetStore
+        from chat.attachments import MAX_STAGING_TEXT_BYTES
+
+        file_obj = SimpleUploadedFile(
+            'huge.txt', b'x' * (MAX_STAGING_TEXT_BYTES + 1), content_type='text/plain',
+        )
+        with self.assertRaises(ValueError):
+            AssetStore.upload(self.user, file_obj, 'huge.txt')
+
+
+class DraftStagedUploadResolutionTests(AssetEventBaseTests):
+    """Draft 解析逻辑：全文读取、预览回退、assetIds 反查、整体预算。"""
+
+    def _upload_large(self, filename='novel.txt', total_chars=20000, user=None):
+        from chat.assets.store import AssetStore
+
+        # >16k 的文本：事件载荷只存 16k 预览，全文只在磁盘上。
+        content = ('角色台词行\n' * (total_chars // 6 + 1))[:total_chars]
+        file_obj = SimpleUploadedFile(filename, content.encode('utf-8'), content_type='text/plain')
+        event, _ = AssetStore.upload(user or self.user, file_obj, filename)
+        return event, content
+
+    def test_resolve_from_events_reads_full_text_beyond_preview_cap(self):
+        from chat.attachments import MAX_TEXT_ATTACHMENT_CHARS
+        from chat.graphql.schema import _resolve_staged_uploads_from_events
+
+        event, content = self._upload_large(total_chars=MAX_TEXT_ATTACHMENT_CHARS + 10000)
+        self.assertLessEqual(len(event.data['attachment_text_content']), MAX_TEXT_ATTACHMENT_CHARS)
+
+        uploads = _resolve_staged_uploads_from_events(self.user, [str(event.id)])
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0]['content'], content)
+
+    def test_resolve_from_events_falls_back_to_preview_when_file_missing(self):
+        from django.core.files.storage import default_storage
+
+        from chat.assets.store import AssetStore
+        from chat.graphql.schema import _resolve_staged_uploads_from_events
+
+        event, _ = self._upload_large()
+        default_storage.delete(event.data['file_path'])
+        uploads = _resolve_staged_uploads_from_events(self.user, [str(event.id)])
+        self.assertEqual(uploads[0]['content'], event.data['attachment_text_content'])
+
+    def test_resolve_from_assets_returns_attached_upload(self):
+        from chat.assets.store import AssetStore
+        from chat.graphql.schema import _resolve_staged_uploads_from_assets
+
+        event, content = self._upload_large()
+        assets = AssetStore.attach(self.character, [event.id])
+
+        uploads = _resolve_staged_uploads_from_assets(self.user, [str(assets[0].id)])
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0]['content'], content)
+        self.assertEqual(uploads[0]['name'], 'novel.txt')
+
+    def test_resolve_from_assets_rejects_other_users_assets(self):
+        from chat.assets.store import AssetStore
+        from chat.graphql.schema import _resolve_staged_uploads_from_assets
+        from chat.models import Character
+
+        other_character = Character.objects.create(
+            created_by=self.other_user,
+            name='Other Character',
+            description='Belongs to another user.',
+            scenario='Test',
+            tags=['assets'],
+        )
+        event, _ = self._upload_large(total_chars=100, user=self.other_user)
+        assets = AssetStore.attach(other_character, [event.id])
+
+        uploads = _resolve_staged_uploads_from_assets(self.user, [str(assets[0].id)])
+        self.assertEqual(uploads, [])
+
+    def test_resolve_from_assets_includes_legacy_rows_via_row_fields(self):
+        """事件溯源之前的直建资产行：没有 upload 事件，用行上字段兜底参与
+        分析；完全空的行才被跳过。"""
+        from chat.graphql.schema import _resolve_staged_uploads_from_assets
+        from chat.models import CharacterKnowledgeAsset
+
+        CharacterKnowledgeAsset.objects.create(
+            character=self.character,
+            attachment_name='legacy.txt',
+            attachment_kind='text',
+            attachment_text_content='legacy body',
+        )
+        CharacterKnowledgeAsset.objects.create(
+            character=self.character,
+            attachment_name='empty.txt',
+        )
+
+        uploads = _resolve_staged_uploads_from_assets(
+            self.user,
+            [str(asset.id) for asset in CharacterKnowledgeAsset.objects.order_by('id')],
+        )
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0]['content'], 'legacy body')
+        self.assertEqual(uploads[0]['name'], 'legacy.txt')
+
+    def test_full_text_budget_falls_back_to_preview(self):
+        from chat.attachments import MAX_TEXT_ATTACHMENT_CHARS
+        from chat.assets.store import AssetStore
+        from chat.graphql.schema import _staged_uploads_from_payloads
+
+        event_a, content_a = self._upload_large(filename='a.txt')
+        event_b, _ = self._upload_large(filename='b.txt')
+        self.assertGreater(len(content_a), MAX_TEXT_ATTACHMENT_CHARS)
+
+        payloads = [event_a.data, event_b.data]
+        uploads = _staged_uploads_from_payloads(payloads, {'remaining': 50})
+        # 预算 50 只够第一个文件读全文；第二个文件退回 16k 预览。
+        self.assertEqual(uploads[0]['content'], content_a)
+        self.assertEqual(uploads[1]['content'], event_b.data['attachment_text_content'])
+
+    def test_batch_cameo_segments_are_clamped_with_full_text_input(self):
+        from chat.character_reduce import MAX_BATCH_FILE_CHARS, _batch_file_body
+
+        # 目标高频出现且上下文窗口交叠的客串文件：全文输入下片段总和
+        # 远超单文件上限，必须被 clamp 住（否则批次 prompt 体积失控）。
+        content = ('玛丽: 台词一句\n旁白: 描述一句\n' * 2000)
+        body = _batch_file_body({'content': content, 'line_count': 2000}, '玛丽', 'cameo')
+        self.assertLessEqual(len(body), MAX_BATCH_FILE_CHARS + 20)

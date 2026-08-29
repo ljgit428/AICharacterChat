@@ -46,6 +46,11 @@ MAX_AUDIO_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_VIDEO_ATTACHMENT_BYTES = 100 * 1024 * 1024
 MAX_TEXT_ATTACHMENT_CHARS = 16000
 
+# 角色资料暂存（AssetStore.upload）走独立上限：语料单文件远大于聊天附件，
+# 2MB 的聊天上限会把剧本/小说整文件拒掉。事件载荷里仍只存 16k 预览，
+# 全文在 draft 解析时从磁盘读（见 graphql/schema.py 的全文读取逻辑）。
+MAX_STAGING_TEXT_BYTES = 20 * 1024 * 1024
+
 
 def _format_size_limit(max_bytes):
     """Render a byte limit as a human-friendly string (e.g. '2 MB', '512 KB').
@@ -80,10 +85,10 @@ def guess_attachment_kind(file_obj):
     raise ValueError("Only text files, images, audio, and videos are supported")
 
 
-def validate_attachment_size(file_obj, attachment_kind):
+def validate_attachment_size(file_obj, attachment_kind, max_text_bytes=None):
     size = getattr(file_obj, "size", 0) or 0
     limits = {
-        AttachmentKind.TEXT: MAX_TEXT_ATTACHMENT_BYTES,
+        AttachmentKind.TEXT: max_text_bytes or MAX_TEXT_ATTACHMENT_BYTES,
         AttachmentKind.IMAGE: MAX_IMAGE_ATTACHMENT_BYTES,
         AttachmentKind.AUDIO: MAX_AUDIO_ATTACHMENT_BYTES,
         AttachmentKind.VIDEO: MAX_VIDEO_ATTACHMENT_BYTES,

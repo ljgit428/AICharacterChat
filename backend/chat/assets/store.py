@@ -20,6 +20,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..attachments import (
+    MAX_STAGING_TEXT_BYTES,
     extract_text_attachment_content,
     guess_attachment_kind,
     validate_attachment_size,
@@ -89,7 +90,8 @@ class AssetStore:
         kind, mime_type = guess_attachment_kind(file_obj)
         if kind not in {AttachmentKind.TEXT, AttachmentKind.IMAGE}:
             raise ValueError('Only text files and images are supported for character reference uploads.')
-        validate_attachment_size(file_obj, kind)
+        # 语料文件放宽到 MAX_STAGING_TEXT_BYTES；聊天附件仍走 2MB 默认上限。
+        validate_attachment_size(file_obj, kind, max_text_bytes=MAX_STAGING_TEXT_BYTES)
         text_content = extract_text_attachment_content(file_obj) if kind == AttachmentKind.TEXT else ''
         file_obj.seek(0)
 

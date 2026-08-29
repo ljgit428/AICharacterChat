@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import google.generativeai as genai
 import requests
 from celery import shared_task
+from django.conf import settings
 
 from .attachments import (
     MAX_VIDEO_ATTACHMENT_BYTES,
@@ -942,6 +943,7 @@ def _request_openai_compatible_completion(
     messages,
     base_url,
     tools=None,
+    timeout=None,
 ):
     # openai_compatible 允许本地反代网关自鉴权：仅有 key 时附加 Authorization header。
     headers = {'Content-Type': 'application/json'}
@@ -956,7 +958,7 @@ def _request_openai_compatible_completion(
             'messages': messages,
             **({'tools': tools, 'tool_choice': 'auto'} if tools else {}),
         },
-        timeout=90,
+        timeout=int(timeout or getattr(settings, 'LLM_REQUEST_TIMEOUT', 90)),
     )
     response.raise_for_status()
     return response.json()
@@ -986,7 +988,7 @@ def _execute_local_memory_tool(filesystem, tool_name, raw_arguments):
     }
 
 
-def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None):
+def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, timeout=None):
     """Run the OpenAI-compatible tool loop as a generator.
 
     Yields event dicts as they happen so streaming callers can surface tool
@@ -1000,6 +1002,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             api_key=api_key,
             messages=messages,
             base_url=base_url,
+            timeout=timeout,
         )
         usage = _extract_token_usage(response_json.get('usage'))
         if usage:
@@ -1017,6 +1020,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 messages=history,
                 base_url=base_url,
                 tools=tools,
+                timeout=timeout,
             )
         except Exception as exc:
             if _should_retry_without_tools(exc):
@@ -1029,6 +1033,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                     api_key=api_key,
                     messages=messages,
                     base_url=base_url,
+                    timeout=timeout,
                 )
                 usage = _extract_token_usage(response_json.get('usage'))
                 if usage:
@@ -1535,7 +1540,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
     raise ValueError(f"Unsupported model provider: {provider}")
 
 
-def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None):
+def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None, timeout=None):
     provider = runtime_config['provider']
     model_name = runtime_config['model_name']
     api_key = runtime_config['api_key']
@@ -1560,6 +1565,7 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=No
             base_url=runtime_config.get('base_url', ''),
             tools=tools,
             filesystem=filesystem,
+            timeout=timeout,
         ):
             if event.get('type') == 'final_text':
                 final_parts.append(event.get('content') or '')

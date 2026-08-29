@@ -1,20 +1,28 @@
 import strawberry
 from typing import List, Optional
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.core.files import File
 from django.core.files.storage import default_storage
+from django.db import transaction
+import hashlib
 import json
 import logging
 import mimetypes
 import os
 
-from .types import CharacterType, ChatSessionType, CharacterInput, PrisMateDraft
+from .types import CharacterDraftJobType, CharacterType, ChatSessionType, CharacterInput, PrisMateDraft, _serialize_character_draft_job
 from chat.attachments import extract_text_attachment_content, guess_attachment_kind, validate_attachment_size
-from chat.character_reduce import _normalize_target_name, reduce_result_to_draft, run_reduce_pipeline
+from chat.character_reduce import (
+    SINGLE_SHOT_ENABLED,
+    _normalize_target_name,
+    extract_character_core_excerpts,
+)
 from chat.cleanup import _resolve_local_media_path, cleanup_character_files
+from chat.draft_jobs import start_draft_job_thread, sweep_stale_jobs
 from chat.memory.filesystem import StagedUploadMemoryFilesystem
-from chat.models import AttachmentKind, Character, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, ModelRole, ModelRoleAssignment, UserProfile
+from chat.models import AttachmentKind, AssetEvent, AssetEventType, Character, CharacterDraftJob, CharacterKnowledgeAsset, ChatSession, ModelConfiguration, ModelRole, ModelRoleAssignment, UserProfile
 from chat.tasks import (
     _build_memory_tool_specs,
     _extract_json_object,
@@ -284,10 +292,11 @@ def _resolve_staged_uploads(file_urls: Optional[List[str]], file_names: Optional
     return uploads
 
 
-def _resolve_staged_uploads_from_events(user, upload_ids: Optional[List[str]]) -> List[dict]:
+def _resolve_staged_uploads_from_events(user, upload_ids: Optional[List[str]], full_text_budget: Optional[dict] = None) -> List[dict]:
     """Resolve ``asset/uploaded`` events into staged-upload records for draft
-    generation. Text content comes straight from the event payload; the
-    staging file itself is only referenced by URL.
+    generation. Text content is read in full from the staging file on disk;
+    the stored ``attachment_text_content`` is only a 16k chat-attachment
+    preview and is used solely as a fallback when the staging file is gone.
     """
     if not upload_ids:
         return []
@@ -303,23 +312,128 @@ def _resolve_staged_uploads_from_events(user, upload_ids: Optional[List[str]]) -
         return []
 
     payload_map = AssetStore.event_payload_map(user, ids)
-    uploads = []
-    for upload_id in sorted(payload_map):
-        data = payload_map[upload_id]
-        name = (data.get('file_name') or '').strip() or 'uploaded-file'
-        kind = data.get('attachment_kind') or ''
-        mime_type = data.get('attachment_mime_type') or 'application/octet-stream'
-        file_path = data.get('file_path') or ''
-        file_url = default_storage.url(file_path) if file_path else ''
-        uploads.append({
-            "name": name,
-            "relative_path": name,
-            "kind": kind,
-            "mime_type": mime_type,
-            "content": data.get('attachment_text_content') or '',
-            "file_url": file_url,
-        })
-    return uploads
+    return _staged_uploads_from_payloads(
+        [payload_map[upload_id] for upload_id in sorted(payload_map)],
+        full_text_budget,
+    )
+
+
+def _resolve_staged_uploads_from_assets(user, asset_ids: Optional[List[str]], full_text_budget: Optional[dict] = None) -> List[dict]:
+    """Resolve attached ``CharacterKnowledgeAsset`` rows (edit mode) into
+    staged-upload records for draft generation.
+
+    Their upload events are already attached, so they cannot go through
+    ``AssetStore.event_payload_map`` (which only sees pending uploads);
+    the rows carry ``upload_event_id`` back to the event payload. Ownership
+    is enforced via ``character__created_by``.
+    """
+    if not asset_ids:
+        return []
+    ids = []
+    for value in asset_ids:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return []
+
+    assets = (
+        CharacterKnowledgeAsset.objects
+        .filter(id__in=ids, character__created_by=user)
+        .order_by('sort_order', 'id')
+    )
+    event_ids = [asset.upload_event_id for asset in assets if asset.upload_event_id]
+    payload_map: dict[int, dict] = {}
+    if event_ids:
+        events = AssetEvent.objects.filter(
+            id__in=event_ids, user=user, event_type=AssetEventType.UPLOADED,
+        )
+        payload_map = {event.id: (event.data or {}) for event in events}
+
+    payloads = []
+    for asset in assets:
+        data = payload_map.get(asset.upload_event_id)
+        if data:
+            # attach 投影会把 staging 文件搬进 character_knowledge_assets/ 并
+            # 删除原文件（projection._project_attached），事件载荷里的
+            # file_path 在挂接后已失效；资产行的 FileField 才是现在的物理
+            # 位置，全文读取必须优先用它。
+            committed_name = (asset.file.name or '').strip() if asset.file else ''
+            if committed_name:
+                data = {**data, 'file_path': committed_name}
+        elif asset.attachment_kind == AttachmentKind.TEXT and (asset.attachment_text_content or '').strip():
+            # 事件溯源之前的直建资产行：没有可反查的 upload 事件，用行上
+            # 字段兜底（磁盘文件仍在，全文照读；不在则退回行内预览文本）。
+            data = {
+                'file_path': asset.file.name or '',
+                'file_name': asset.attachment_name or 'uploaded-file',
+                'attachment_kind': asset.attachment_kind,
+                'attachment_mime_type': asset.attachment_mime_type or 'text/plain',
+                'attachment_text_content': asset.attachment_text_content,
+            }
+        else:
+            continue
+        payloads.append(data)
+    return _staged_uploads_from_payloads(payloads, full_text_budget)
+
+
+# 全文读取护栏：角色语料需要全文做分层计数与台词窗口提取，但一批 2000 个
+# 文件全部无上限读入内存会撑爆进程。单文件超过上限保留头尾，整体预算耗尽
+# 后剩余文件退回事件载荷里的 16k 预览。
+DRAFT_FILE_FULL_TEXT_CHAR_LIMIT = 200_000
+DRAFT_FULL_TEXT_TOTAL_CHAR_BUDGET = 40_000_000
+
+
+def _read_full_staging_text(file_path: str, preview: str) -> str:
+    """Read a staged upload's full text from storage, capped per file.
+
+    Falls back to the event payload's 16k preview when the staging file is
+    missing or unreadable (e.g. reclaimed after TTL mid-draft).
+    """
+    if not file_path:
+        return preview
+    try:
+        with default_storage.open(file_path, 'rb') as stored_file:
+            raw_bytes = stored_file.read()
+    except Exception as exc:  # noqa: BLE001 - 读盘任何失败都降级到预览
+        logger.warning("Failed to read full staging text from %s: %s", file_path, exc)
+        return preview
+
+    text = _decode_text_content(raw_bytes)
+    if len(text) > DRAFT_FILE_FULL_TEXT_CHAR_LIMIT:
+        half = DRAFT_FILE_FULL_TEXT_CHAR_LIMIT // 2
+        text = text[:half].rstrip() + "\n…[中段省略]…\n" + text[-half:].lstrip()
+    return text
+
+
+def _staged_upload_from_payload(data: dict, full_text_budget: dict) -> dict:
+    name = (data.get('file_name') or '').strip() or 'uploaded-file'
+    kind = data.get('attachment_kind') or ''
+    mime_type = data.get('attachment_mime_type') or 'application/octet-stream'
+    file_path = data.get('file_path') or ''
+    preview = data.get('attachment_text_content') or ''
+    if kind == AttachmentKind.TEXT and full_text_budget['remaining'] > 0:
+        content = _read_full_staging_text(file_path, preview)
+        full_text_budget['remaining'] -= len(content)
+    else:
+        content = preview
+    return {
+        "name": name,
+        "relative_path": name,
+        "kind": kind,
+        "mime_type": mime_type,
+        "content": content,
+        "file_url": default_storage.url(file_path) if file_path else '',
+        # 上传时算好的内容哈希：批次签名的内容寻址依据（重传不失效）。
+        "content_hash": (data.get('sha256') or '').strip(),
+    }
+
+
+def _staged_uploads_from_payloads(payloads: List[dict], full_text_budget: Optional[dict] = None) -> List[dict]:
+    if full_text_budget is None:
+        full_text_budget = {'remaining': DRAFT_FULL_TEXT_TOTAL_CHAR_BUDGET}
+    return [_staged_upload_from_payload(data, full_text_budget) for data in payloads]
 
 
 def _build_staged_upload_index_section(locale: str, directory_index: str) -> str:
@@ -481,6 +595,158 @@ def _apply_asset_diff(character, asset_diff):
     if asset_diff['detached']:
         AssetStore.detach(character, asset_diff['detached'], reason='user edit')
 
+
+def _compute_character_draft(
+    user,
+    draft_locale: str,
+    text_context: Optional[str],
+    staged_uploads: List[dict],
+) -> tuple[dict, dict]:
+    """Draft 生成共用核心：同步 mutation 与后台任务（draft_jobs）都走这里。
+
+    主链路（产品决策：请求次数最少化，Map-Reduce 已从请求路径移除）：
+    - 大语料（>= REDUCE_PIPELINE_MIN_FILES）且指定目标角色 → 纯规则预筛
+      出角色相关片段（0 LLM）→ **1 次** LLM 请求直接出卡；输出无效时带
+      提醒重试 1 次，仍失败则让任务明确失败——不回退多请求管线。
+    - 少量文件 / 未指定目标角色 → Memory Tools 按需读取（模型自己挑文件，
+      请求数受工具循环轮次约束）；不支持工具的 provider 走内联截断。
+
+    返回 (draft_fields, meta)：draft_fields 键与 PrisMateDraft 字段对齐。
+    模型输出不是合法 JSON 时抛 ValueError，由调用方决定呈现方式。
+    """
+    runtime_config = _get_draft_runtime_config(user)
+
+    text_uploads = [
+        upload for upload in staged_uploads
+        if upload.get("kind") == AttachmentKind.TEXT and upload.get("content")
+    ]
+    if len(text_uploads) >= REDUCE_PIPELINE_MIN_FILES and SINGLE_SHOT_ENABLED:
+        target_name = _normalize_target_name(text_context)
+        if target_name:
+            excerpts = extract_character_core_excerpts(text_uploads, target_name)
+            if excerpts:
+                # draft 单请求允许比聊天更长的读超时（大 prompt 的 prefill 慢）。
+                draft_timeout = int(getattr(settings, 'CHARACTER_DRAFT_TIMEOUT', 180))
+                prompt = _build_character_draft_prompt(draft_locale, text_context, [excerpts])
+
+                def _single_call(prompt_text: str) -> str:
+                    return _generate_text(runtime_config, prompt_text, timeout=draft_timeout)
+
+                try:
+                    raw_text = _single_call(prompt)
+                except Exception as exc:  # noqa: BLE001 - 超时/网络失败自动减半预算重试
+                    logger.warning(
+                        'Single-shot draft request failed (%s: %s); retrying with half excerpt budget.',
+                        type(exc).__name__, str(exc)[:120],
+                    )
+                    excerpts = extract_character_core_excerpts(
+                        text_uploads, target_name, max_total_chars=max(8_000, len(excerpts) // 2),
+                    )
+                    prompt = _build_character_draft_prompt(draft_locale, text_context, [excerpts])
+                    raw_text = _single_call(prompt)
+
+                data = _extract_json_object(raw_text)
+                if not data:
+                    retry_prompt = (
+                        prompt
+                        + "\n\n（上一次输出无法解析，请严格只输出一个 JSON 对象，不要输出任何额外文本。）"
+                    )
+                    raw_text = _generate_text(runtime_config, retry_prompt, timeout=draft_timeout)
+                    data = _extract_json_object(raw_text)
+                if not data:
+                    raw_for_preview = raw_text or ''
+                    preview = raw_for_preview[:300]
+                    raise ValueError(
+                        "Model did not return a valid JSON object for the character draft "
+                        f"(single-shot, retried once). Raw model response preview: {preview or '(empty response)'}"
+                    )
+                logger.info(
+                    'Character draft via single-shot request (files=%s, excerpt_chars=%s).',
+                    len(text_uploads), len(excerpts),
+                )
+                return {
+                    "name": data.get("name", "Unknown"),
+                    "description": data.get("description", ""),
+                    "affiliation": data.get("affiliation", ""),
+                    "personality": (data.get("personality") or "").strip(),
+                    "appearance": "",
+                    "tags": data.get("tags", []) or [],
+                    "visual_summary": "",
+                    "example_dialogue": (data.get("example_dialogue") or "").strip(),
+                }, {
+                    "path": "single_shot",
+                    "target": target_name,
+                    "files": len(text_uploads),
+                    "excerpt_chars": len(excerpts),
+                }
+            # 预筛为空（目标角色在语料中没出现）→ 落到按需读取路径。
+
+    use_memory_tools = bool(staged_uploads) and _supports_memory_tool_mode(runtime_config)
+
+    if use_memory_tools:
+        filesystem = StagedUploadMemoryFilesystem(staged_uploads)
+        messages = _build_character_draft_tool_prompt(
+            draft_locale,
+            text_context,
+            len(staged_uploads),
+            directory_index=filesystem.build_directory_index(),
+        )
+        raw_text = _generate_text(
+            runtime_config,
+            messages,
+            tools=_build_memory_tool_specs(),
+            filesystem=filesystem,
+        )
+    else:
+        raw_file_contents = [
+            upload["content"]
+            for upload in staged_uploads
+            if upload["kind"] == AttachmentKind.TEXT and upload["content"]
+        ]
+        truncated_contents, dropped_tail_count = _truncate_draft_contents(raw_file_contents)
+        prompt = _build_character_draft_prompt(
+            draft_locale,
+            text_context,
+            truncated_contents,
+            dropped_tail_count=dropped_tail_count,
+        )
+        raw_text = _generate_text(runtime_config, prompt)
+
+    data = _extract_json_object(raw_text)
+    if not data:
+        # Hard fail: the prompt contract is "return ONLY a raw JSON
+        # object". When the model returns prose (or nothing) the user
+        # should see a clear error, not a half-populated form. The error
+        # message embeds a preview of the raw model response so the user
+        # can see what the proxy sent without silent degradation. The
+        # parser has also written the complete text to a file in the OS
+        # temp directory and logged the full path at INFO level, so the
+        # backend log is the source of truth for the dump file location
+        # (don't hardcode /tmp here — on Windows that path doesn't exist).
+        raw_for_preview = raw_text or ''
+        preview = raw_for_preview[:500]
+        if len(raw_for_preview) > 500:
+            preview += (
+                f'... [truncated; full response was {len(raw_for_preview)} chars; '
+                f'see the backend log for the parser dump file path]'
+            )
+        raise ValueError(
+            f"Model did not return a valid JSON object for the character draft. "
+            f"Raw model response preview: {preview or '(empty response)'}"
+        )
+
+    return {
+        "name": data.get("name", "Unknown"),
+        "description": data.get("description", ""),
+        "affiliation": data.get("affiliation", ""),
+        "personality": (data.get("personality") or "").strip(),
+        "appearance": "",
+        "tags": data.get("tags", []) or [],
+        "visual_summary": "",
+        "example_dialogue": (data.get("example_dialogue") or "").strip(),
+    }, {}
+
+
 @strawberry.input
 class ChatSessionInput:
     character_id: strawberry.ID
@@ -493,6 +759,7 @@ class Mutation:
         self,
         info,
         upload_ids: Optional[List[str]] = None,
+        asset_ids: Optional[List[str]] = None,
         file_url: Optional[str] = None,
         file_urls: Optional[List[str]] = None,
         file_names: Optional[List[str]] = None,
@@ -511,15 +778,42 @@ class Mutation:
 
         ``upload_ids`` are the ``asset/uploaded`` event ids returned by the
         upload endpoint; they are resolved from the asset event log.
+        ``asset_ids`` are ``CharacterKnowledgeAsset`` row ids of an existing
+        character (edit mode); both can be combined to analyze new uploads
+        together with already-attached reference files.
         """
         user = await sync_to_async(_get_authenticated_user)(info)
 
         try:
-            runtime_config = await sync_to_async(_get_draft_runtime_config)(user)
             draft_locale = await sync_to_async(_get_draft_prompt_locale)(user, locale)
 
-            if upload_ids:
-                staged_uploads = await sync_to_async(_resolve_staged_uploads_from_events)(user, upload_ids)
+            if upload_ids or asset_ids:
+                full_text_budget = {'remaining': DRAFT_FULL_TEXT_TOTAL_CHAR_BUDGET}
+                staged_uploads = []
+                if upload_ids:
+                    staged_uploads.extend(
+                        await sync_to_async(_resolve_staged_uploads_from_events)(user, upload_ids, full_text_budget)
+                    )
+                if asset_ids:
+                    staged_uploads.extend(
+                        await sync_to_async(_resolve_staged_uploads_from_assets)(user, asset_ids, full_text_budget)
+                    )
+                if full_text_budget['remaining'] <= 0:
+                    logger.warning(
+                        "Draft full-text budget exhausted (%s chars); remaining files fall back to preview text.",
+                        DRAFT_FULL_TEXT_TOTAL_CHAR_BUDGET,
+                    )
+                # uploadIds 与 assetIds 理论上不相交（新上传未挂接、已挂接的走
+                # assetIds），这里按 file_url 兜底去重，防止同文件重复进管线。
+                seen_urls = set()
+                deduped_uploads = []
+                for upload in staged_uploads:
+                    dedup_key = upload.get("file_url") or upload.get("name")
+                    if dedup_key in seen_urls:
+                        continue
+                    seen_urls.add(dedup_key)
+                    deduped_uploads.append(upload)
+                staged_uploads = deduped_uploads
             else:
                 normalized_file_urls = []
                 if file_urls:
@@ -528,121 +822,13 @@ class Mutation:
                     normalized_file_urls.append(file_url)
                 staged_uploads = _resolve_staged_uploads(normalized_file_urls, file_names)
 
-            # 大量参考文件：走 reduce 流水线（分层精读 → 结构化笔记 → 合并），
-            # 避免单次 ReAct loop 无法覆盖全部文件。少量文件仍走 Memory Tools
-            # 按需读取，保证小批量响应速度。
-            text_uploads = [
-                upload for upload in staged_uploads
-                if upload.get("kind") == AttachmentKind.TEXT and upload.get("content")
-            ]
-            if len(text_uploads) >= REDUCE_PIPELINE_MIN_FILES:
-                target_name = _normalize_target_name(text_context)
-
-                def reduce_llm_call(system_prompt: str, user_prompt: str) -> str:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ]
-                    raw = _generate_text(runtime_config, messages)
-                    data = _extract_json_object(raw)
-                    if not data:
-                        raise ValueError(
-                            "Model did not return a valid JSON object for the reduce step. "
-                            f"Raw model response preview: {(raw or '')[:300]!r}"
-                        )
-                    return json.dumps(data, ensure_ascii=False)
-
-                pipeline_result = await sync_to_async(run_reduce_pipeline)(
-                    text_uploads,
-                    target_name,
-                    llm_call=reduce_llm_call,
-                )
-                failed_batches = pipeline_result.get("failed_batches") or 0
-                if failed_batches:
-                    logger.warning(
-                        "Reduce pipeline produced %s/%s batches with degraded notes "
-                        "(files=%s, target=%r).",
-                        failed_batches,
-                        pipeline_result.get("batch_count"),
-                        len(text_uploads),
-                        target_name,
-                    )
-                draft_data = reduce_result_to_draft(pipeline_result)
-                return PrisMateDraft(
-                    name=draft_data.get("name", "Unknown"),
-                    description=draft_data.get("description", ""),
-                    affiliation=draft_data.get("affiliation", ""),
-                    personality=draft_data.get("personality", ""),
-                    appearance=draft_data.get("appearance", ""),
-                    tags=draft_data.get("tags", []) or [],
-                    visual_summary=draft_data.get("visual_summary", ""),
-                    example_dialogue=(draft_data.get("example_dialogue") or "").strip(),
-                )
-
-            use_memory_tools = bool(staged_uploads) and _supports_memory_tool_mode(runtime_config)
-
-            if use_memory_tools:
-                filesystem = StagedUploadMemoryFilesystem(staged_uploads)
-                messages = _build_character_draft_tool_prompt(
-                    draft_locale,
-                    text_context,
-                    len(staged_uploads),
-                    directory_index=filesystem.build_directory_index(),
-                )
-                raw_text = await sync_to_async(_generate_text)(
-                    runtime_config,
-                    messages,
-                    tools=_build_memory_tool_specs(),
-                    filesystem=filesystem,
-                )
-            else:
-                raw_file_contents = [
-                    upload["content"]
-                    for upload in staged_uploads
-                    if upload["kind"] == AttachmentKind.TEXT and upload["content"]
-                ]
-                truncated_contents, dropped_tail_count = _truncate_draft_contents(raw_file_contents)
-                prompt = _build_character_draft_prompt(
-                    draft_locale,
-                    text_context,
-                    truncated_contents,
-                    dropped_tail_count=dropped_tail_count,
-                )
-                raw_text = await sync_to_async(_generate_text)(runtime_config, prompt)
-            data = _extract_json_object(raw_text)
-            if not data:
-                # Hard fail: the prompt contract is "return ONLY a raw JSON
-                # object". When the model returns prose (or nothing) the user
-                # should see a clear error, not a half-populated form. The
-                # error message embeds a preview of the raw model response
-                # so the user can see what the proxy sent without silent
-                # degradation. The parser has also written the complete text
-                # to a file in the OS temp directory and logged the full
-                # path at INFO level, so the backend log is the source of
-                # truth for the dump file location (don't hardcode /tmp
-                # here — on Windows that path doesn't exist).
-                raw_for_preview = raw_text or ''
-                preview = raw_for_preview[:500]
-                if len(raw_for_preview) > 500:
-                    preview += (
-                        f'... [truncated; full response was {len(raw_for_preview)} chars; '
-                        f'see the backend log for the parser dump file path]'
-                    )
-                raise ValueError(
-                    f"Model did not return a valid JSON object for the character draft. "
-                    f"Raw model response preview: {preview or '(empty response)'}"
-                )
-
-            return PrisMateDraft(
-                name=data.get("name", "Unknown"),
-                description=data.get("description", ""),
-                affiliation=data.get("affiliation", ""),
-                personality=(data.get("personality") or "").strip(),
-                appearance="",
-                tags=data.get("tags", []) or [],
-                visual_summary="",
-                example_dialogue=(data.get("example_dialogue") or "").strip(),
+            draft_fields, _meta = await sync_to_async(_compute_character_draft)(
+                user,
+                draft_locale,
+                text_context,
+                staged_uploads,
             )
+            return PrisMateDraft(**draft_fields)
 
         except Exception as e:
             logger.error(f"AI Generation Error: {e}")
@@ -652,6 +838,92 @@ class Mutation:
                 personality="", appearance="", affiliation="",
                 tags=[], visual_summary="", example_dialogue=""
             )
+
+    @strawberry.mutation
+    async def start_character_draft(
+        self,
+        info,
+        upload_ids: Optional[List[str]] = None,
+        asset_ids: Optional[List[str]] = None,
+        text_context: Optional[str] = None,
+        locale: Optional[str] = None,
+    ) -> CharacterDraftJobType:
+        """创建后台草稿任务并立即返回；前端轮询 characterDraftJob 拿进度。
+
+        同指纹（uploadIds+assetIds+textContext+locale）的历史任务若留有
+        批次笔记 checkpoint，复用到新任务上——重试/重新生成时已完成批次
+        不再重复调用模型。
+        """
+        user = await sync_to_async(_get_authenticated_user)(info)
+
+        @sync_to_async
+        def create_job() -> CharacterDraftJob:
+            sweep_stale_jobs(user)
+
+            fingerprint_source = json.dumps(
+                {
+                    'upload_ids': sorted(int(i) for i in (upload_ids or []) if str(i).strip().isdigit()),
+                    'asset_ids': sorted(int(i) for i in (asset_ids or []) if str(i).strip().isdigit()),
+                    'text_context': text_context or '',
+                    'locale': locale or '',
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            fingerprint = hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()
+
+            carried_checkpoint = []
+            previous = (
+                CharacterDraftJob.objects
+                .filter(user=user, fingerprint=fingerprint)
+                .exclude(checkpoint=[])
+                .order_by('-id')
+                .first()
+            )
+            if previous is not None:
+                carried_checkpoint = list(previous.checkpoint or [])
+                logger.info(
+                    'Draft job resumes from checkpoint of job %s (%s batch notes).',
+                    previous.id, len(carried_checkpoint),
+                )
+
+            with transaction.atomic():
+                job = CharacterDraftJob.objects.create(
+                    user=user,
+                    status=CharacterDraftJob.Status.RUNNING,
+                    stage='queued',
+                    fingerprint=fingerprint,
+                    inputs={
+                        'upload_ids': upload_ids or [],
+                        'asset_ids': asset_ids or [],
+                        'text_context': text_context or '',
+                        'locale': locale or '',
+                    },
+                    checkpoint=carried_checkpoint,
+                )
+                # 请求事务提交后再启动线程，保证线程能看到任务行。
+                transaction.on_commit(lambda: start_draft_job_thread(job.id))
+            return job
+
+        job = await create_job()
+        return _serialize_character_draft_job(job)
+
+    @strawberry.mutation
+    async def cancel_character_draft_job(self, info, id: strawberry.ID) -> CharacterDraftJobType:
+        user = await sync_to_async(_get_authenticated_user)(info)
+
+        @sync_to_async
+        def cancel_job() -> CharacterDraftJob:
+            job = CharacterDraftJob.objects.get(pk=id, user=user)
+            if job.status == CharacterDraftJob.Status.RUNNING:
+                # 协作式取消：runner 在批次边界检查该标记并落定 canceled。
+                job.status = CharacterDraftJob.Status.CANCELING
+                job.stage = 'canceling'
+                job.save(update_fields=['status', 'stage', 'updated_at'])
+            return job
+
+        job = await cancel_job()
+        return _serialize_character_draft_job(job)
 
     @strawberry.mutation
     async def create_character(self, info, input: CharacterInput) -> CharacterType:
@@ -768,5 +1040,34 @@ class Query:
     def chat_session(self, info, id: strawberry.ID) -> ChatSessionType:
         user = _get_authenticated_user(info)
         return _get_owned_session(user, id)
+
+    @strawberry.field
+    async def character_draft_job(self, info, id: strawberry.ID) -> CharacterDraftJobType:
+        user = await sync_to_async(_get_authenticated_user)(info)
+
+        @sync_to_async
+        def load_job() -> CharacterDraftJob:
+            try:
+                return CharacterDraftJob.objects.get(pk=id, user=user)
+            except CharacterDraftJob.DoesNotExist as exc:
+                raise Exception("Draft job not found") from exc
+
+        job = await load_job()
+        return _serialize_character_draft_job(job)
+
+    @strawberry.field
+    async def my_latest_character_draft_job(self, info) -> Optional[CharacterDraftJobType]:
+        """页面加载时恢复显示：返回该用户最近一次草稿任务（可空）。
+
+        前端据此在刷新后恢复进行中任务的进度显示。
+        """
+        user = await sync_to_async(_get_authenticated_user)(info)
+
+        @sync_to_async
+        def load_latest_job() -> Optional[CharacterDraftJob]:
+            return CharacterDraftJob.objects.filter(user=user).order_by('-id').first()
+
+        job = await load_latest_job()
+        return _serialize_character_draft_job(job) if job else None
 
 schema = strawberry.Schema(query=Query, mutation=Mutation)

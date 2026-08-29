@@ -964,8 +964,8 @@ class ReducePipelineHelperTests(TestCase):
                 "dialogue_library": {},
             })
 
-        result = run_reduce_pipeline(uploads, "玛丽", llm_call)
-        self.assertEqual(result["batch_count"], 4)  # 20 files / 6 per batch
+        result = run_reduce_pipeline(uploads, "玛丽", llm_call, batch_size=6)
+        self.assertEqual(result["batch_count"], 4)  # 20 files / 6 per batch（显式批大小，不随默认值漂移）
         self.assertEqual(result["failed_batches"], 0)
         self.assertEqual(result["result"]["profile_summary"]["name"], "玛丽")
         # 每批 6 个文件都要被精读过：合并前每个上传文件都出现在某个批次 prompt 里

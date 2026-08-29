@@ -2578,8 +2578,8 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertIn('Stay with me.', background_doc['content'])
 
     @patch('chat.graphql.schema._generate_text')
-    def test_generate_draft_routes_many_files_through_reduce_pipeline(self, mock_generate_text):
-        """12+ 个文本文件时走 reduce 流水线，产出映射为 PrisMateDraft。"""
+    def test_generate_draft_routes_many_files_through_single_shot(self, mock_generate_text):
+        """12+ 个文本文件且指定目标角色 → 预筛 + 单次 LLM 请求直达出卡。"""
         ModelConfiguration.objects.create(
             user=self.user,
             name='Draft Model',
@@ -2594,39 +2594,23 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             body = f'圣亚: 这是第 {i} 段的台词\n老师: 明白'
             urls.append(self._write_uploaded_text(f'episode_{i}.txt', body))
 
-        def fake_generate_text(runtime_config, messages):
-            system = messages[0].get('content') or ''
-            if '角色分析师' in system:
-                # 批笔记
+        def fake_generate_text(runtime_config, messages, *args, **kwargs):
+            if isinstance(messages, str):
+                # 单请求主链路：内联 prompt（含预筛片段）→ 直接返回角色卡 JSON。
+                assert '圣亚' in messages
                 return json.dumps({
-                    'batch_summary': '本批对话。',
-                    'citations': [{'file': 'episode_0.txt', 'quote': '这是第 0 段的台词', 'note': '温和'}],
-                    'personality_evidence': ['温和'],
-                    'language_style': ['礼貌'],
-                    'behavior_notes': [],
-                    'emotion_triggers': [],
-                    'relationships': [],
-                })
-            # 合并
-            return json.dumps({
-                'profile_summary': {
                     'name': '圣亚',
                     'description': '三句话背景。第二句。第三句。',
-                    'personality': '温和而礼貌。',
-                    'appearance': '银发',
                     'affiliation': '三一学园',
+                    'personality': '温和而礼貌。',
                     'tags': ['温和', '三一'],
-                },
-                'dialogue_library': {
-                    '日常': [{'quote': '今天过得如何？', 'file': 'episode_0.txt', 'note': ''}],
-                    '提问': [{'quote': '老师知道这件事吗？', 'file': 'episode_1.txt', 'note': ''}],
-                    '情绪': [],
-                    '命令拒绝': [],
-                    '玩笑': [],
-                },
-                'behavior_samples': [],
-                'evolution': [],
-            })
+                    'example_dialogue': (
+                        'User: 今天过得如何？\nCharacter: 平静的一天。\n\n'
+                        'User: 那件事你怎么看？\nCharacter: 老师知道这件事吗？还不确定。'
+                    ),
+                })
+            raise AssertionError('single-shot path must issue exactly one plain-prompt call')
+
         mock_generate_text.side_effect = fake_generate_text
 
         response = self.graphql(
@@ -2659,9 +2643,10 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertIn('今天过得如何？', draft['exampleDialogue'])
         self.assertIn('Character: 老师知道这件事吗？', draft['exampleDialogue'])
 
-        # reduce 流水线跑了多批：13 个文件 → main/mid/cameo 分层后分批 + 合并
-        call_count = mock_generate_text.call_count
-        self.assertGreaterEqual(call_count, 3)
+        # 单请求主链路：恰好 1 次模型调用，prompt 里带预筛出的台词片段。
+        self.assertEqual(mock_generate_text.call_count, 1)
+        sent_prompt = mock_generate_text.call_args[0][1]
+        self.assertIn('圣亚: 这是第 0 段的台词', sent_prompt)
 
     @patch('chat.tasks._request_openai_media_analysis', return_value='A young man with a silver pocket watch.')
     def test_provider_messages_include_character_reference_images_via_image_role(self, mock_analysis):

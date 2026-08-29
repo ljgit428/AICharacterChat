@@ -18,6 +18,33 @@ class PrisMateDraft:
     visual_summary: str
     example_dialogue: str = ""
 
+
+@strawberry.type
+class CharacterDraftJobType:
+    """后台草稿任务：前端启动后轮询本类型直到终态。"""
+
+    id: strawberry.ID
+    status: str
+    stage: str
+    progress_done: int
+    progress_total: int
+    error: Optional[str]
+    result: Optional[PrisMateDraft]
+    created_at: Optional[str]
+
+
+def _serialize_character_draft_job(job) -> CharacterDraftJobType:
+    return CharacterDraftJobType(
+        id=str(job.id),
+        status=job.status,
+        stage=job.stage or "",
+        progress_done=job.progress_done,
+        progress_total=job.progress_total,
+        error=job.error or None,
+        result=PrisMateDraft(**job.result) if job.result else None,
+        created_at=job.created_at.isoformat() if job.created_at else None,
+    )
+
 @strawberry.input
 class CharacterKnowledgeAssetInput:
     """One staged upload to attach to the character.
