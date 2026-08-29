@@ -193,6 +193,21 @@ export interface TtsEngineTestResult {
   hint: string;
 }
 
+// 一条已保存的语音输出（「音频输出」浏览页）：每次 /chat/tts 合成落盘的记录。
+export interface TtsAudioOutput {
+  id: number;
+  characterId?: number | null;
+  characterName?: string;
+  text: string;
+  emotion: string;
+  provider: string;
+  audioUrl: string;
+  contentType: string;
+  processingMs: number | null;
+  firstByteMs: number | null;
+  createdAt: string;
+}
+
 export interface UploadConvertRequest {
   ckpt: File;
   pth: File;

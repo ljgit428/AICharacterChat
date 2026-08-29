@@ -3,7 +3,19 @@ import os
 from rest_framework import serializers
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .attachments import get_message_attachments, get_primary_message_attachment
-from .models import Character, CharacterKnowledgeAsset, ChatSession, Message, ModelConfiguration, TtsEngine, TtsServiceSettings, TtsVoiceModel, UserProfile, WebSearchConfiguration
+from .models import (
+    Character,
+    CharacterKnowledgeAsset,
+    ChatSession,
+    Message,
+    ModelConfiguration,
+    TtsAudioOutput,
+    TtsEngine,
+    TtsServiceSettings,
+    TtsVoiceModel,
+    UserProfile,
+    WebSearchConfiguration,
+)
 
 class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
@@ -285,6 +297,32 @@ class TtsVoiceModelSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'conversion_status', 'conversion_error', 'created_at', 'updated_at',
         ]
+
+
+class TtsAudioOutputSerializer(serializers.ModelSerializer):
+    """一条已保存的语音输出（「音频输出」浏览页）。只读。"""
+
+    audio_url = serializers.SerializerMethodField()
+    character_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TtsAudioOutput
+        fields = [
+            'id', 'character_id', 'character_name', 'text', 'emotion', 'provider',
+            'audio_url', 'content_type', 'processing_ms', 'first_byte_ms', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_audio_url(self, obj):
+        file_obj = getattr(obj, 'audio', None)
+        if not file_obj:
+            return None
+        request = self.context.get('request')
+        url = file_obj.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_character_name(self, obj):
+        return obj.character.name if obj.character_id else ''
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

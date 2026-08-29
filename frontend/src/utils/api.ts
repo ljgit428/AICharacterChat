@@ -4,7 +4,7 @@ interface ApiResponse<T> {
 }
 
 import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
-import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
+import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsAudioOutput, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
 
@@ -514,6 +514,36 @@ function normalizeTtsVoiceModel(apiData: ApiTtsVoiceModel): TtsVoiceModel {
     conversionError: apiData.conversion_error || '',
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
+  };
+}
+
+interface ApiTtsAudioOutput {
+  id: number;
+  character_id?: number | null;
+  character_name?: string;
+  text: string;
+  emotion: string;
+  provider: string;
+  audio_url?: string | null;
+  content_type?: string;
+  processing_ms?: number | null;
+  first_byte_ms?: number | null;
+  created_at?: string;
+}
+
+function normalizeTtsAudioOutput(apiData: ApiTtsAudioOutput): TtsAudioOutput {
+  return {
+    id: apiData.id,
+    characterId: apiData.character_id ?? null,
+    characterName: apiData.character_name || '',
+    text: apiData.text || '',
+    emotion: apiData.emotion || '',
+    provider: apiData.provider || '',
+    audioUrl: apiData.audio_url || '',
+    contentType: apiData.content_type || 'audio/wav',
+    processingMs: apiData.processing_ms ?? null,
+    firstByteMs: apiData.first_byte_ms ?? null,
+    createdAt: apiData.created_at || '',
   };
 }
 
@@ -1581,6 +1611,22 @@ class ApiService {
       return { data: normalizeTtsVoiceModel(response.data) };
     }
     return { data: undefined };
+  }
+
+  // 音频输出：已合成语音的历史记录（浏览/删除）。
+  async listTtsAudioOutputs(characterId?: string | number): Promise<ApiResponse<TtsAudioOutput[]>> {
+    const query = characterId != null && String(characterId) !== ''
+      ? `?character_id=${encodeURIComponent(String(characterId))}`
+      : '';
+    const response = await this.request<ApiTtsAudioOutput[]>(`/tts-audio-outputs${query}`);
+    if (response.data) {
+      return { data: (response.data || []).map(normalizeTtsAudioOutput) };
+    }
+    return { data: undefined };
+  }
+
+  async deleteTtsAudioOutput(id: number): Promise<ApiResponse<void>> {
+    return this.request(`/tts-audio-outputs/${id}`, { method: 'DELETE' });
   }
 
   async readSoulFile(characterId: string, path: string, offset = 0): Promise<ApiResponse<MemoryExplorerFile>> {

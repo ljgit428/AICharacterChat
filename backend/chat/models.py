@@ -313,6 +313,42 @@ class Character(models.Model):
         return self.name
 
 
+class TtsAudioOutput(models.Model):
+    """一条已保存的语音输出（「音频输出」浏览页的数据源）。
+
+    每次 /chat/tts 合成成功后把音频字节落盘并登记一行，供浏览页回放与
+    下载；也保留了文本/情感/引擎/耗时等元数据。删除角色时置空保留历史
+    （SET_NULL），删除用户随 CASCADE 一并清掉。
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tts_audio_outputs")
+    character = models.ForeignKey(
+        Character,
+        on_delete=models.SET_NULL,
+        related_name="tts_audio_outputs",
+        null=True,
+        blank=True,
+    )
+    text = models.TextField(help_text="本次合成的文本")
+    emotion = models.CharField(max_length=64, blank=True, default="", help_text="情感名，空=默认参考音频")
+    provider = models.CharField(max_length=16, blank=True, default="", help_text="实际使用的 TTS provider")
+    audio = models.FileField(upload_to="tts_outputs/%Y/%m/")
+    content_type = models.CharField(max_length=100, blank=True, default="audio/wav")
+    processing_ms = models.PositiveIntegerField(null=True, blank=True)
+    first_byte_ms = models.PositiveIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [
+            models.Index(fields=["user", "-id"]),
+            models.Index(fields=["character", "-id"]),
+        ]
+
+    def __str__(self):
+        return f"TTS #{self.id} [{self.provider}] {self.text[:30]}..."
+
+
 class CharacterKnowledgeAsset(models.Model):
     character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='knowledge_assets')
     file = models.FileField(upload_to='character_knowledge_assets/')

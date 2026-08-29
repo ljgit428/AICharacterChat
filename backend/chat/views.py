@@ -35,6 +35,7 @@ from .models import (
     ModelConfiguration,
     ModelRole,
     ModelRoleAssignment,
+    TtsAudioOutput,
     TtsEngine,
     TtsServiceSettings,
     TtsVoiceModel,
@@ -51,6 +52,7 @@ from .serializers import (
     MessageSerializer,
     MessageCreateSerializer,
     ModelConfigurationSerializer,
+    TtsAudioOutputSerializer,
     TtsServiceSettingsSerializer,
     TtsVoiceModelSerializer,
     UserProfileSerializer,
@@ -500,6 +502,29 @@ def _save_upload_to(directory: Path, uploaded) -> Path:
     return target
 
 
+def _persist_tts_output(user, character, text, provider, emotion, result):
+    """把一次成功的 TTS 合成登记为 TtsAudioOutput（「音频输出」浏览页数据源）。
+
+    尽力而为的旁路：落盘/入库失败只记日志，不影响音频流本身返回。
+    """
+    try:
+        from django.core.files.base import ContentFile
+        ext = 'wav' if result.get('content_type') == 'audio/wav' else 'bin'
+        output = TtsAudioOutput(
+            user=user,
+            character=character,
+            text=text,
+            emotion=emotion or '',
+            provider=result.get('provider', ''),
+            content_type=result.get('content_type', 'audio/wav'),
+            processing_ms=result.get('processing_ms'),
+            first_byte_ms=result.get('first_byte_ms'),
+        )
+        output.audio.save(f'tts-{uuid4().hex}.{ext}', ContentFile(result['audio']), save=True)
+    except Exception:
+        logger.warning("Failed to persist TTS audio output", exc_info=True)
+
+
 class TtsServiceSettingsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -688,6 +713,30 @@ class TtsVoiceModelViewSet(viewsets.ModelViewSet):
                     handle.write(chunk)
 
         return Response({'path': str(output_dir), 'name': str(output_dir.name)})
+
+
+class TtsAudioOutputViewSet(viewsets.ModelViewSet):
+    """语音输出历史（「音频输出」浏览页）：只读 + 删除。
+
+    每条记录对应一次 /chat/tts 合成落盘的音频文件与元数据。删除时把
+    磁盘上的音频文件一并清掉，避免 MEDIA_ROOT 堆积孤儿文件。
+    """
+
+    queryset = TtsAudioOutput.objects.none()
+    serializer_class = TtsAudioOutputSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = TtsAudioOutput.objects.filter(user=self.request.user).select_related('character')
+        character_id = self.request.query_params.get('character_id')
+        if character_id:
+            queryset = queryset.filter(character_id=character_id)
+        return queryset
+
+    def perform_destroy(self, instance):
+        if instance.audio:
+            instance.audio.delete(save=False)
+        instance.delete()
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
@@ -1118,6 +1167,7 @@ class ChatViewSet(viewsets.ViewSet):
         # voice_model_id 引用；旧数据的直填字段仍兼容）。无效/不属于当前用户
         # 的 character_id 视作未提供配置，genie 通道会直接报"请先配置语音模型"。
         character_tts_config = None
+        character = None
         character_id = str(request.data.get('character_id') or '').strip()
         if character_id:
             try:
@@ -1142,6 +1192,7 @@ class ChatViewSet(viewsets.ViewSet):
         except Exception as exc:
             logger.exception("TTS synthesis failed")
             return Response({'error': f'TTS failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        _persist_tts_output(request.user, character, text, provider, emotion, result)
         audio_response = HttpResponse(result['audio'], content_type=result['content_type'])
         audio_response['X-TTS-Provider'] = result['provider']
         audio_response['X-TTS-Processing-Ms'] = str(result['processing_ms'])
