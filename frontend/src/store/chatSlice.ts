@@ -75,6 +75,15 @@ const chatSlice = createSlice({
     removeMessage: (state, action: PayloadAction<string>) => {
       state.messages = state.messages.filter((message) => message.id !== action.payload);
     },
+    // 原位替换：乐观消息换成服务端持久化消息时保持列表顺序，找不到时退化为追加。
+    replaceMessage: (state, action: PayloadAction<{ id: string; message: Message }>) => {
+      const index = state.messages.findIndex((message) => message.id === action.payload.id);
+      if (index >= 0) {
+        state.messages[index] = action.payload.message;
+        return;
+      }
+      state.messages.push(action.payload.message);
+    },
     setLoading: (state, action: PayloadAction<boolean>) => {
       state.isLoading = action.payload;
     },
@@ -118,6 +127,7 @@ export const {
   appendToMessageThinking,
   appendToMessageToolCall,
   removeMessage,
+  replaceMessage,
   setLoading,
   setError,
   setCharacter,

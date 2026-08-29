@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
+import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, replaceMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import CameraPanel from '@/components/CameraPanel';
 import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
@@ -727,9 +727,15 @@ export default function ChatInterface({
       return;
     }
 
+    // 问候轮（首条且无文字无附件，角色先开口）没有用户消息可显示；带文字或
+    // 附件的首条是真实对话轮，和后续消息一样先乐观上屏，不等服务端 session 事件。
+    const isGreetingTurn = isFirstMessage && !trimmedInput && attachments.length === 0;
+
     if (isFirstMessage) {
       setHasStartedConversation(true);
-    } else {
+    }
+
+    if (!isGreetingTurn) {
       dispatch(addMessage({
         id: optimisticUserMessageId,
         content: trimmedInput,
@@ -790,12 +796,15 @@ export default function ChatInterface({
                   URL.revokeObjectURL(attachment.filePreviewUrl);
                 }
               });
-              dispatch(removeMessage(optimisticUserMessageId));
-              dispatch(addMessage({
-                ...normalizeStreamMessage(event.user_message),
-                senderId: 'user',
-                senderName: currentUserLabel,
-                senderType: 'user',
+              // 原位换成服务端消息：保持"用户消息在流式回复占位符之上"的顺序。
+              dispatch(replaceMessage({
+                id: optimisticUserMessageId,
+                message: {
+                  ...normalizeStreamMessage(event.user_message),
+                  senderId: 'user',
+                  senderName: currentUserLabel,
+                  senderType: 'user',
+                },
               }));
             }
             return;
