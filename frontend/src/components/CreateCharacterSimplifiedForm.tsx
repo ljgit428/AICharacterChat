@@ -1595,7 +1595,7 @@ export default function CreateCharacterSimplifiedForm({
   const fieldHighlightClass = (key: AiDraftKey) =>
     isHighlighted(key) ? 'ring-2 ring-violet-300 transition-shadow' : '';
 
-  return (      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+  return (      <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6">
         {avatarCropSrc && (
           <AvatarCropper
             imageSrc={avatarCropSrc}
@@ -1632,10 +1632,10 @@ export default function CreateCharacterSimplifiedForm({
       </div>
 
       <div className="space-y-6">
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="space-y-6">
           <div className="space-y-6">
-            <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-              <div className="relative mx-auto mb-4 h-40 w-40 overflow-hidden rounded-full border-4 border-white bg-gray-100 shadow-md">
+            <div className="flex items-center gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+              <div className="relative h-24 w-24 shrink-0 overflow-hidden rounded-full border-4 border-white bg-gray-100 shadow-md">
                 {form.avatarUrl ? (
                   /* eslint-disable-next-line @next/next/no-img-element */
                   <img
@@ -1664,7 +1664,7 @@ export default function CreateCharacterSimplifiedForm({
                 />
               </div>
 
-              <div className="space-y-2 text-center">
+              <div className="space-y-1">
                 <p className="text-sm font-medium text-gray-700">{copy.characterForm.avatar}</p>
                 <p className="text-xs leading-6 text-gray-500">{copy.characterForm.avatarHelp}</p>
               </div>
@@ -1755,7 +1755,7 @@ export default function CreateCharacterSimplifiedForm({
                 </p>
               </div>
 
-              <div className="grid gap-6 xl:grid-cols-2">
+              <div className="space-y-6">
                 <div className="space-y-2">
                   <label className="text-sm font-bold text-gray-700">
                     {copy.characterForm.personalityNotes}
@@ -1781,7 +1781,7 @@ export default function CreateCharacterSimplifiedForm({
                 </div>
               </div>
 
-              <div className="grid gap-6 md:grid-cols-2">
+              <div className="space-y-6">
                 <div className="space-y-2">
                   <label className="text-sm font-bold text-gray-700">
                     {copy.characterForm.affiliation}
@@ -1924,7 +1924,7 @@ export default function CreateCharacterSimplifiedForm({
           />
         </div>
 
-        <div className="flex justify-end gap-4">
+        <div className="sticky bottom-4 z-10 flex justify-end gap-3">
           <button
             onClick={() => {
               if (onCancel) {
@@ -1933,7 +1933,7 @@ export default function CreateCharacterSimplifiedForm({
                 router.push('/');
               }
             }}
-            className="rounded-xl bg-gray-100 px-6 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-200"
+            className="rounded-xl border border-gray-200 bg-white px-6 py-3 font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
             type="button"
           >
             {copy.characterForm.cancel}
@@ -1942,7 +1942,7 @@ export default function CreateCharacterSimplifiedForm({
             type="button"
             onClick={handleSave}
             disabled={saveLoading || uploadingTarget !== null}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-70"
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 font-medium text-white shadow-lg transition-colors hover:bg-blue-700 disabled:opacity-70"
           >
             {saveLoading ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
             <span>{isEditMode ? copy.characterForm.updateCharacter : copy.characterForm.saveCharacter}</span>
