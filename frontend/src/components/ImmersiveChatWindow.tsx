@@ -3,9 +3,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Check, Cpu, Download, Expand, FileText, ImageIcon, Loader2, Music, Plus, Sparkles, Square, Video, Volume2, X } from 'lucide-react';
+import { BrainCircuit, Check, ChevronRight, Cpu, Download, Expand, FileText, FolderTree, ImageIcon, Loader2, Music, Plus, Search, Sparkles, Square, Terminal, Video, Volume2, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
+import { SpeechSegment, buildSpeechSegments } from '@/utils/replySegments';
 import { useI18n } from '@/i18n/provider';
 
 interface ImmersiveChatWindowProps {
@@ -28,10 +29,16 @@ interface ImmersiveChatWindowProps {
   modelConfigs?: ModelConfig[];
   activeTextModel?: ModelConfig | null;
   onTextModelChange?: (modelId: string) => void | Promise<void>;
-  /** 单段朗读（气泡喇叭按钮）：不依赖全局自动朗读开关。 */
-  onSpeakSegment?: (text: string, emotion?: string) => void;
-  /** 单段音频下载（气泡下载按钮）：合成该段并保存为 .wav。 */
-  onDownloadSegment?: (text: string) => void;
+  /** 当前朗读状态（卡拉OK高亮）：播放/合成中的句属于哪条消息、第几句。 */
+  speechPlayback?: { messageId: string; activeIndex: number | null; synthesizingIndex: number | null } | null;
+  /** 点击某一句：单独合成并播放该句。 */
+  onSpeakSentence?: (messageId: string, index: number, segment: SpeechSegment) => void;
+  /** 气泡控制条：整条回复按句连播。 */
+  onPlayAll?: (messageId: string, segments: SpeechSegment[]) => void;
+  /** 气泡控制条：停止当前朗读。 */
+  onStopSpeech?: () => void;
+  /** 单句音频下载：合成该句并保存为 .wav。 */
+  onDownloadSentence?: (text: string) => void;
 }
 
 export interface PendingAttachment {
@@ -109,12 +116,6 @@ function formatFileSize(size: number) {
   return `${(size / 1024 / 1024).toFixed(2)} MB`;
 }
 
-/**
- * 角色长回复按自然段落拆分为多个气泡：空行分隔的块（markdown 段落/列表）。
- * 整段保持原样（不切句），气泡之间留小间距，配合每段喇叭/下载按钮。
- */
-import { splitReplyParagraphs } from '@/utils/replyParagraphs';
-
 function buildPreviewAttachment(attachment: PendingAttachment | MessageAttachment): PreviewAttachment | null {
   if ('file' in attachment) {
     if (!attachment.previewUrl || attachment.kind === 'text') {
@@ -158,8 +159,11 @@ export default function ImmersiveChatWindow({
   modelConfigs,
   activeTextModel,
   onTextModelChange,
-  onSpeakSegment,
-  onDownloadSegment,
+  speechPlayback,
+  onSpeakSentence,
+  onPlayAll,
+  onStopSpeech,
+  onDownloadSentence,
 }: ImmersiveChatWindowProps) {
   const { messages: copy } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -578,9 +582,12 @@ export default function ImmersiveChatWindow({
                   {metaMessages.length > 0 && (
                     <div className="max-w-[min(48rem,86vw)] space-y-2">
                       {metaMessages.map((message) => (
-                        <div key={`meta-${message.id}`} className="flex flex-col gap-1.5 pl-1">
-                          <MessageThinking message={message} copy={copy} />
-                          <ToolCallLines message={message} copy={copy} />
+                        <div key={`meta-${message.id}`} className="pl-1">
+                          <AgentSteps
+                            message={message}
+                            copy={copy}
+                            isStreaming={isLoading && message.id.startsWith('stream-')}
+                          />
                         </div>
                       ))}
                     </div>
@@ -608,63 +615,84 @@ export default function ImmersiveChatWindow({
 
                         <div className={`flex w-full flex-col space-y-2 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
                           {contentMessages.map((message, index) => {
-                            // 角色长回复按自然段落拆成多个小气泡，每段带朗读/下载按钮；
-                            // 用户消息保持单气泡整段显示。
-                            const paragraphs =
-                              group.role !== 'user' && message.content
-                                ? splitReplyParagraphs(message.content)
-                                : [message.content || ''];
+                            // 单一大气泡：一条回复一个气泡，内部按句切分（点击单句试听、
+                            // 朗读中卡拉OK高亮），不再按段落拆成多个卡片。
                             const isLast = index === contentMessages.length - 1;
-                            const bubbleBase =
+                            const speechSegments =
                               group.role === 'user'
-                                ? 'bg-slate-900 text-white'
-                                : 'border border-white/80 bg-white/90 text-slate-800';
-                            const corner =
-                              group.role === 'user'
-                                ? isLast
-                                  ? 'rounded-br-md'
-                                  : ''
-                                : isLast
-                                  ? 'rounded-bl-md'
-                                  : '';
+                                ? [] as SpeechSegment[]
+                                : buildSpeechSegments(message.content || '', message.ttsSegments);
+                            const messageSpeech =
+                              speechPlayback && speechPlayback.messageId === message.id
+                                ? speechPlayback
+                                : null;
+                            const isSpeakingThis = Boolean(
+                              messageSpeech &&
+                                (messageSpeech.activeIndex !== null || messageSpeech.synthesizingIndex !== null),
+                            );
+                            const corner = isLast
+                              ? group.role === 'user'
+                                ? 'rounded-br-md'
+                                : 'rounded-bl-md'
+                              : '';
 
                             return (
-                              <div key={message.id} className={`flex flex-col gap-1.5 ${group.role === 'user' ? 'items-end' : 'items-start'}`}>
+                              <div
+                                key={message.id}
+                                className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${
+                                  group.role === 'user'
+                                    ? `bg-slate-900 text-white ${corner}`
+                                    : `border border-white/80 bg-white/90 text-slate-800 ${corner}`
+                                }`}
+                              >
                                 <MessageAttachments message={message} onPreview={setPreviewAttachment} previewLabel={copy.gallery.viewDetails} />
-                                {paragraphs.map((paragraph, paraIndex) => (
-                                  <div
-                                    key={`${message.id}-p${paraIndex}`}
-                                    className={`w-fit max-w-full rounded-[1.6rem] px-4 py-3 text-sm leading-7 shadow-sm ${bubbleBase} ${
-                                      paragraphs.length > 1 && paraIndex === paragraphs.length - 1 ? corner : ''
-                                    }`}
-                                  >
-                                    <div className="flex flex-col gap-1">
-                                      <p className="whitespace-pre-wrap">{paragraph}</p>
-                                      {group.role !== 'user' && onSpeakSegment && (
-                                        <div className="flex items-center gap-1 pt-1">
-                                          <button
-                                            type="button"
-                                            onClick={() => onSpeakSegment(paragraph)}
-                                            title={copy.immersiveChat.speakSegment}
-                                            className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
-                                          >
-                                            <Volume2 className="h-3.5 w-3.5" />
-                                          </button>
-                                          {onDownloadSegment && (
-                                            <button
-                                              type="button"
-                                              onClick={() => onDownloadSegment(paragraph)}
-                                              title={copy.immersiveChat.downloadSegment}
-                                              className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-sky-50 hover:text-sky-600"
-                                            >
-                                              <Download className="h-3.5 w-3.5" />
-                                            </button>
-                                          )}
-                                        </div>
+                                <p
+                                  className="whitespace-pre-wrap"
+                                  title={group.role === 'user' ? undefined : copy.immersiveChat.sentencePlayHint}
+                                >
+                                  {group.role === 'user'
+                                    ? message.content
+                                    : speechSegments.map((segment, segIndex) => (
+                                      <SentenceSpan
+                                        key={`${message.id}-seg-${segIndex}`}
+                                        messageId={message.id}
+                                        index={segIndex}
+                                        segment={segment}
+                                        active={messageSpeech?.activeIndex === segIndex}
+                                        synthesizing={messageSpeech?.synthesizingIndex === segIndex}
+                                        onSpeak={onSpeakSentence}
+                                        onDownload={onDownloadSentence}
+                                        speakLabel={copy.immersiveChat.sentencePlayHint}
+                                        downloadLabel={copy.immersiveChat.downloadSentence}
+                                      />
+                                    ))}
+                                </p>
+                                {group.role !== 'user' && speechSegments.length > 0 && (onPlayAll || onStopSpeech) && (
+                                  <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        isSpeakingThis
+                                          ? onStopSpeech?.()
+                                          : onPlayAll?.(message.id, speechSegments)
+                                      }
+                                      className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                                        isSpeakingThis
+                                          ? 'bg-rose-50 text-rose-600 hover:bg-rose-100'
+                                          : 'bg-slate-100/80 text-slate-600 hover:bg-slate-200/70 hover:text-slate-900'
+                                      }`}
+                                      title={isSpeakingThis ? copy.immersiveChat.stopSpeech : copy.immersiveChat.playAllSentences}
+                                    >
+                                      {isSpeakingThis ? (
+                                        <Square className="h-3 w-3" fill="currentColor" />
+                                      ) : (
+                                        <Volume2 className="h-3.5 w-3.5" />
                                       )}
-                                    </div>
+                                      <span>{isSpeakingThis ? copy.immersiveChat.stopSpeech : copy.immersiveChat.playAllSentences}</span>
+                                    </button>
+                                    <span className="text-xs text-slate-400">{copy.immersiveChat.sentencesCount(speechSegments.length)}</span>
                                   </div>
-                                ))}
+                                )}
                               </div>
                             );
                           })}
@@ -1218,50 +1246,173 @@ function AttachmentIcon({
   return <FileText className={className} />;
 }
 
-function MessageThinking({
-  message,
-  copy,
+/** 句子 span：点击单独试听，朗读中卡拉OK高亮；悬停浮出试听/下载小工具条。 */
+function SentenceSpan({
+  messageId,
+  index,
+  segment,
+  active,
+  synthesizing,
+  onSpeak,
+  onDownload,
+  speakLabel,
+  downloadLabel,
 }: {
-  message: Message;
-  copy: I18nMessages;
+  messageId: string;
+  index: number;
+  segment: SpeechSegment;
+  active: boolean;
+  synthesizing: boolean;
+  onSpeak?: (messageId: string, index: number, segment: SpeechSegment) => void;
+  onDownload?: (text: string) => void;
+  speakLabel: string;
+  downloadLabel: string;
 }) {
-  const thinking = message.thinking?.trim();
-  if (!thinking) {
-    return null;
-  }
-
   return (
-    <details className="rounded-xl border border-dashed border-slate-300/80 bg-slate-50/60 px-3 py-2 open:pb-3">
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700">
-        <BrainCircuit className="h-3.5 w-3.5" />
-        <span>{copy.immersiveChat.thinking}</span>
-      </summary>
-      <p className="mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500">{thinking}</p>
-    </details>
+    <span className="group/seg relative">
+      <span
+        onClick={() => onSpeak?.(messageId, index, segment)}
+        className={`cursor-pointer rounded transition-colors duration-150 ${
+          active ? 'bg-sky-100/90 text-slate-900' : 'hover:bg-slate-100/80'
+        }`}
+        title={speakLabel}
+      >
+        {segment.text}
+      </span>
+      {synthesizing && <Loader2 className="ml-0.5 inline h-3 w-3 animate-spin text-slate-400" />}
+      {onSpeak && (
+        <span className="pointer-events-none absolute -top-8 left-1/2 z-20 flex -translate-x-1/2 gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 opacity-0 shadow-md transition-opacity duration-150 group-hover/seg:pointer-events-auto group-hover/seg:opacity-100">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSpeak(messageId, index, segment);
+            }}
+            className="rounded-md p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-sky-600"
+            title={speakLabel}
+          >
+            <Volume2 className="h-3.5 w-3.5" />
+          </button>
+          {onDownload && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDownload(segment.text);
+              }}
+              className="rounded-md p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-sky-600"
+              title={downloadLabel}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </span>
+      )}
+    </span>
   );
 }
 
-function ToolCallLines({
+/**
+ * ZCode 式 agent 步骤时间线：思考过程与工具调用各自一行，点击展开详情，
+ * 行间用竖线连接。流式思考中图标呼吸闪烁。
+ */
+function AgentSteps({
   message,
   copy,
+  isStreaming,
 }: {
   message: Message;
   copy: I18nMessages;
+  isStreaming: boolean;
 }) {
+  const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
+  const thinking = message.thinking?.trim() || '';
   const toolCalls = message.toolCalls || [];
-  if (toolCalls.length === 0) {
+  if (!thinking && toolCalls.length === 0) {
     return null;
   }
 
+  const toggleStep = (key: string) =>
+    setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  const steps: Array<{ key: string; icon: React.ReactNode; title: string; body: string; preview?: string; streaming?: boolean }> = [];
+  if (thinking) {
+    steps.push({
+      key: 'thinking',
+      icon: <BrainCircuit className="h-3 w-3" />,
+      title: copy.immersiveChat.thinking,
+      body: thinking,
+      preview: thinking.replace(/\s+/g, ' ').slice(0, 90),
+      streaming: isStreaming,
+    });
+  }
+  toolCalls.forEach((toolCall, index) => {
+    steps.push({
+      key: `tool-${index}`,
+      icon: <ToolIcon tool={toolCall.tool} />,
+      title: describeToolCall(toolCall, copy),
+      body: Object.keys(toolCall.arguments || {}).length
+        ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(toolCall.arguments, null, 2)}`
+        : '',
+    });
+  });
+
   return (
     <div className="space-y-0.5">
-      {toolCalls.map((toolCall, index) => (
-        <p key={`${toolCall.tool}-${index}`} className="text-[11px] italic leading-5 text-slate-400">
-          {describeToolCall(toolCall, copy)}
-        </p>
-      ))}
+      {steps.map((step, index) => {
+        const open = Boolean(openKeys[step.key]);
+        return (
+          <div key={step.key} className="relative">
+            {index < steps.length - 1 && (
+              <span className="absolute bottom-0 left-[13px] top-7 w-px bg-slate-200" aria-hidden />
+            )}
+            <button
+              type="button"
+              onClick={() => toggleStep(step.key)}
+              className="group flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-slate-100/70"
+            >
+              <span
+                className={`relative z-10 flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white shadow-sm ${
+                  step.streaming ? 'text-indigo-500 motion-safe:animate-pulse' : 'text-slate-500'
+                }`}
+              >
+                {step.icon}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-600 transition-colors group-hover:text-slate-800">
+                {step.title}
+              </span>
+              <ChevronRight
+                className={`h-3.5 w-3.5 flex-shrink-0 text-slate-300 transition-all duration-200 group-hover:text-slate-500 ${
+                  open ? 'rotate-90 text-slate-500' : ''
+                }`}
+              />
+            </button>
+            {!open && step.preview && (
+              <p className="ml-8 mr-2 truncate pb-1 text-[11px] leading-4 text-slate-400">{step.preview}</p>
+            )}
+            {open && step.body && (
+              <div className="mb-1.5 ml-8 mr-1 rounded-lg border border-slate-200/70 bg-slate-50/80 p-2.5">
+                <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-slate-600">{step.body}</p>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
+}
+
+function ToolIcon({ tool }: { tool: string }) {
+  if (tool === 'web_search') {
+    return <Search className="h-3 w-3" />;
+  }
+  if (tool === 'read_memory_file') {
+    return <FileText className="h-3 w-3" />;
+  }
+  if (tool === 'list_memory_files') {
+    return <FolderTree className="h-3 w-3" />;
+  }
+  return <Terminal className="h-3 w-3" />;
 }
 
 function describeToolCall(toolCall: ToolCallInfo, copy: I18nMessages): string {

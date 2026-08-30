@@ -85,6 +85,8 @@ export interface Message {
   researchPayload?: ResearchPayload | null;
   thinking?: string;
   toolCalls?: ToolCallInfo[];
+  /** 后端返回的情感分段（【情感】标记解析产物），供逐句 TTS 继承语气。 */
+  ttsSegments?: Array<{ emotion?: string; text?: string | null }>;
   tokenUsage?: TokenUsage | null;
   attachments?: MessageAttachment[];
   fileUri?: string;
