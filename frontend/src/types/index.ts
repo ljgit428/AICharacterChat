@@ -251,7 +251,11 @@ export interface UserProfile {
   shareLocation: boolean;
   locationPrecision: LocationPrecision;
   locationLabel: string;
+  locationLatitude: number | null;
+  locationLongitude: number | null;
   shareWeather: boolean;
+  autoSyncTimezone: boolean;
+  autoSyncLocation: boolean;
   preferredRelationshipStyle: string;
   preferredReplyLength: ReplyLengthPreference;
   preferredProactivity: PreferenceLevel;

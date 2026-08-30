@@ -176,7 +176,11 @@ interface ApiUserProfile {
   share_location: boolean;
   location_precision: 'region' | 'city' | 'exact';
   location_label: string;
+  location_latitude: number | null;
+  location_longitude: number | null;
   share_weather: boolean;
+  auto_sync_timezone: boolean;
+  auto_sync_location: boolean;
   preferred_relationship_style: string;
   preferred_reply_length: 'short' | 'medium' | 'long';
   preferred_proactivity: 'low' | 'normal' | 'high';
@@ -187,6 +191,19 @@ interface ApiUserProfile {
   blocked_topics: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface DetectedLocation {
+  ok: boolean;
+  source?: string;
+  fallback_egress?: boolean;
+  country?: string;
+  region?: string;
+  city?: string;
+  timezone?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  reason?: 'private_network' | 'unavailable';
 }
 
 interface ApiWebSearchConfig {
@@ -437,7 +454,11 @@ function normalizeUserProfile(apiData: ApiUserProfile): UserProfile {
     shareLocation: apiData.share_location,
     locationPrecision: apiData.location_precision || 'city',
     locationLabel: apiData.location_label || '',
+    locationLatitude: apiData.location_latitude ?? null,
+    locationLongitude: apiData.location_longitude ?? null,
     shareWeather: apiData.share_weather,
+    autoSyncTimezone: apiData.auto_sync_timezone,
+    autoSyncLocation: apiData.auto_sync_location,
     preferredRelationshipStyle: apiData.preferred_relationship_style || '',
     preferredReplyLength: apiData.preferred_reply_length || 'medium',
     preferredProactivity: apiData.preferred_proactivity || 'normal',
@@ -656,7 +677,11 @@ interface UpdateUserProfileRequest {
   share_location?: boolean;
   location_precision?: 'region' | 'city' | 'exact';
   location_label?: string;
+  location_latitude?: number | null;
+  location_longitude?: number | null;
   share_weather?: boolean;
+  auto_sync_timezone?: boolean;
+  auto_sync_location?: boolean;
   preferred_relationship_style?: string;
   preferred_reply_length?: 'short' | 'medium' | 'long';
   preferred_proactivity?: 'low' | 'normal' | 'high';
@@ -1307,6 +1332,11 @@ class ApiService {
       return { data: normalizeUserProfile(response.data) };
     }
     return { data: undefined };
+  }
+
+  async detectLocation(lang?: string): Promise<ApiResponse<DetectedLocation>> {
+    const query = lang ? `?lang=${encodeURIComponent(lang)}` : '';
+    return this.request<DetectedLocation>(`/user-profile/detect-location${query}`);
   }
 
   async getModelConfig(id: string): Promise<ApiResponse<ModelConfig>> {

@@ -283,7 +283,6 @@ function SettingsPageContent() {
               loading={loadingUserProfile}
               error={userProfileError}
               onRefresh={fetchUserProfile}
-              onOpenModelSettings={() => setActiveSection("api")}
             />
           ) : activeSection === "voice" ? (
             <TtsSettingsPanel />
