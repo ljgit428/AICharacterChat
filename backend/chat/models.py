@@ -128,14 +128,22 @@ class UserProfile(models.Model):
     timezone = models.CharField(max_length=64, blank=True, default="UTC")
     interface_language = models.CharField(max_length=50, blank=True, default="zh-CN")
     share_local_time = models.BooleanField(default=True)
-    share_location = models.BooleanField(default=False)
+    share_location = models.BooleanField(default=True)
     location_precision = models.CharField(
         max_length=16,
         choices=LocationPrecision.choices,
         default=LocationPrecision.CITY,
     )
     location_label = models.CharField(max_length=255, blank=True, default="")
-    share_weather = models.BooleanField(default=False)
+    # 自动检测得到的近似坐标：仅用于「精确」档提示词与后续天气等外部服务定位，
+    # 角色可见内容仍由 location_precision 决定。
+    location_latitude = models.FloatField(null=True, blank=True)
+    location_longitude = models.FloatField(null=True, blank=True)
+    share_weather = models.BooleanField(default=True)
+    # 打开时前端把时区自动对齐到浏览器时区；关闭后以手动填写的为准。
+    auto_sync_timezone = models.BooleanField(default=True)
+    # 打开时前端通过 IP 定位自动检测位置提示；关闭后以手动填写的为准。
+    auto_sync_location = models.BooleanField(default=True)
     preferred_relationship_style = models.CharField(max_length=64, blank=True, default="")
     preferred_reply_length = models.CharField(
         max_length=16,

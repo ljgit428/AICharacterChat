@@ -36,6 +36,7 @@ from .models import (
     CharacterMemoryItem,
     ChatEventType,
     ChatSession,
+    LocationPrecision,
     Message,
     ModelConfiguration,
     ModelRole,
@@ -1872,21 +1873,37 @@ def _extract_prompt_memory_body(section):
     return text
 
 
+def _format_utc_offset(aware_dt):
+    offset = aware_dt.utcoffset()
+    if offset is None:
+        return ''
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = '+' if total_minutes >= 0 else '-'
+    return f"UTC{sign}{abs(total_minutes) // 60:02d}:{abs(total_minutes) % 60:02d}"
+
+
 def _build_account_runtime_sections(chat_session):
     profile = _get_user_profile(chat_session)
 
     context_lines = []
     local_now = _get_user_local_datetime(profile)
     if local_now:
-        context_lines.append(f"User Local Time: {local_now.strftime('%Y-%m-%d %H:%M %Z')}")
+        context_lines.append(
+            f"User Local Time: {local_now.strftime('%Y-%m-%d (%A) %H:%M:%S')}"
+            f" ({_format_utc_offset(local_now)}, {profile.timezone})"
+        )
         context_lines.append(f"User Local Daypart: {_describe_daypart(local_now.hour)}")
         context_lines.append(
             "Interpret relative time words such as today, tonight, and tomorrow in the user's local timezone."
         )
     if profile.share_location and profile.location_label:
-        context_lines.append(
-            f"Location Hint ({profile.get_location_precision_display()} level): {profile.location_label}"
-        )
+        hint_line = f"Location Hint ({profile.get_location_precision_display()} level): {profile.location_label}"
+        if profile.location_precision == LocationPrecision.EXACT and profile.location_latitude is not None:
+            hint_line += (
+                f" (approx. latitude {profile.location_latitude:.2f},"
+                f" longitude {profile.location_longitude:.2f})"
+            )
+        context_lines.append(hint_line)
         context_lines.append("Do not imply a more precise real-world location than the user explicitly shared.")
     if profile.share_weather and profile.share_location and profile.location_label:
         context_lines.append(

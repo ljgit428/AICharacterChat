@@ -691,6 +691,14 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
     def test_user_profile_requires_location_hint_before_enabling_weather(self):
         self.client.force_login(self.user)
 
+        # 新资料默认开启位置分享；先关掉再重新开启，模拟「显式开启」路径。
+        disable_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({'share_location': False}),
+            content_type='application/json',
+        )
+        self.assertEqual(disable_response.status_code, 200)
+
         response = self.client.patch(
             '/api/user-profile/me/',
             data=json.dumps({
@@ -703,6 +711,105 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn('location_label', response.json())
+
+    def test_user_profile_allows_pending_location_hint_on_fresh_profile(self):
+        """默认开启分享的新资料：提示暂空时仍可局部更新其他字段。"""
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({'preferred_name': 'Owner Alias'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['preferred_name'], 'Owner Alias')
+        self.assertEqual(response.json()['location_label'], '')
+
+    def test_user_profile_persists_detected_coordinates_and_clears_on_opt_out(self):
+        self.client.force_login(self.user)
+
+        save_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({
+                'share_location': True,
+                'location_precision': 'exact',
+                'location_label': '中国 · 上海',
+                'location_latitude': 31.2304,
+                'location_longitude': 121.4737,
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(save_response.status_code, 200)
+        payload = save_response.json()
+        self.assertAlmostEqual(payload['location_latitude'], 31.2304)
+        self.assertAlmostEqual(payload['location_longitude'], 121.4737)
+
+        opt_out_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({'share_location': False}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(opt_out_response.status_code, 200)
+        payload = opt_out_response.json()
+        self.assertIsNone(payload['location_latitude'])
+        self.assertIsNone(payload['location_longitude'])
+
+    def test_user_profile_auto_sync_flags_have_defaults_and_persist(self):
+        self.client.force_login(self.user)
+
+        get_response = self.client.get('/api/user-profile/me/')
+        self.assertEqual(get_response.status_code, 200)
+        payload = get_response.json()
+        self.assertTrue(payload['share_local_time'])
+        self.assertTrue(payload['share_location'])
+        self.assertTrue(payload['share_weather'])
+        self.assertTrue(payload['auto_sync_timezone'])
+        self.assertTrue(payload['auto_sync_location'])
+
+        patch_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({
+                'auto_sync_timezone': False,
+                'auto_sync_location': False,
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(patch_response.status_code, 200)
+        payload = patch_response.json()
+        self.assertFalse(payload['auto_sync_timezone'])
+        self.assertFalse(payload['auto_sync_location'])
+
+    def test_detect_location_forwards_provider_result(self):
+        self.client.force_login(self.user)
+        detected = {
+            'ok': True,
+            'source': 'ipwho.is',
+            'country': '中国',
+            'region': '上海',
+            'city': '上海',
+            'timezone': 'Asia/Shanghai',
+            'latitude': 31.22,
+            'longitude': 121.45,
+        }
+
+        with patch('chat.views.detect_location_from_request', return_value=detected) as mock_detect:
+            response = self.client.get('/api/user-profile/detect-location/', data={'lang': 'zh-CN'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), detected)
+        self.assertEqual(mock_detect.call_args.kwargs['lang'], 'zh-CN')
+
+    def test_detect_location_ignores_lang_for_non_chinese_locales(self):
+        self.client.force_login(self.user)
+
+        with patch('chat.views.detect_location_from_request', return_value={'ok': False, 'reason': 'unavailable'}) as mock_detect:
+            self.client.get('/api/user-profile/detect-location/')
+
+        self.assertEqual(mock_detect.call_args.kwargs['lang'], 'en')
 
     def test_web_search_config_me_endpoint_returns_default_shape_when_missing(self):
         self.client.force_login(self.user)
@@ -1308,9 +1415,37 @@ class PromptMemoryTests(TestCase):
 
         self.assertIn('User Local Time:', prompt)
         self.assertIn('User Local Daypart:', prompt)
-        self.assertIn('Interpret relative time words such as today, tonight, and tomorrow in the user\'s local timezone.', prompt)
+        self.assertIn("Interpret relative time words such as today, tonight, and tomorrow in the user's local timezone.", prompt)
         self.assertIn('Location Hint (City level): Boston, MA', prompt)
         self.assertIn('Do not guess current conditions.', prompt)
+        # 城市级不应暴露坐标；时间行应包含 UTC 偏移与时区名，避免 CST 之类歧义。
+        self.assertNotIn('approx. latitude', prompt)
+        self.assertIn('(UTC-', prompt)
+        self.assertIn('America/New_York', prompt)
+
+    def test_system_prompt_includes_coordinates_only_at_exact_precision(self):
+        UserProfile.objects.update_or_create(
+            user=self.user,
+            defaults={
+                'share_location': True,
+                'location_precision': 'exact',
+                'location_label': '中国 · 上海',
+                'location_latitude': 31.2304,
+                'location_longitude': 121.4737,
+            },
+        )
+
+        exact_prompt = _build_system_prompt(self.character, self.session)
+        self.assertIn('Location Hint (Exact level): 中国 · 上海 (approx. latitude 31.23, longitude 121.47)', exact_prompt)
+
+        UserProfile.objects.update_or_create(
+            user=self.user,
+            defaults={'location_precision': 'city'},
+        )
+
+        city_prompt = _build_system_prompt(self.character, self.session)
+        self.assertIn('Location Hint (City level): 中国 · 上海', city_prompt)
+        self.assertNotIn('approx. latitude', city_prompt)
 
     def test_system_prompt_tool_mode_uses_memory_filesystem_index_without_loading_memory_bodies(self):
         CharacterKnowledgeAsset.objects.create(
@@ -3407,3 +3542,143 @@ class SharedGenerationConfigTests(TestCase):
             allow_memory_tools=True,
             retrieved_memory='',
         )
+
+
+class GeoDetectionTests(TestCase):
+    """chat.geo.detect_location 的 provider 链路与归一化。"""
+
+    def test_private_addresses_trigger_egress_fallback_with_mocks(self):
+        from chat.geo import detect_location
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = {
+                'success': True,
+                'country': 'United States',
+                'region': 'California',
+                'city': 'San Francisco',
+                'timezone': 'America/Los_Angeles',
+                'latitude': 37.77,
+                'longitude': -122.41,
+            }
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('192.168.1.10')
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['fallback_egress'])
+        # 回退时不应把内网 IP 传给查询服务。
+        self.assertNotIn('ip', mock_get.call_args_list[0].kwargs['params'])
+
+    def test_normalizes_ipwho_payload_with_localized_names(self):
+        from chat.geo import detect_location
+
+        ipwho_payload = {
+            'success': True,
+            'country': '中国',
+            'region': '上海',
+            'city': '上海',
+            'timezone': {'id': 'Asia/Shanghai', 'abbr': 'CST'},
+            'latitude': 31.22,
+            'longitude': 121.45,
+        }
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = ipwho_payload
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131', lang='zh-CN')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['source'], 'ipwho.is')
+        self.assertEqual(result['country'], '中国')
+        self.assertEqual(result['timezone'], 'Asia/Shanghai')
+        first_call = mock_get.call_args_list[0]
+        self.assertEqual(first_call.args[0], 'https://ipwho.is/')
+        self.assertEqual(first_call.kwargs['params'], {'ip': '66.165.242.131', 'lang': 'zh-CN'})
+
+    def test_falls_back_to_ipapi_when_ipwho_fails(self):
+        from chat.geo import detect_location
+
+        ipapi_payload = {
+            'country_name': 'United States',
+            'region': 'California',
+            'city': 'San Francisco',
+            'timezone': 'America/Los_Angeles',
+            'latitude': 37.77,
+            'longitude': -122.41,
+        }
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.side_effect = [
+                {'success': False, 'message': 'blocked'},
+                ipapi_payload,
+            ]
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['source'], 'ipapi.co')
+        self.assertEqual(result['country'], 'United States')
+        self.assertEqual(result['region'], 'California')
+        self.assertEqual(result['city'], 'San Francisco')
+        self.assertEqual(result['timezone'], 'America/Los_Angeles')
+
+    def test_reports_unavailable_when_all_providers_fail(self):
+        from chat.geo import detect_location
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.side_effect = [
+                {'success': False, 'message': 'blocked'},
+                {'country_name': '', 'region': '', 'city': ''},
+            ]
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131')
+
+        self.assertEqual(result, {'ok': False, 'reason': 'unavailable'})
+
+
+class GeoDetectionEgressFallbackTests(TestCase):
+    """内网/本机客户端应回退到服务器出口 IP 检测。"""
+
+    IPWHO_PAYLOAD = {
+        'success': True,
+        'ip': '203.0.113.7',
+        'country': '中国',
+        'region': '上海',
+        'city': '上海',
+        'timezone': {'id': 'Asia/Shanghai'},
+        'latitude': 31.22,
+        'longitude': 121.45,
+    }
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='geo-owner', password='password123')
+
+    def test_detect_location_falls_back_to_server_egress_for_loopback_client(self):
+        self.client.force_login(self.user)
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = dict(self.IPWHO_PAYLOAD)
+            mock_get.return_value.raise_for_status.return_value = None
+            response = self.client.get('/api/user-profile/detect-location/')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload['ok'])
+        self.assertTrue(payload['fallback_egress'])
+        self.assertEqual(payload['country'], '中国')
+        self.assertEqual(payload['latitude'], 31.22)
+        first_call = mock_get.call_args_list[0]
+        self.assertEqual(first_call.args[0], 'https://ipwho.is/')
+        self.assertEqual(first_call.kwargs['params'], {'lang': 'en'})
+
+    def test_detect_location_still_uses_client_ip_when_public(self):
+        from chat.geo import detect_location
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = dict(self.IPWHO_PAYLOAD)
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131')
+
+        self.assertTrue(result['ok'])
+        self.assertFalse(result['fallback_egress'])
+        first_call = mock_get.call_args_list[0]
+        self.assertEqual(first_call.kwargs['params']['ip'], '66.165.242.131')

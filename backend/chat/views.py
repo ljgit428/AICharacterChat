@@ -19,6 +19,7 @@ from .attachments import extract_text_attachment_content, guess_attachment_kind,
 from . import asr as chat_asr
 from . import tts as chat_tts
 from .cleanup import cleanup_character_files
+from .geo import detect_location_from_request
 from .memory.interface import LongTermMemoryInterface as CharacterLongTermMemory
 from .memory.manager import MemoryItemNotFoundError, MemoryManager
 from .events.store import EventStore
@@ -429,6 +430,15 @@ class UserProfileViewSet(viewsets.ViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='detect-location')
+    def detect_location(self, request):
+        """按出口 IP 检测位置提示要素与 IANA 时区，供设置页「自动对齐位置」使用。
+
+        ok=False 时附 reason（private_network / unavailable），文案由前端本地化。
+        """
+        lang = 'zh-CN' if str(request.query_params.get('lang') or '').lower().startswith('zh') else 'en'
+        return Response(detect_location_from_request(request, lang=lang))
 
 
 class WebSearchConfigurationViewSet(viewsets.ViewSet):
