@@ -358,7 +358,7 @@ export default function ModelApiSettingsPanel({
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50">
-      <div className="mx-auto max-w-6xl px-6 py-8 md:px-10">
+      <div className="mx-auto max-w-3xl px-6 py-8 md:px-10">
         <div className="mb-8">
           <h2 className="text-2xl font-bold text-slate-900">{messages.modelApi.title}</h2>
           <p className="mt-1 text-sm text-slate-500">{messages.modelApi.subtitle}</p>
@@ -377,7 +377,7 @@ export default function ModelApiSettingsPanel({
         )}
 
         <div className="space-y-8">
-          <section className="rounded-[2rem] border border-slate-200 bg-white/80 p-6 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div>
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
@@ -395,7 +395,7 @@ export default function ModelApiSettingsPanel({
               </button>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+            <div className="space-y-6">
               <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
                 <div className="border-b border-slate-100 px-5 py-4">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
@@ -660,7 +660,7 @@ export default function ModelApiSettingsPanel({
             </div>
           </section>
 
-          <section className="rounded-[2rem] border border-slate-200 bg-white/80 p-6 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
               <CheckCircle2 size={16} />
               <span>{messages.modelApi.rolesSectionTitle}</span>
@@ -733,7 +733,7 @@ export default function ModelApiSettingsPanel({
             <p className="mt-4 text-xs text-slate-400">{messages.modelApi.audioFormatNote}</p>
           </section>
 
-          <section className="rounded-[2rem] border border-slate-200 bg-white/80 p-6 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-6 flex items-start gap-3">
               <div className="rounded-full bg-sky-50 p-2 text-sky-700">
                 <Globe size={18} />
@@ -751,7 +751,7 @@ export default function ModelApiSettingsPanel({
               </div>
             )}
 
-            <div className="grid gap-6 lg:grid-cols-[0.78fr_1.22fr]">
+            <div className="space-y-6">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4">
                   <h4 className="text-base font-semibold text-slate-900">{messages.modelApi.currentWebSearchConfiguration}</h4>
