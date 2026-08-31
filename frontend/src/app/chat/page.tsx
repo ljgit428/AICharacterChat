@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useDispatch } from "react-redux";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Loader2, Menu, MessagesSquare, Search, Settings, X } from "lucide-react";
+import { ArrowLeft, Loader2, Menu, MessagesSquare, Search, Settings, Trash2, X } from "lucide-react";
 import ChatInterface from "@/components/ChatInterface";
 import ModeSwitch from "@/components/ModeSwitch";
 import { useI18n } from "@/i18n/provider";
@@ -35,6 +35,8 @@ function DiscordChatPageContent() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [deletingCharacterId, setDeletingCharacterId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const latestSessionByCharacter = useMemo(() => {
     const map = new Map<string, LatestSessionInfo>();
@@ -91,6 +93,29 @@ function DiscordChatPageContent() {
       console.error("Failed to refresh chat sessions:", error);
     }
   }, []);
+
+  const performDeleteCharacterSession = async (characterId: string) => {
+    const latest = latestSessionByCharacter.get(characterId);
+    if (!latest) {
+      return;
+    }
+
+    try {
+      await apiService.deleteChatSession(latest.id);
+      if (selectedCharacterId === characterId) {
+        // 删除的是当前打开的会话：退回选择页，避免继续显示已删会话。
+        dispatch(clearChat());
+        setSelectedCharacterId(null);
+        setSelectedSessionId(null);
+      }
+      await refreshSessions();
+    } catch (error) {
+      console.error("Failed to delete chat session:", error);
+      setDeleteError(copy.shell.failedToDeleteSession);
+    } finally {
+      setDeletingCharacterId(null);
+    }
+  };
 
   useEffect(() => {
     void loadSidebarData();
@@ -212,39 +237,55 @@ function DiscordChatPageContent() {
 
     return filteredCharacters.map((character) => {
       const isActive = character.id === selectedCharacterId;
+      const latest = latestSessionByCharacter.get(character.id);
 
       return (
-        <button
-          key={character.id}
-          type="button"
-          onClick={() => handleSelectCharacter(character.id)}
-          className={`flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left transition-colors ${
-            isActive
-              ? "bg-sky-50 text-sky-900 ring-1 ring-sky-100"
-              : "text-slate-600 hover:bg-white/80 hover:text-slate-900"
-          }`}
-        >
-          <span className="relative h-10 w-10 flex-shrink-0">
-            <span className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 text-sky-700">
-              {character.avatarUrl ? (
-                /* eslint-disable-next-line @next/next/no-img-element */
-                <img src={character.avatarUrl} alt={character.name} className="h-full w-full object-cover" />
-              ) : (
-                <span className="text-sm font-semibold">{character.name.charAt(0).toUpperCase()}</span>
-              )}
+        <div key={character.id} className="group relative">
+          <button
+            type="button"
+            onClick={() => handleSelectCharacter(character.id)}
+            className={`flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 pr-9 text-left transition-colors ${
+              isActive
+                ? "bg-sky-50 text-sky-900 ring-1 ring-sky-100"
+                : "text-slate-600 hover:bg-white/80 hover:text-slate-900"
+            }`}
+          >
+            <span className="relative h-10 w-10 flex-shrink-0">
+              <span className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 text-sky-700">
+                {character.avatarUrl ? (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img src={character.avatarUrl} alt={character.name} className="h-full w-full object-cover" />
+                ) : (
+                  <span className="text-sm font-semibold">{character.name.charAt(0).toUpperCase()}</span>
+                )}
+              </span>
+              <span
+                className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white bg-emerald-500"
+                aria-hidden
+              />
             </span>
-            <span
-              className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white bg-emerald-500"
-              aria-hidden
-            />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className={`block truncate text-sm ${isActive ? "font-semibold" : "font-medium"}`}>
-              {character.name}
+            <span className="min-w-0 flex-1">
+              <span className={`block truncate text-sm ${isActive ? "font-semibold" : "font-medium"}`}>
+                {character.name}
+              </span>
+              <span className="block truncate text-xs text-slate-400">{getCharacterSubtitle(character)}</span>
             </span>
-            <span className="block truncate text-xs text-slate-400">{getCharacterSubtitle(character)}</span>
-          </span>
-        </button>
+          </button>
+          {latest && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setDeleteError(null);
+                setDeletingCharacterId(character.id);
+              }}
+              className="absolute right-1 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-300 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100"
+              title={copy.chatPage.deleteSession}
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
       );
     });
   };
@@ -399,6 +440,46 @@ function DiscordChatPageContent() {
           </div>
         )}
       </main>
+
+      {deletingCharacterId && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+          onClick={() => setDeletingCharacterId(null)}
+          role="presentation"
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={copy.chatPage.deleteSession}
+          >
+            <h3 className="text-base font-semibold text-slate-900">{copy.chatPage.deleteSession}</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              {characters.find((c) => c.id === deletingCharacterId)
+                ? copy.chatPage.confirmDeleteSession(characters.find((c) => c.id === deletingCharacterId)!.name)
+                : copy.shell.confirmDeleteConversationHistory}
+            </p>
+            {deleteError && <p className="mt-2 text-xs text-rose-600">{deleteError}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeletingCharacterId(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-50"
+              >
+                {copy.shell.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => void performDeleteCharacterSession(deletingCharacterId)}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500"
+              >
+                {copy.chatPage.deleteSession}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

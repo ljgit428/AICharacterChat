@@ -24,6 +24,7 @@ interface SoulPanelProps {
   refreshKey?: string;
   isOpen: boolean;
   isMobile?: boolean;
+  hideToggleButton?: boolean;
   onToggle: () => void;
   className?: string;
 }
@@ -70,6 +71,7 @@ export default function SoulPanel({
   refreshKey,
   isOpen,
   isMobile = false,
+  hideToggleButton = false,
   onToggle,
   className = '',
 }: SoulPanelProps) {
@@ -410,14 +412,16 @@ export default function SoulPanel({
               {copy.sidebarSubtitle}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onToggle}
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-900"
-            title={messages.chat.toggleSoulPanel}
-          >
-            <X className="h-4 w-4" />
-          </button>
+          {!hideToggleButton && (
+            <button
+              type="button"
+              onClick={onToggle}
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-900"
+              title={messages.chat.toggleSoulPanel}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         <div className="relative mt-3">

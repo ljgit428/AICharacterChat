@@ -4,7 +4,7 @@ interface ApiResponse<T> {
 }
 
 import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
-import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
+import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsAudioOutput, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
 
@@ -78,6 +78,14 @@ interface ApiMessage {
     error?: string;
   };
   thinking?: string | null;
+  raw_reasoning?: string | null;
+  steps?: Array<{
+    kind: 'thinking' | 'tool';
+    text?: string;
+    raw_text?: string;
+    tool?: string;
+    arguments?: Record<string, unknown>;
+  }>;
   tool_calls?: Array<{
     tool: string;
     arguments?: Record<string, unknown>;
@@ -176,7 +184,11 @@ interface ApiUserProfile {
   share_location: boolean;
   location_precision: 'region' | 'city' | 'exact';
   location_label: string;
+  location_latitude: number | null;
+  location_longitude: number | null;
   share_weather: boolean;
+  auto_sync_timezone: boolean;
+  auto_sync_location: boolean;
   preferred_relationship_style: string;
   preferred_reply_length: 'short' | 'medium' | 'long';
   preferred_proactivity: 'low' | 'normal' | 'high';
@@ -187,6 +199,19 @@ interface ApiUserProfile {
   blocked_topics: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface DetectedLocation {
+  ok: boolean;
+  source?: string;
+  fallback_egress?: boolean;
+  country?: string;
+  region?: string;
+  city?: string;
+  timezone?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  reason?: 'private_network' | 'unavailable';
 }
 
 interface ApiWebSearchConfig {
@@ -234,6 +259,8 @@ function normalizeMessage(apiData: ApiMessage): Message {
     senderType: apiData.sender_type,
     researchPayload: normalizeResearchPayload(apiData.research_payload),
     thinking: apiData.thinking || '',
+    rawReasoning: apiData.raw_reasoning || '',
+    steps: Array.isArray(apiData.steps) ? apiData.steps : undefined,
     toolCalls: normalizeToolCalls(apiData.tool_calls),
     tokenUsage: normalizeTokenUsage(apiData.token_usage),
     attachments,
@@ -437,7 +464,11 @@ function normalizeUserProfile(apiData: ApiUserProfile): UserProfile {
     shareLocation: apiData.share_location,
     locationPrecision: apiData.location_precision || 'city',
     locationLabel: apiData.location_label || '',
+    locationLatitude: apiData.location_latitude ?? null,
+    locationLongitude: apiData.location_longitude ?? null,
     shareWeather: apiData.share_weather,
+    autoSyncTimezone: apiData.auto_sync_timezone,
+    autoSyncLocation: apiData.auto_sync_location,
     preferredRelationshipStyle: apiData.preferred_relationship_style || '',
     preferredReplyLength: apiData.preferred_reply_length || 'medium',
     preferredProactivity: apiData.preferred_proactivity || 'normal',
@@ -514,6 +545,36 @@ function normalizeTtsVoiceModel(apiData: ApiTtsVoiceModel): TtsVoiceModel {
     conversionError: apiData.conversion_error || '',
     createdAt: apiData.created_at,
     updatedAt: apiData.updated_at,
+  };
+}
+
+interface ApiTtsAudioOutput {
+  id: number;
+  character_id?: number | null;
+  character_name?: string;
+  text: string;
+  emotion: string;
+  provider: string;
+  audio_url?: string | null;
+  content_type?: string;
+  processing_ms?: number | null;
+  first_byte_ms?: number | null;
+  created_at?: string;
+}
+
+function normalizeTtsAudioOutput(apiData: ApiTtsAudioOutput): TtsAudioOutput {
+  return {
+    id: apiData.id,
+    characterId: apiData.character_id ?? null,
+    characterName: apiData.character_name || '',
+    text: apiData.text || '',
+    emotion: apiData.emotion || '',
+    provider: apiData.provider || '',
+    audioUrl: apiData.audio_url || '',
+    contentType: apiData.content_type || 'audio/wav',
+    processingMs: apiData.processing_ms ?? null,
+    firstByteMs: apiData.first_byte_ms ?? null,
+    createdAt: apiData.created_at || '',
   };
 }
 
@@ -626,7 +687,11 @@ interface UpdateUserProfileRequest {
   share_location?: boolean;
   location_precision?: 'region' | 'city' | 'exact';
   location_label?: string;
+  location_latitude?: number | null;
+  location_longitude?: number | null;
   share_weather?: boolean;
+  auto_sync_timezone?: boolean;
+  auto_sync_location?: boolean;
   preferred_relationship_style?: string;
   preferred_reply_length?: 'short' | 'medium' | 'long';
   preferred_proactivity?: 'low' | 'normal' | 'high';
@@ -666,6 +731,8 @@ interface StreamDoneEvent {
   model_name?: string;
   research_payload?: ApiMessage['research_payload'];
   thinking?: string | null;
+  raw_reasoning?: string | null;
+  steps?: ApiMessage['steps'];
   tool_calls?: ApiMessage['tool_calls'];
   token_usage?: ApiMessage['token_usage'];
 }
@@ -1279,6 +1346,11 @@ class ApiService {
     return { data: undefined };
   }
 
+  async detectLocation(lang?: string): Promise<ApiResponse<DetectedLocation>> {
+    const query = lang ? `?lang=${encodeURIComponent(lang)}` : '';
+    return this.request<DetectedLocation>(`/user-profile/detect-location${query}`);
+  }
+
   async getModelConfig(id: string): Promise<ApiResponse<ModelConfig>> {
     const response = await this.request<ApiModelConfig>(`/model-configs/${id}`);
     if (response.data) {
@@ -1581,6 +1653,22 @@ class ApiService {
       return { data: normalizeTtsVoiceModel(response.data) };
     }
     return { data: undefined };
+  }
+
+  // 音频输出：已合成语音的历史记录（浏览/删除）。
+  async listTtsAudioOutputs(characterId?: string | number): Promise<ApiResponse<TtsAudioOutput[]>> {
+    const query = characterId != null && String(characterId) !== ''
+      ? `?character_id=${encodeURIComponent(String(characterId))}`
+      : '';
+    const response = await this.request<ApiTtsAudioOutput[]>(`/tts-audio-outputs${query}`);
+    if (response.data) {
+      return { data: (response.data || []).map(normalizeTtsAudioOutput) };
+    }
+    return { data: undefined };
+  }
+
+  async deleteTtsAudioOutput(id: number): Promise<ApiResponse<void>> {
+    return this.request(`/tts-audio-outputs/${id}`, { method: 'DELETE' });
   }
 
   async readSoulFile(characterId: string, path: string, offset = 0): Promise<ApiResponse<MemoryExplorerFile>> {

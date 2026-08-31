@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
+import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, replaceMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import CameraPanel from '@/components/CameraPanel';
 import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
@@ -12,6 +12,7 @@ import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
 import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
+import { buildSpeechSegments, SpeechSegment } from '@/utils/replySegments';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
 import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
@@ -42,6 +43,8 @@ function normalizeStreamMessage(apiMessage: {
   role: 'user' | 'assistant';
   timestamp: string;
   thinking?: string | null;
+  raw_reasoning?: string | null;
+  steps?: Array<{ kind: 'thinking' | 'tool'; text?: string; raw_text?: string; tool?: string; arguments?: Record<string, unknown> }>;
   tool_calls?: Array<{
     tool: string;
     arguments?: Record<string, unknown>;
@@ -84,6 +87,8 @@ function normalizeStreamMessage(apiMessage: {
     role: apiMessage.role,
     timestamp: apiMessage.timestamp,
     thinking: apiMessage.thinking || '',
+    rawReasoning: apiMessage.raw_reasoning || '',
+    steps: apiMessage.steps || undefined,
     toolCalls: (apiMessage.tool_calls || [])
       .filter((call) => call?.tool)
       .map((call) => ({
@@ -102,23 +107,6 @@ function normalizeStreamMessage(apiMessage: {
 function formatLatencyMs(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
-}
-
-/** 语音回复分句：按中英标点切句，合并到 ~80 字符一块，首句先合成先出声。 */
-function splitReplyChunks(text: string, maxLen = 80): string[] {
-  const sentences = text.replace(/\s+/g, ' ').match(/[^。！？!?…\n]+[。！？!?…\n]*/g) || [text];
-  const chunks: string[] = [];
-  let current = '';
-  for (const sentence of sentences) {
-    if (current && (current + sentence).length > maxLen) {
-      chunks.push(current.trim());
-      current = sentence;
-    } else {
-      current += sentence;
-    }
-  }
-  if (current.trim()) chunks.push(current.trim());
-  return chunks.filter(Boolean);
 }
 
 export default function ChatInterface({
@@ -177,6 +165,12 @@ export default function ChatInterface({
     () => typeof window !== 'undefined' && window.localStorage.getItem('prismate.voiceReply') === '1',
   );
   const [ttsReady, setTtsReady] = useState<{ available: boolean; hint: string } | null>(null);
+  // 卡拉OK高亮状态：正在朗读/合成的句属于哪条消息、第几句（传给 ImmersiveChatWindow）。
+  const [speechPlayback, setSpeechPlayback] = useState<{
+    messageId: string;
+    activeIndex: number | null;
+    synthesizingIndex: number | null;
+  } | null>(null);
   const voiceReplyRef = useRef(voiceReplyOn);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const speakCancelRef = useRef(false);
@@ -219,11 +213,12 @@ export default function ChatInterface({
     screenGrabberRef.current = grab;
   }, []);
 
-  // 语音回复（TTS）：分句合成、顺序朗读；随时可取消。
+  // 语音回复（TTS）：逐句合成、顺序朗读；随时可取消（取消同时清掉高亮）。
   const cancelSpeech = useCallback(() => {
     speakCancelRef.current = true;
     currentAudioRef.current?.pause();
     currentAudioRef.current = null;
+    setSpeechPlayback(null);
   }, []);
 
   const playBlob = (blob: Blob) => new Promise<void>((resolve, reject) => {
@@ -245,33 +240,8 @@ export default function ChatInterface({
     void audio.play().catch(() => reject(new Error('speech autoplay blocked')));
   });
 
-  /** 语音分段：后端对带【情感】标记的回复做解析后的产物；emotion 空 = 默认情感。 */
-  type TtsSegment = { emotion?: string; text: string };
-
-  const speakReply = async (segments: TtsSegment[]) => {
-    if (!voiceReplyRef.current || !segments.length) return;
-    speakCancelRef.current = false;
-    const characterId = character?.id;
-    for (const segment of segments) {
-      for (const chunk of splitReplyChunks(segment.text)) {
-        if (speakCancelRef.current) return;
-        try {
-          const blob = await apiService.synthesizeSpeech(chunk, {
-            characterId,
-            emotion: segment.emotion || undefined,
-          });
-          if (speakCancelRef.current) return;
-          await playBlob(blob);
-        } catch {
-          return; // 合成或播放失败即停止本轮朗读
-        }
-      }
-    }
-  };
-  const speakReplyRef = useRef<(segments: TtsSegment[]) => void>(() => {});
-  speakReplyRef.current = (segments) => {
-    void speakReply(segments);
-  };
+  // 语音分段：后端对带【情感】标记的回复做解析后的产物；emotion 空 = 默认情感。
+  // 情感分段只服务于朗读（见 done 事件处理），前端展示分句见 utils/replySegments。
 
   // 单段朗读（消息气泡旁的喇叭按钮）：不依赖全局"自动朗读"开关，独立发声。
   // 点击时合成并缓存，后续点击直接播放缓存。不预合成（预合成曾导致缓存与渲染
@@ -304,17 +274,48 @@ export default function ChatInterface({
     return blob;
   }, [character?.id, runTtsSerialized]);
 
-  const speakSegment = async (text: string, emotion?: string) => {
-    if (!text.trim()) return;
+  /** 语音队列：按句段顺序合成并朗读，每句同步卡拉OK高亮状态；随时可取消。 */
+  const runSpeechQueue = async (messageId: string, segments: SpeechSegment[]) => {
+    if (!segments.length) return;
+    speakCancelRef.current = false;
+    for (let index = 0; index < segments.length; index += 1) {
+      if (speakCancelRef.current) return;
+      setSpeechPlayback({ messageId, activeIndex: null, synthesizingIndex: index });
+      try {
+        const blob = await synthesizeSegmentCached(segments[index].text, segments[index].emotion);
+        if (speakCancelRef.current) return;
+        setSpeechPlayback({ messageId, activeIndex: index, synthesizingIndex: null });
+        await playBlob(blob);
+      } catch {
+        break; // 合成或播放失败（含被取消）即停止本轮朗读
+      }
+    }
+    setSpeechPlayback(null);
+  };
+  const speakQueueRef = useRef<(messageId: string, segments: SpeechSegment[]) => Promise<void>>(async () => {});
+  speakQueueRef.current = runSpeechQueue;
+
+  /** 单句试听：点击气泡中的句子，独立合成并播放该句。 */
+  const speakSentence = async (messageId: string, index: number, segment: SpeechSegment) => {
+    if (!segment.text.trim()) return;
     cancelSpeech();
     speakCancelRef.current = false;
+    setSpeechPlayback({ messageId, activeIndex: index, synthesizingIndex: index });
     try {
-      const blob = await synthesizeSegmentCached(text, emotion);
+      const blob = await synthesizeSegmentCached(segment.text, segment.emotion);
       if (speakCancelRef.current) return;
+      setSpeechPlayback({ messageId, activeIndex: index, synthesizingIndex: null });
       await playBlob(blob);
     } catch {
       // 合成或播放失败即静默停止
     }
+    setSpeechPlayback((current) => (current && current.messageId === messageId ? null : current));
+  };
+
+  /** 整条回复连播：先停掉当前朗读，再从第一句开始按句播放。 */
+  const handlePlayAll = (messageId: string, segments: SpeechSegment[]) => {
+    cancelSpeech();
+    void speakQueueRef.current(messageId, segments);
   };
 
   // 单段音频下载：优先用缓存，否则现场合成后以 .wav 保存到本地。
@@ -727,9 +728,15 @@ export default function ChatInterface({
       return;
     }
 
+    // 问候轮（首条且无文字无附件，角色先开口）没有用户消息可显示；带文字或
+    // 附件的首条是真实对话轮，和后续消息一样先乐观上屏，不等服务端 session 事件。
+    const isGreetingTurn = isFirstMessage && !trimmedInput && attachments.length === 0;
+
     if (isFirstMessage) {
       setHasStartedConversation(true);
-    } else {
+    }
+
+    if (!isGreetingTurn) {
       dispatch(addMessage({
         id: optimisticUserMessageId,
         content: trimmedInput,
@@ -790,12 +797,15 @@ export default function ChatInterface({
                   URL.revokeObjectURL(attachment.filePreviewUrl);
                 }
               });
-              dispatch(removeMessage(optimisticUserMessageId));
-              dispatch(addMessage({
-                ...normalizeStreamMessage(event.user_message),
-                senderId: 'user',
-                senderName: currentUserLabel,
-                senderType: 'user',
+              // 原位换成服务端消息：保持"用户消息在流式回复占位符之上"的顺序。
+              dispatch(replaceMessage({
+                id: optimisticUserMessageId,
+                message: {
+                  ...normalizeStreamMessage(event.user_message),
+                  senderId: 'user',
+                  senderName: currentUserLabel,
+                  senderType: 'user',
+                },
               }));
             }
             return;
@@ -833,6 +843,10 @@ export default function ChatInterface({
           }
 
           if (event.type === 'done') {
+            // 情感分段（后端解析【情感】标记的产物）随消息保存，供逐句朗读继承语气。
+            const ttsSegments = Array.isArray(event.tts_segments)
+              ? event.tts_segments.filter((seg) => seg?.text)
+              : [];
             dispatch(removeMessage(streamingAssistantId));
             dispatch(addMessage({
               id: String(event.message_id),
@@ -844,12 +858,15 @@ export default function ChatInterface({
               senderAvatarUrl: character.avatarUrl,
               senderType: 'character',
               thinking: event.thinking || '',
+              rawReasoning: event.raw_reasoning || '',
+              steps: Array.isArray(event.steps) ? event.steps : undefined,
               toolCalls: (event.tool_calls || [])
                 .filter((call) => call?.tool)
                 .map((call) => ({
                   tool: call.tool,
                   arguments: call.arguments || {},
                 })),
+              ttsSegments,
               tokenUsage: normalizeTokenUsage(event.token_usage),
               researchPayload: event.research_payload ? {
                 query: event.research_payload.query || '',
@@ -864,12 +881,14 @@ export default function ChatInterface({
                 error: event.research_payload.error || '',
               } : null,
             }));
-            // 语音回复开启时，回复完成后按情感分段合成朗读；
-            // 后端没返回分段（角色未配情感组）时退化为整段默认情感。
-            const ttsSegments: TtsSegment[] = Array.isArray(event.tts_segments)
-              ? event.tts_segments.filter((seg) => seg?.text)
-              : [];
-            speakReplyRef.current(ttsSegments.length ? ttsSegments : [{ text: event.content }]);
+            // 语音回复开启时，回复完成后按句合成朗读；情感以后端分段为准，
+            // 角色未配情感组时（无分段）全部走默认语气。
+            if (voiceReplyRef.current) {
+              void speakQueueRef.current(
+                String(event.message_id),
+                buildSpeechSegments(event.content || '', ttsSegments),
+              );
+            }
             return;
           }
 
@@ -1228,8 +1247,11 @@ export default function ChatInterface({
           modelConfigs={modelConfigs}
           activeTextModel={activeModelConfig}
           onTextModelChange={handleTextModelChange}
-          onSpeakSegment={speakSegment}
-          onDownloadSegment={downloadSegment}
+          speechPlayback={speechPlayback}
+          onSpeakSentence={(messageId, index, segment) => void speakSentence(messageId, index, segment)}
+          onPlayAll={handlePlayAll}
+          onStopSpeech={cancelSpeech}
+          onDownloadSentence={(text) => void downloadSegment(text)}
         />
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (

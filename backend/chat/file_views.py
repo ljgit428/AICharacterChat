@@ -1,16 +1,18 @@
 import os
 
-from django.core.files.storage import default_storage
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+from .assets.store import AssetStore
 
 MAX_RELATIVE_PATH_SEGMENTS = 12
 
 
 def sanitize_relative_path(raw_path):
     """Normalize a client-supplied folder path (e.g. webkitRelativePath) into a
-    safe storage sub-path. Keeps the folder hierarchy so that file groups stay
+    safe display sub-path. Keeps the folder hierarchy so that file groups stay
     browsable in the memory filesystem; collapses traversal and empty parts."""
     normalized = (raw_path or '').replace('\\', '/').strip()
     segments = []
@@ -25,8 +27,15 @@ def sanitize_relative_path(raw_path):
 
 
 @api_view(['POST'])
-@permission_classes([])
+@permission_classes([IsAuthenticated])
 def upload_file_view(request):
+    """Stage a character-reference file as an ``asset/uploaded`` event.
+
+    The file is stored under a per-user pending directory with a TTL; the
+    response carries ``upload_id`` which the character create/edit mutations
+    use to attach it. Staging files are reclaimed lazily and via
+    ``clean_stale_uploads``.
+    """
     file_obj = request.FILES.get('file')
     if not file_obj:
         return Response(
@@ -41,18 +50,20 @@ def upload_file_view(request):
     ) or os.path.basename(file_obj.name)
 
     try:
-        saved_path = default_storage.save(f"uploads/{relative_path}", file_obj)
-        relative_url = default_storage.url(saved_path)
-        absolute_url = request.build_absolute_uri(relative_url)
-
+        event, metadata = AssetStore.upload(request.user, file_obj, relative_path)
         return Response({
-            "name": os.path.basename(saved_path),
-            "uri": absolute_url,
+            "upload_id": event.id,
+            "name": metadata['name'],
+            "relative_path": metadata['relative_path'],
             "display_name": file_obj.name,
-            "relative_path": relative_path,
         }, status=status.HTTP_201_CREATED)
-    except Exception as e:
+    except ValueError as exc:
         return Response(
-            {"error": f"Failed to upload file: {str(e)}"},
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return Response(
+            {"error": f"Failed to upload file: {str(exc)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

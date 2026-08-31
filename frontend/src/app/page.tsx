@@ -21,6 +21,7 @@ import {
   Globe,
   LogOut,
   Pencil,
+  AudioLines,
 } from 'lucide-react';
 import CharacterGallery from '@/components/CharacterGallery';
 import CreateCharacterSimplifiedForm from '@/components/CreateCharacterSimplifiedForm';
@@ -72,6 +73,8 @@ function AIStudioLayoutContent() {
   const [renamingChat, setRenamingChat] = useState<ChatHistoryItem | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [deletingChat, setDeletingChat] = useState<ChatHistoryItem | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 10;
 
   const dispatch = useDispatch();
@@ -232,14 +235,26 @@ function AIStudioLayoutContent() {
   };
 
 
-  const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
+  const handleDeleteSession = (e: React.MouseEvent, chat: ChatHistoryItem) => {
     e.stopPropagation();
-    if (!window.confirm(messages.shell.confirmDeleteConversationHistory)) {
+    setDeleteError(null);
+    setDeletingChat(chat);
+  };
+
+  const performDeleteSession = async () => {
+    const chat = deletingChat;
+    if (!chat) {
       return;
     }
 
     try {
-      await apiService.deleteChatSession(sessionId);
+      await apiService.deleteChatSession(chat.id);
+      if (selectedSessionId === chat.id) {
+        // 删除的是当前打开的会话：清空聊天状态，回到角色库，避免"还在显示已删会话"。
+        dispatch(clearChat());
+        setSelectedSessionId(null);
+        setSelectedCharacterId(null);
+      }
       const response = await apiService.getChatSessions(undefined, 'topic');
 
       if (response.data) {
@@ -247,7 +262,9 @@ function AIStudioLayoutContent() {
       }
     } catch (error) {
       console.error("Failed to delete session:", error);
-      alert(messages.shell.failedToDeleteSession);
+      setDeleteError(messages.shell.failedToDeleteSession);
+    } finally {
+      setDeletingChat(null);
     }
   };
 
@@ -397,7 +414,7 @@ function AIStudioLayoutContent() {
                     <Pencil size={12} />
                   </button>
                   <button
-                    onClick={(e) => handleDeleteSession(e, chat.id)}
+                    onClick={(e) => handleDeleteSession(e, chat)}
                     className="absolute right-1 rounded-lg p-1 text-slate-400 opacity-0 transition-all hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100"
                     title={messages.shell.deleteChat}
                   >
@@ -429,6 +446,22 @@ function AIStudioLayoutContent() {
               >
                 <span className="text-slate-400"><Database size={18} /></span>
                 <span className="min-w-0 flex-1 truncate text-left">{messages.memory.pageTitle}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push('/soul')}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200 hover:bg-white/80 hover:text-slate-900"
+              >
+                <span className="text-slate-400"><FolderTree size={18} /></span>
+                <span className="min-w-0 flex-1 truncate text-left">{messages.soul.pageTitle}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push('/audio-outputs')}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200 hover:bg-white/80 hover:text-slate-900"
+              >
+                <span className="text-slate-400"><AudioLines size={18} /></span>
+                <span className="min-w-0 flex-1 truncate text-left">{messages.audioOutputs.pageTitle}</span>
               </button>
               <NavItem
                 icon={<PlusCircle size={18} />}
@@ -580,6 +613,49 @@ function AIStudioLayoutContent() {
           </div>
         )}
       </div>
+
+      {deletingChat && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+          onClick={() => setDeletingChat(null)}
+          role="presentation"
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={messages.shell.deleteConversation}
+          >
+            <h3 className="text-base font-semibold text-slate-900">{messages.shell.deleteConversation}</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">{messages.shell.confirmDeleteConversationHistory}</p>
+            {deletingChat.title && (
+              <p className="mt-2 truncate rounded-xl bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700">
+                {deletingChat.title}
+              </p>
+            )}
+            {deleteError && (
+              <p className="mt-2 text-xs text-rose-600">{deleteError}</p>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeletingChat(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-50"
+              >
+                {messages.shell.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => void performDeleteSession()}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500"
+              >
+                {messages.shell.deleteChat}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {renamingChat && (
         <div
@@ -765,7 +841,7 @@ function AIStudioLayoutContent() {
                             <Pencil size={18} />
                           </button>
                           <button
-                            onClick={(e) => handleDeleteSession(e, chat.id)}
+                            onClick={(e) => handleDeleteSession(e, chat)}
                             className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600"
                             title={messages.shell.deleteConversation}
                           >

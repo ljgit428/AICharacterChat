@@ -3,7 +3,19 @@ import os
 from rest_framework import serializers
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .attachments import get_message_attachments, get_primary_message_attachment
-from .models import Character, CharacterKnowledgeAsset, ChatSession, Message, ModelConfiguration, TtsEngine, TtsServiceSettings, TtsVoiceModel, UserProfile, WebSearchConfiguration
+from .models import (
+    Character,
+    CharacterKnowledgeAsset,
+    ChatSession,
+    Message,
+    ModelConfiguration,
+    TtsAudioOutput,
+    TtsEngine,
+    TtsServiceSettings,
+    TtsVoiceModel,
+    UserProfile,
+    WebSearchConfiguration,
+)
 
 class CharacterSerializer(serializers.ModelSerializer):
     class Meta:
@@ -98,7 +110,7 @@ class MessageSerializer(serializers.ModelSerializer):
         model = Message
         fields = [
             'id', 'role', 'content', 'timestamp', 'character', 'research_payload',
-            'thinking', 'tool_calls', 'token_usage',
+            'thinking', 'raw_reasoning', 'steps', 'tool_calls', 'token_usage',
             'file_uri', 'file_preview_url', 'file_name', 'file_type', 'file_mime_type', 'attachments',
         ]
         read_only_fields = ['timestamp']
@@ -287,6 +299,32 @@ class TtsVoiceModelSerializer(serializers.ModelSerializer):
         ]
 
 
+class TtsAudioOutputSerializer(serializers.ModelSerializer):
+    """一条已保存的语音输出（「音频输出」浏览页）。只读。"""
+
+    audio_url = serializers.SerializerMethodField()
+    character_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TtsAudioOutput
+        fields = [
+            'id', 'character_id', 'character_name', 'text', 'emotion', 'provider',
+            'audio_url', 'content_type', 'processing_ms', 'first_byte_ms', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_audio_url(self, obj):
+        file_obj = getattr(obj, 'audio', None)
+        if not file_obj:
+            return None
+        request = self.context.get('request')
+        url = file_obj.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_character_name(self, obj):
+        return obj.character.name if obj.character_id else ''
+
+
 class UserProfileSerializer(serializers.ModelSerializer):
     def validate_timezone(self, value):
         normalized = (value or '').strip() or 'UTC'
@@ -310,14 +348,22 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not share_location:
             attrs['location_label'] = ''
             attrs['share_weather'] = False
+            # 坐标随位置分享一起清除，避免留下无对应分享许可的敏感数据。
+            attrs['location_latitude'] = None
+            attrs['location_longitude'] = None
             return attrs
 
-        if not location_label:
+        # 新资料默认开启位置分享/天气，允许「分享开着但提示暂空」的中间态
+        # （等自动检测或手动填写补上）；只有本次请求显式开启分享、或显式
+        # 提交空提示时才拦截。
+        turning_location_on = share_location and not getattr(instance, 'share_location', False)
+        if not location_label and (turning_location_on or 'location_label' in attrs):
             raise serializers.ValidationError({
                 'location_label': 'Location hint is required when location sharing is enabled.',
             })
 
-        if share_weather and not location_label:
+        turning_weather_on = share_weather and not getattr(instance, 'share_weather', False)
+        if share_weather and not location_label and turning_weather_on:
             raise serializers.ValidationError({
                 'share_weather': 'Location sharing with a local location hint is required before weather context can be enabled.',
             })
@@ -330,6 +376,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'avatar_url', 'preferred_name', 'pronouns', 'bio', 'default_enable_web_search', 'timezone',
             'interface_language', 'share_local_time', 'share_location',
             'location_precision', 'location_label', 'share_weather',
+            'location_latitude', 'location_longitude',
+            'auto_sync_timezone', 'auto_sync_location',
             'preferred_relationship_style', 'preferred_reply_length',
             'preferred_proactivity', 'preferred_emotional_intensity',
             'allow_long_term_memory', 'allow_preference_inference',

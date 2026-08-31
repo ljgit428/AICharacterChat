@@ -60,6 +60,24 @@ from chat.tasks import (
 )
 
 
+def _consume_streaming(response):
+    """Consume a StreamingHttpResponse body, handling both sync and async
+    iterators (the stream_message view now returns an async generator so
+    chunks flow in real time under ASGI)."""
+    content = response.streaming_content
+    if hasattr(content, '__aiter__'):
+        from asgiref.sync import async_to_sync
+
+        async def _collect():
+            chunks = []
+            async for chunk in content:
+                chunks.append(chunk)
+            return b''.join(chunks)
+
+        return async_to_sync(_collect)()
+    return b''.join(content)
+
+
 class ModelConfigTestMixin:
     """模型配置 + 角色槽位的测试辅助，供多个 TestCase 复用（要求 self.user 存在）。"""
 
@@ -288,18 +306,14 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(self.own_character.name, 'Updated Owner Character')
         self.assertEqual(self.own_character.scenario, 'Updated library')
 
-    def test_rest_delete_character_blocks_when_chat_sessions_exist(self):
+    def test_rest_delete_character_deletes_character_with_chat_sessions(self):
         self.client.force_login(self.user)
 
         response = self.client.delete(f'/api/characters/{self.own_character.id}/')
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.json()['error'],
-            'Cannot delete a character with existing chat sessions',
-        )
-        self.assertTrue(Character.objects.filter(id=self.own_character.id).exists())
-        self.assertTrue(ChatSession.objects.filter(id=self.own_session.id).exists())
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Character.objects.filter(id=self.own_character.id).exists())
+        self.assertFalse(ChatSession.objects.filter(id=self.own_session.id).exists())
 
     def test_rest_delete_character_allows_delete_without_chat_sessions(self):
         self.client.force_login(self.user)
@@ -677,6 +691,14 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
     def test_user_profile_requires_location_hint_before_enabling_weather(self):
         self.client.force_login(self.user)
 
+        # 新资料默认开启位置分享；先关掉再重新开启，模拟「显式开启」路径。
+        disable_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({'share_location': False}),
+            content_type='application/json',
+        )
+        self.assertEqual(disable_response.status_code, 200)
+
         response = self.client.patch(
             '/api/user-profile/me/',
             data=json.dumps({
@@ -689,6 +711,105 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn('location_label', response.json())
+
+    def test_user_profile_allows_pending_location_hint_on_fresh_profile(self):
+        """默认开启分享的新资料：提示暂空时仍可局部更新其他字段。"""
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({'preferred_name': 'Owner Alias'}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['preferred_name'], 'Owner Alias')
+        self.assertEqual(response.json()['location_label'], '')
+
+    def test_user_profile_persists_detected_coordinates_and_clears_on_opt_out(self):
+        self.client.force_login(self.user)
+
+        save_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({
+                'share_location': True,
+                'location_precision': 'exact',
+                'location_label': '中国 · 上海',
+                'location_latitude': 31.2304,
+                'location_longitude': 121.4737,
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(save_response.status_code, 200)
+        payload = save_response.json()
+        self.assertAlmostEqual(payload['location_latitude'], 31.2304)
+        self.assertAlmostEqual(payload['location_longitude'], 121.4737)
+
+        opt_out_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({'share_location': False}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(opt_out_response.status_code, 200)
+        payload = opt_out_response.json()
+        self.assertIsNone(payload['location_latitude'])
+        self.assertIsNone(payload['location_longitude'])
+
+    def test_user_profile_auto_sync_flags_have_defaults_and_persist(self):
+        self.client.force_login(self.user)
+
+        get_response = self.client.get('/api/user-profile/me/')
+        self.assertEqual(get_response.status_code, 200)
+        payload = get_response.json()
+        self.assertTrue(payload['share_local_time'])
+        self.assertTrue(payload['share_location'])
+        self.assertTrue(payload['share_weather'])
+        self.assertTrue(payload['auto_sync_timezone'])
+        self.assertTrue(payload['auto_sync_location'])
+
+        patch_response = self.client.patch(
+            '/api/user-profile/me/',
+            data=json.dumps({
+                'auto_sync_timezone': False,
+                'auto_sync_location': False,
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(patch_response.status_code, 200)
+        payload = patch_response.json()
+        self.assertFalse(payload['auto_sync_timezone'])
+        self.assertFalse(payload['auto_sync_location'])
+
+    def test_detect_location_forwards_provider_result(self):
+        self.client.force_login(self.user)
+        detected = {
+            'ok': True,
+            'source': 'ipwho.is',
+            'country': '中国',
+            'region': '上海',
+            'city': '上海',
+            'timezone': 'Asia/Shanghai',
+            'latitude': 31.22,
+            'longitude': 121.45,
+        }
+
+        with patch('chat.views.detect_location_from_request', return_value=detected) as mock_detect:
+            response = self.client.get('/api/user-profile/detect-location/', data={'lang': 'zh-CN'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), detected)
+        self.assertEqual(mock_detect.call_args.kwargs['lang'], 'zh-CN')
+
+    def test_detect_location_ignores_lang_for_non_chinese_locales(self):
+        self.client.force_login(self.user)
+
+        with patch('chat.views.detect_location_from_request', return_value={'ok': False, 'reason': 'unavailable'}) as mock_detect:
+            self.client.get('/api/user-profile/detect-location/')
+
+        self.assertEqual(mock_detect.call_args.kwargs['lang'], 'en')
 
     def test_web_search_config_me_endpoint_returns_default_shape_when_missing(self):
         self.client.force_login(self.user)
@@ -828,7 +949,7 @@ class AuthorizationRegressionTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
 
@@ -1294,9 +1415,37 @@ class PromptMemoryTests(TestCase):
 
         self.assertIn('User Local Time:', prompt)
         self.assertIn('User Local Daypart:', prompt)
-        self.assertIn('Interpret relative time words such as today, tonight, and tomorrow in the user\'s local timezone.', prompt)
+        self.assertIn("Interpret relative time words such as today, tonight, and tomorrow in the user's local timezone.", prompt)
         self.assertIn('Location Hint (City level): Boston, MA', prompt)
         self.assertIn('Do not guess current conditions.', prompt)
+        # 城市级不应暴露坐标；时间行应包含 UTC 偏移与时区名，避免 CST 之类歧义。
+        self.assertNotIn('approx. latitude', prompt)
+        self.assertIn('(UTC-', prompt)
+        self.assertIn('America/New_York', prompt)
+
+    def test_system_prompt_includes_coordinates_only_at_exact_precision(self):
+        UserProfile.objects.update_or_create(
+            user=self.user,
+            defaults={
+                'share_location': True,
+                'location_precision': 'exact',
+                'location_label': '中国 · 上海',
+                'location_latitude': 31.2304,
+                'location_longitude': 121.4737,
+            },
+        )
+
+        exact_prompt = _build_system_prompt(self.character, self.session)
+        self.assertIn('Location Hint (Exact level): 中国 · 上海 (approx. latitude 31.23, longitude 121.47)', exact_prompt)
+
+        UserProfile.objects.update_or_create(
+            user=self.user,
+            defaults={'location_precision': 'city'},
+        )
+
+        city_prompt = _build_system_prompt(self.character, self.session)
+        self.assertIn('Location Hint (City level): 中国 · 上海', city_prompt)
+        self.assertNotIn('approx. latitude', city_prompt)
 
     def test_system_prompt_tool_mode_uses_memory_filesystem_index_without_loading_memory_bodies(self):
         CharacterKnowledgeAsset.objects.create(
@@ -1561,13 +1710,16 @@ class PromptMemoryTests(TestCase):
             },
         ]
 
-        result = _generate_openai_compatible_response(
-            model_name='gpt-4.1-mini',
-            api_key='secret',
-            messages=[{'role': 'system', 'content': 'Use memory tools.'}],
-            base_url='https://example.com/v1',
-            tools=_build_memory_tool_specs(),
-            filesystem=CharacterMemoryFilesystem(self.character),
+        result = ''.join(
+            e.get('content') or '' for e in _generate_openai_compatible_response(
+                model_name='gpt-4.1-mini',
+                api_key='secret',
+                messages=[{'role': 'system', 'content': 'Use memory tools.'}],
+                base_url='https://example.com/v1',
+                tools=_build_memory_tool_specs(),
+                filesystem=CharacterMemoryFilesystem(self.character),
+            )
+            if e.get('type') == 'final_text'
         )
 
         self.assertEqual(result, 'I still call you Gatewalker.')
@@ -1592,13 +1744,16 @@ class PromptMemoryTests(TestCase):
             },
         ]
 
-        result = _generate_openai_compatible_response(
-            model_name='gpt-4.1-mini',
-            api_key='secret',
-            messages=[{'role': 'system', 'content': 'Use memory tools if available.'}],
-            base_url='https://example.com/v1',
-            tools=_build_memory_tool_specs(),
-            filesystem=CharacterMemoryFilesystem(self.character),
+        result = ''.join(
+            e.get('content') or '' for e in _generate_openai_compatible_response(
+                model_name='gpt-4.1-mini',
+                api_key='secret',
+                messages=[{'role': 'system', 'content': 'Use memory tools if available.'}],
+                base_url='https://example.com/v1',
+                tools=_build_memory_tool_specs(),
+                filesystem=CharacterMemoryFilesystem(self.character),
+            )
+            if e.get('type') == 'final_text'
         )
 
         self.assertEqual(result, 'Fallback answer without tools.')
@@ -1681,7 +1836,7 @@ class ChatAttachmentTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
 
@@ -1730,7 +1885,7 @@ class ChatAttachmentTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
 
@@ -2250,6 +2405,30 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             uploaded_file.write(content)
         return f'http://testserver/media/uploads/{filename}'
 
+    def _stage_upload(self, filename, content, *, binary=False):
+        """Create an ``asset/uploaded`` event via AssetStore; returns upload_id.
+
+        Replaces the old bare-file staging writes: the upload endpoint and the
+        GraphQL create/update now flow through the AssetEvent log, so tests
+        must stage through AssetStore.upload to get an upload_id.
+        """
+        from chat.assets.store import AssetStore
+
+        if binary:
+            file_obj = SimpleUploadedFile(
+                filename,
+                content if isinstance(content, bytes) else content.encode('utf-8'),
+                content_type='image/png',
+            )
+        else:
+            file_obj = SimpleUploadedFile(
+                filename,
+                content.encode('utf-8'),
+                content_type='text/plain',
+            )
+        event, _metadata = AssetStore.upload(self.user, file_obj, filename)
+        return event.id
+
     def _build_character_input(self, **overrides):
         payload = {
             'name': 'Imported Character',
@@ -2358,7 +2537,7 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(portrait_doc['content'], '')
 
     def test_create_character_imports_background_text_into_memory_explorer(self):
-        background_url = self._write_uploaded_text(
+        upload_id = self._stage_upload(
             'legacy-dialogue.txt',
             'User: Do you still remember me?\nCharacter: I never forgot.',
         )
@@ -2375,8 +2554,9 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             """,
             variables={
                 'input': self._build_character_input(
-                    backgroundFileUrl=background_url,
-                    backgroundFileName='legacy-dialogue.txt',
+                    backgroundFiles=[
+                        {'uploadId': str(upload_id), 'fileName': 'legacy-dialogue.txt'},
+                    ],
                 ),
             },
         )
@@ -2430,7 +2610,7 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
                 content_type='text/plain',
             ),
         )
-        replacement_url = self._write_uploaded_text(
+        replacement_upload_id = self._stage_upload(
             'replacement.txt',
             'User: New line\nCharacter: New reply',
         )
@@ -2457,8 +2637,9 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
                     exampleDialogue=character.example_dialogue,
                     affiliation=character.affiliation,
                     tags=character.tags,
-                    backgroundFileUrl=replacement_url,
-                    backgroundFileName='replacement.txt',
+                    backgroundFiles=[
+                        {'uploadId': str(replacement_upload_id), 'fileName': 'replacement.txt'},
+                    ],
                 ),
             },
         )
@@ -2477,13 +2658,14 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertNotIn('Original reply', uploaded_doc['content'])
 
     def test_create_character_accepts_multiple_text_and_image_reference_files(self):
-        dialogue_url = self._write_uploaded_text(
+        dialogue_upload_id = self._stage_upload(
             'dialogue.txt',
             'User: Stay with me.\nCharacter: Always.',
         )
-        image_url = self._write_uploaded_binary(
+        image_upload_id = self._stage_upload(
             'portrait.png',
             b'\x89PNG\r\n\x1a\n',
+            binary=True,
         )
 
         response = self.graphql(
@@ -2501,8 +2683,8 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             variables={
                 'input': self._build_character_input(
                     backgroundFiles=[
-                        {'uploadedUrl': dialogue_url, 'fileName': 'dialogue.txt'},
-                        {'uploadedUrl': image_url, 'fileName': 'portrait.png'},
+                        {'uploadId': str(dialogue_upload_id), 'fileName': 'dialogue.txt'},
+                        {'uploadId': str(image_upload_id), 'fileName': 'portrait.png'},
                     ],
                 ),
             },
@@ -2531,8 +2713,8 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertIn('Stay with me.', background_doc['content'])
 
     @patch('chat.graphql.schema._generate_text')
-    def test_generate_draft_routes_many_files_through_reduce_pipeline(self, mock_generate_text):
-        """12+ 个文本文件时走 reduce 流水线，产出映射为 PrisMateDraft。"""
+    def test_generate_draft_routes_many_files_through_single_shot(self, mock_generate_text):
+        """12+ 个文本文件且指定目标角色 → 预筛 + 单次 LLM 请求直达出卡。"""
         ModelConfiguration.objects.create(
             user=self.user,
             name='Draft Model',
@@ -2547,39 +2729,23 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
             body = f'圣亚: 这是第 {i} 段的台词\n老师: 明白'
             urls.append(self._write_uploaded_text(f'episode_{i}.txt', body))
 
-        def fake_generate_text(runtime_config, messages):
-            system = messages[0].get('content') or ''
-            if '角色分析师' in system:
-                # 批笔记
+        def fake_generate_text(runtime_config, messages, *args, **kwargs):
+            if isinstance(messages, str):
+                # 单请求主链路：内联 prompt（含预筛片段）→ 直接返回角色卡 JSON。
+                assert '圣亚' in messages
                 return json.dumps({
-                    'batch_summary': '本批对话。',
-                    'citations': [{'file': 'episode_0.txt', 'quote': '这是第 0 段的台词', 'note': '温和'}],
-                    'personality_evidence': ['温和'],
-                    'language_style': ['礼貌'],
-                    'behavior_notes': [],
-                    'emotion_triggers': [],
-                    'relationships': [],
-                })
-            # 合并
-            return json.dumps({
-                'profile_summary': {
                     'name': '圣亚',
                     'description': '三句话背景。第二句。第三句。',
-                    'personality': '温和而礼貌。',
-                    'appearance': '银发',
                     'affiliation': '三一学园',
+                    'personality': '温和而礼貌。',
                     'tags': ['温和', '三一'],
-                },
-                'dialogue_library': {
-                    '日常': [{'quote': '今天过得如何？', 'file': 'episode_0.txt', 'note': ''}],
-                    '提问': [{'quote': '老师知道这件事吗？', 'file': 'episode_1.txt', 'note': ''}],
-                    '情绪': [],
-                    '命令拒绝': [],
-                    '玩笑': [],
-                },
-                'behavior_samples': [],
-                'evolution': [],
-            })
+                    'example_dialogue': (
+                        'User: 今天过得如何？\nCharacter: 平静的一天。\n\n'
+                        'User: 那件事你怎么看？\nCharacter: 老师知道这件事吗？还不确定。'
+                    ),
+                })
+            raise AssertionError('single-shot path must issue exactly one plain-prompt call')
+
         mock_generate_text.side_effect = fake_generate_text
 
         response = self.graphql(
@@ -2612,9 +2778,10 @@ class CharacterBackgroundUploadTests(ModelConfigTestMixin, TestCase):
         self.assertIn('今天过得如何？', draft['exampleDialogue'])
         self.assertIn('Character: 老师知道这件事吗？', draft['exampleDialogue'])
 
-        # reduce 流水线跑了多批：13 个文件 → main/mid/cameo 分层后分批 + 合并
-        call_count = mock_generate_text.call_count
-        self.assertGreaterEqual(call_count, 3)
+        # 单请求主链路：恰好 1 次模型调用，prompt 里带预筛出的台词片段。
+        self.assertEqual(mock_generate_text.call_count, 1)
+        sent_prompt = mock_generate_text.call_args[0][1]
+        self.assertIn('圣亚: 这是第 0 段的台词', sent_prompt)
 
     @patch('chat.tasks._request_openai_media_analysis', return_value='A young man with a silver pocket watch.')
     def test_provider_messages_include_character_reference_images_via_image_role(self, mock_analysis):
@@ -3236,7 +3403,6 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
             }}]},
         ]
 
-        event_sink = []
         result = _generate_openai_compatible_response(
             model_name='deepseek-r1',
             api_key='k',
@@ -3244,11 +3410,14 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
             base_url='https://example.com/v1',
             tools=_build_memory_tool_specs(),
             filesystem=object(),
-            event_sink=event_sink,
         )
+        # The function is now a generator: collect final_text + tool/thinking events.
+        events = list(result)
+        final_text = ''.join(e.get('content') or '' for e in events if e.get('type') == 'final_text')
+        tool_events = [e for e in events if e.get('type') in ('tool', 'thinking')]
 
-        self.assertEqual(result, 'All set.')
-        self.assertEqual(event_sink, [
+        self.assertEqual(final_text, 'All set.')
+        self.assertEqual(tool_events, [
             {'type': 'tool', 'tool': 'list_memory_files', 'arguments': {'path_prefix': 'wiki'}},
             {'type': 'thinking', 'content': 'I should check the wiki first.'},
         ])
@@ -3284,7 +3453,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         payload_lines = [
             json.loads(line)
-            for line in b''.join(response.streaming_content).decode('utf-8').splitlines()
+            for line in _consume_streaming(response).decode('utf-8').splitlines()
             if line.strip()
         ]
         event_types = [line['type'] for line in payload_lines]
@@ -3373,3 +3542,143 @@ class SharedGenerationConfigTests(TestCase):
             allow_memory_tools=True,
             retrieved_memory='',
         )
+
+
+class GeoDetectionTests(TestCase):
+    """chat.geo.detect_location 的 provider 链路与归一化。"""
+
+    def test_private_addresses_trigger_egress_fallback_with_mocks(self):
+        from chat.geo import detect_location
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = {
+                'success': True,
+                'country': 'United States',
+                'region': 'California',
+                'city': 'San Francisco',
+                'timezone': 'America/Los_Angeles',
+                'latitude': 37.77,
+                'longitude': -122.41,
+            }
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('192.168.1.10')
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['fallback_egress'])
+        # 回退时不应把内网 IP 传给查询服务。
+        self.assertNotIn('ip', mock_get.call_args_list[0].kwargs['params'])
+
+    def test_normalizes_ipwho_payload_with_localized_names(self):
+        from chat.geo import detect_location
+
+        ipwho_payload = {
+            'success': True,
+            'country': '中国',
+            'region': '上海',
+            'city': '上海',
+            'timezone': {'id': 'Asia/Shanghai', 'abbr': 'CST'},
+            'latitude': 31.22,
+            'longitude': 121.45,
+        }
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = ipwho_payload
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131', lang='zh-CN')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['source'], 'ipwho.is')
+        self.assertEqual(result['country'], '中国')
+        self.assertEqual(result['timezone'], 'Asia/Shanghai')
+        first_call = mock_get.call_args_list[0]
+        self.assertEqual(first_call.args[0], 'https://ipwho.is/')
+        self.assertEqual(first_call.kwargs['params'], {'ip': '66.165.242.131', 'lang': 'zh-CN'})
+
+    def test_falls_back_to_ipapi_when_ipwho_fails(self):
+        from chat.geo import detect_location
+
+        ipapi_payload = {
+            'country_name': 'United States',
+            'region': 'California',
+            'city': 'San Francisco',
+            'timezone': 'America/Los_Angeles',
+            'latitude': 37.77,
+            'longitude': -122.41,
+        }
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.side_effect = [
+                {'success': False, 'message': 'blocked'},
+                ipapi_payload,
+            ]
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['source'], 'ipapi.co')
+        self.assertEqual(result['country'], 'United States')
+        self.assertEqual(result['region'], 'California')
+        self.assertEqual(result['city'], 'San Francisco')
+        self.assertEqual(result['timezone'], 'America/Los_Angeles')
+
+    def test_reports_unavailable_when_all_providers_fail(self):
+        from chat.geo import detect_location
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.side_effect = [
+                {'success': False, 'message': 'blocked'},
+                {'country_name': '', 'region': '', 'city': ''},
+            ]
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131')
+
+        self.assertEqual(result, {'ok': False, 'reason': 'unavailable'})
+
+
+class GeoDetectionEgressFallbackTests(TestCase):
+    """内网/本机客户端应回退到服务器出口 IP 检测。"""
+
+    IPWHO_PAYLOAD = {
+        'success': True,
+        'ip': '203.0.113.7',
+        'country': '中国',
+        'region': '上海',
+        'city': '上海',
+        'timezone': {'id': 'Asia/Shanghai'},
+        'latitude': 31.22,
+        'longitude': 121.45,
+    }
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='geo-owner', password='password123')
+
+    def test_detect_location_falls_back_to_server_egress_for_loopback_client(self):
+        self.client.force_login(self.user)
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = dict(self.IPWHO_PAYLOAD)
+            mock_get.return_value.raise_for_status.return_value = None
+            response = self.client.get('/api/user-profile/detect-location/')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload['ok'])
+        self.assertTrue(payload['fallback_egress'])
+        self.assertEqual(payload['country'], '中国')
+        self.assertEqual(payload['latitude'], 31.22)
+        first_call = mock_get.call_args_list[0]
+        self.assertEqual(first_call.args[0], 'https://ipwho.is/')
+        self.assertEqual(first_call.kwargs['params'], {'lang': 'en'})
+
+    def test_detect_location_still_uses_client_ip_when_public(self):
+        from chat.geo import detect_location
+
+        with patch('chat.geo.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = dict(self.IPWHO_PAYLOAD)
+            mock_get.return_value.raise_for_status.return_value = None
+            result = detect_location('66.165.242.131')
+
+        self.assertTrue(result['ok'])
+        self.assertFalse(result['fallback_egress'])
+        first_call = mock_get.call_args_list[0]
+        self.assertEqual(first_call.kwargs['params']['ip'], '66.165.242.131')

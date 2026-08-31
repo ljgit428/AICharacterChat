@@ -366,7 +366,7 @@ export default function TtsSettingsPanel() {
 
   return (
     <div className="h-full overflow-y-auto bg-[linear-gradient(180deg,#f5f8fc_0%,#eef3f7_50%,#f6efe8_100%)]">
-      <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-8">
+      <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-8">
         <header>
           <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight text-slate-900">
             <Mic size={20} />
@@ -376,7 +376,7 @@ export default function TtsSettingsPanel() {
         </header>
 
         {/* 引擎服务 */}
-        <section className="rounded-2xl border border-white/70 bg-white/80 p-5 shadow-sm">
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-base font-semibold text-slate-900">{copy.engineSectionTitle}</h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">{copy.engineSectionHint}</p>
 
@@ -464,7 +464,7 @@ export default function TtsSettingsPanel() {
         </section>
 
         {/* 上传并转换 */}
-        <section className="rounded-2xl border border-white/70 bg-white/80 p-5 shadow-sm">
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-base font-semibold text-slate-900">{copy.convertSectionTitle}</h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">{copy.convertSectionHint}</p>
 
@@ -536,7 +536,7 @@ export default function TtsSettingsPanel() {
         </section>
 
         {/* 音色库 */}
-        <section className="rounded-2xl border border-white/70 bg-white/80 p-5 shadow-sm">
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-slate-900">{copy.librarySectionTitle}</h2>
             <button

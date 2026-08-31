@@ -211,6 +211,129 @@
 4. [UI] Refetch List / Remove Card
 
 
+## 10. Event-Sourced Chat History & Compaction (v0.1.4)
+
+**Goal:** Solve context-window overflow by making conversation history an
+append-only event log, deriving the model-facing prompt from it, and
+compacting old events with an LLM summary.
+
+### Core Principle
+The `Message` table is no longer the source of truth. The source of truth is
+the `ChatEvent` table — an append-only log of every conversation event.
+`Message` rows are a **materialized projection** of that log (write-through on
+every append, rebuildable from scratch with
+`python manage.py rebuild_message_projection`).
+
+### Event Vocabulary
+| Event Type | Payload | Produces Message Row? |
+|---|---|---|
+| `session/created` | `{origin, title}` | No |
+| `user/message` | `{content, attachments: […]}` | Yes |
+| `assistant/message` | `{content, thinking, tool_calls, token_usage, research_payload}` | Yes |
+| `compaction/summary` | `{summary, shadowed_start_seq, shadowed_end_seq, shadowed_count, tokens_freed}` | No |
+
+`ChatSession` metadata (title, origin, `is_private_mode`, `is_title_manual`,
+`last_response_latency_ms`) stays in the `ChatSession` table — it is *session
+header state*, not a conversation event (deepseek-harness SessionHeader
+principle).
+
+### Write Path
+1. `views.py:_prepare_chat_turn` → `EventStore.append('user/message', payload)`
+   → projection creates the `Message` + `MessageAttachment` rows.
+2. `tasks.py:_finalize_ai_response` → `EventStore.append('assistant/message', payload)`
+   → projection creates the `Message` row.
+
+### Read Path (Model Prompt)
+`tasks.py:_build_provider_messages` → `EventStore.derive_messages(session, compacted=True)`:
+- Returns `MessageView` dataclasses, duck-typed for the existing prompt builders.
+- Events shadowed by `compaction/summary` events are skipped; the summary
+  pseudo-message (`<compacted-summary>…</compacted-summary>`, user role)
+  replaces them in place.
+- Adjacent same-role messages are merged to prevent alternation conflicts.
+- A fallback keeps sessions that still have `Message` rows without an event log
+  (pre-backfill data) working via the projection.
+
+### UI Read Path (Unchanged)
+`GET /messages` → `MessageSerializer` from the `Message` projection (full
+history — compaction never hides data from the UI).
+
+### Compaction
+**Trigger:** after every assistant reply, `_maybe_dispatch_compaction()`
+estimates total history tokens; if they cross `threshold_ratio × context_window`
+(default 70%), the Celery task `compact_session_history` runs.
+
+**Task logic** (`events.compaction.select_shadow_range`):
+1. Identify *active events* (those not yet shadowed by an earlier compaction).
+2. If active tokens ≥ `min_history_tokens` (8k) and above the threshold:
+   - Retain the newest `retain_tokens` worth of history (default 30% of
+     context_window, clamped by `min_retain_tokens`).
+   - Everything older becomes the *shadow range*.
+   - The retained tail is trimmed to start with an assistant message so the
+     user-role summary never creates a user+user adjacency conflict.
+3. Generate a summary via LLM (reuses `_generate_text`; prompt in
+   `events.compaction.SUMMARY_SYSTEM`).
+4. Append `compaction/summary` event.
+
+**Full history is preserved** in the event log and the Message projection —
+only the derived model prompt is compacted.
+
+### Key Modules
+| Module | Role |
+|---|---|
+| `chat/events/types.py` | Event payload builders |
+| `chat/events/store.py` | `EventStore` (append / load / derive_messages) + `MessageView` + token estimation |
+| `chat/events/projection.py` | Write-through projection: Event → Message / MessageAttachment |
+| `chat/events/compaction.py` | Range selection + summary-prompt builder (pure logic) |
+| `chat/management/commands/rebuild_message_projection.py` | Rebuild Message rows from events (`--session <id> / --all / --check`) |
+
+
+## 11. Event-Sourced Character Reference Assets (v0.1.4)
+
+**Goal:** Replace the bare-file staging mechanism for character-reference
+uploads with an asset event log, and fix the P0/P1 upload defects (unbounded
+staging, anonymous upload, full-replace edits).
+
+### Event Vocabulary
+| Event Type | Payload | Produces Asset? |
+|---|---|---|
+| `asset/uploaded` | `{file_path, file_name, kind, mime, text_content, size, sha256}` + TTL | No |
+| `asset/attached` | `{upload_event_id, sort_order}` | Yes |
+| `asset/detached` | `{upload_event_id, asset_id, reason}` | No |
+| `asset/expired` | `{upload_event_id, reason}` | No |
+
+`AssetEvent` is a user-scoped append-only log (independent of the session-scoped
+`ChatEvent`); `CharacterKnowledgeAsset` rows are a materialized projection.
+
+### Upload Lifecycle
+1. `POST /api/files/upload/` (now `IsAuthenticated` + size-limited) →
+   `AssetStore.upload()` saves the file under
+   `uploads/pending/<user>/<uuid>/<name>` with a TTL and appends
+   `asset/uploaded`; responds with `upload_id`.
+2. `generateCharacterDraft(uploadIds)` resolves staged files from the event log.
+3. `createCharacter`/`updateCharacter` pass `backgroundFiles: [{uploadId,
+   fileName}]` + `detachedAssetIds` — an **incremental diff** (`_apply_asset_diff`):
+   attach appends `asset/attached` (projection copies the file to asset storage
+   and consumes the pending copy); detach appends `asset/detached`. Existing
+   assets are never rebuilt on an unrelated save.
+4. Abandoned uploads are closed with `asset/expired` by the lazy reclamation
+   inside `AssetStore.upload` and by `python manage.py clean_stale_uploads`
+   (also purges the legacy `media/uploads/` orphans with `--purge-legacy-uploads`).
+
+### Key Modules
+| Module | Role |
+|---|---|
+| `chat/assets/types.py` | Asset event payload builders |
+| `chat/assets/store.py` | `AssetStore` (upload / attach / detach / pending / expire_stale) |
+| `chat/assets/projection.py` | Projection: attached/detached → `CharacterKnowledgeAsset`; best-effort rebuild |
+| `chat/management/commands/clean_stale_uploads.py` | TTL reclamation + legacy orphan purge |
+
+### Known Boundaries
+- Legacy `Character.file` single-file field is still read as a fallback by the
+  memory explorer but is not managed by the edit form (no migration).
+- `CharacterKnowledgeAsset.upload_event_id` links rows to their uploaded event;
+  directly-created legacy assets (no event) can still be detached via `asset_id`.
+
+
 
 
 

@@ -8,12 +8,16 @@ function CreateCharacterPageContent() {
   const searchParams = useSearchParams();
   const characterId = searchParams.get('id');
 
-  return <CreateCharacterSimplifiedForm characterId={characterId || undefined} />;
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <CreateCharacterSimplifiedForm characterId={characterId || undefined} />
+    </div>
+  );
 }
 
 export default function CreateCharacterPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-white" />}>
+    <Suspense fallback={<div className="min-h-screen bg-slate-50" />}>
       <CreateCharacterPageContent />
     </Suspense>
   );

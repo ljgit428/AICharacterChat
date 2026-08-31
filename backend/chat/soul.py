@@ -701,7 +701,9 @@ def get_memory_explorer_entries(character):
 def list_memory_explorer_path(character, path_prefix="", recursive=False, max_entries=40):
     normalized_prefix = (path_prefix or "").strip().strip("/")
     try:
-        safe_max_entries = max(1, min(int(max_entries or 40), 200))
+        # 上限 2000：允许一次递归列出全量文件（单角色几百个参考文件时
+        # 不再被 200 条截断；模型按目录浏览也不受影响）。
+        safe_max_entries = max(1, min(int(max_entries or 40), 2000))
     except (TypeError, ValueError):
         safe_max_entries = 40
 

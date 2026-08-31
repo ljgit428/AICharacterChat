@@ -24,6 +24,10 @@ type ReferenceFile = {
   name: string;
   url: string;
   type: string;
+  /** asset/uploaded 事件 id（新上传）；已有资产无此字段 */
+  uploadId?: string;
+  /** CharacterKnowledgeAsset 行 id（已有资产）；新上传无此字段 */
+  assetId?: string;
 };
 
 type PendingReferenceFile = {
@@ -38,17 +42,28 @@ type ReferenceFileSkipSummary = {
   overCap: number;
 };
 
-// Mirrors the backend limits in chat/attachments.py (MAX_TEXT_ATTACHMENT_BYTES /
-// MAX_IMAGE_ATTACHMENT_BYTES) so oversized files are skipped before upload instead
-// of failing the whole character save later.
-const MAX_TEXT_UPLOAD_BYTES = 2 * 1024 * 1024;
+// Mirrors the backend character-reference staging limits in chat/attachments.py
+// (MAX_STAGING_TEXT_BYTES; chat attachments keep their own 2MB text limit) so
+// oversized files are skipped before upload instead of failing the whole
+// character save later.
+const MAX_TEXT_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
-const MAX_BATCH_REFERENCE_FILES = 250;
+const MAX_BATCH_REFERENCE_FILES = 2000;
 const SUPPORTED_REFERENCE_TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.jsonl'];
 const SKIPPED_REFERENCE_FILE_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
+// 批量上传的并发窗口与单文件重试次数（500ms × attempt 退避）。
+const UPLOAD_CONCURRENCY = 6;
+const UPLOAD_MAX_ATTEMPTS = 3;
 
 function formatReferencePath(value: string) {
   return value.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+// 事件溯源上传接口只返回 upload_id，不返回文件 URL——url 字段对新建上传
+// 恒为 undefined。树的 key 与"删除文件"的过滤键必须用 uploadId/assetId，
+// 否则 key 全部冲突、删一个文件会清空整个列表。
+function referenceFileKey(file: ReferenceFile) {
+  return file.uploadId ?? file.assetId ?? file.url ?? file.name;
 }
 
 function isHiddenReferenceFileName(name: string) {
@@ -235,10 +250,12 @@ type FormState = {
   ttsConfig: TtsConfigForm;
 };
 
-type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'affiliation' | 'tags' | 'exampleDialogue'>;
+type AiDraftKey = Extract<keyof FormState, 'name' | 'description' | 'userAddress' | 'affiliation' | 'personality' | 'tags' | 'exampleDialogue'>;
 
 const AI_HIGHLIGHT_MS = 1200;
 const AI_UNDO_WINDOW_MS = 30000;
+// 与后端 REDUCE_PIPELINE_MIN_FILES 对齐：达到该数量走分批精读流水线，耗时以分钟计。
+const LARGE_BATCH_HINT_FILES = 12;
 
 function normalizePromptPreviewLocale(value: string): PromptPreviewLocale {
   return value === 'en-US' ? 'en-US' : 'zh-CN';
@@ -334,14 +351,61 @@ function buildCharacterSystemPromptPreview(
   ]);
 }
 
-const GENERATE_DRAFT = gql`
-  mutation GenerateDraft($fileUrls: [String!], $fileNames: [String!], $textContext: String, $locale: String) {
-    generateCharacterDraft(fileUrls: $fileUrls, fileNames: $fileNames, textContext: $textContext, locale: $locale) {
-      name
-      description
-      affiliation
-      tags
-      exampleDialogue
+const START_DRAFT = gql`
+  mutation StartDraft($uploadIds: [String!], $assetIds: [String!], $textContext: String, $locale: String) {
+    startCharacterDraft(uploadIds: $uploadIds, assetIds: $assetIds, textContext: $textContext, locale: $locale) {
+      id
+      status
+      stage
+      progressDone
+      progressTotal
+      createdAt
+    }
+  }
+`;
+
+const DRAFT_JOB = gql`
+  query DraftJob($id: ID!) {
+    characterDraftJob(id: $id) {
+      id
+      status
+      stage
+      progressDone
+      progressTotal
+      error
+      createdAt
+      result {
+        name
+        description
+        affiliation
+        personality
+        userAddress
+        tags
+        exampleDialogue
+      }
+    }
+  }
+`;
+
+const CANCEL_DRAFT = gql`
+  mutation CancelDraft($id: ID!) {
+    cancelCharacterDraftJob(id: $id) {
+      id
+      status
+    }
+  }
+`;
+
+// 刷新页面后恢复显示：本用户最近一次草稿任务若仍在运行，则恢复轮询。
+const LATEST_DRAFT_JOB = gql`
+  query LatestDraftJob {
+    myLatestCharacterDraftJob {
+      id
+      status
+      stage
+      progressDone
+      progressTotal
+      createdAt
     }
   }
 `;
@@ -374,6 +438,7 @@ const GET_CHARACTER = gql`
       enableWebSearch
       ttsConfig
       knowledgeAssets {
+        assetId
         fileUrl
         fileName
         fileType
@@ -404,13 +469,24 @@ function pickFormState(form: FormState, keys: readonly AiDraftKey[]): Partial<Fo
   return snapshot;
 }
 
+// 本地 state 只保留任务标识与计时起点；status/stage/progress 一律以
+// Apollo 轮询数据 (characterDraftJob) 为唯一来源，避免"每轮把数据拷进
+// state → 依赖数组变化 → effect 重跑"的级联死循环（Maximum update depth）。
+type DraftJobState = {
+  id: string;
+  /** 计时起点：新任务用本地时钟，刷新恢复用服务端 created_at。 */
+  startedAtMs: number;
+};
+
 interface ReferenceAndAiPanelProps {
   files: ReferenceFile[];
   isUploading: boolean;
   uploadProgress: { done: number; total: number } | null;
   isGenerating: boolean;
   aiStageText: string;
+  aiElapsedText: string;
   canUndo: boolean;
+  canCancelDraft: boolean;
   textReferenceCount: number;
   autoTargetName: string;
   autoInputText: string;
@@ -418,10 +494,21 @@ interface ReferenceAndAiPanelProps {
   onAutoInputTextChange: (value: string) => void;
   onFilesAdded: (files: PendingReferenceFile[]) => void;
   onRemoveFile: (url: string) => void;
+  onClearFiles: () => void;
   onGenerate: () => void;
+  onCancelDraft: () => void;
   onUndo: () => void;
   copy: ReturnType<typeof useI18n>['messages']['characterForm'];
   locale: PromptPreviewLocale;
+}
+
+function formatAiElapsed(seconds: number, locale: string): string {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (locale === 'zh-CN') {
+    return minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+  }
+  return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
 }
 
 function ReferenceAndAiPanel({
@@ -430,7 +517,9 @@ function ReferenceAndAiPanel({
   uploadProgress,
   isGenerating,
   aiStageText,
+  aiElapsedText,
   canUndo,
+  canCancelDraft,
   textReferenceCount,
   autoTargetName,
   autoInputText,
@@ -438,7 +527,9 @@ function ReferenceAndAiPanel({
   onAutoInputTextChange,
   onFilesAdded,
   onRemoveFile,
+  onClearFiles,
   onGenerate,
+  onCancelDraft,
   onUndo,
   copy,
 }: ReferenceAndAiPanelProps) {
@@ -479,7 +570,7 @@ function ReferenceAndAiPanel({
       const segments = file.name.split('/');
       const title = segments.pop() || file.name;
       const leaf: FileTreeNode = {
-        path: file.url,
+        path: referenceFileKey(file),
         title,
         isDirectory: false,
         previewKind: file.type === 'image' ? 'image' : 'text',
@@ -729,21 +820,37 @@ function ReferenceAndAiPanel({
       )}
 
       {files.length > 0 && (
-        <div className="mt-3 max-h-60 overflow-y-auto rounded-xl border border-amber-100 bg-white/80 p-1.5">
-          <FileTree
-            nodes={groupedFileNodes}
-            expandedPaths={expandedGroupDirs}
-            onToggleDir={toggleGroupDir}
-            onSelectFile={() => {}}
-            removable
-            onRemoveNode={handleRemoveNode}
-            removeTitle={copy.removeBackgroundFile}
-            emptyDirLabel={locale === 'zh-CN' ? '（空文件夹）' : '(empty folder)'}
-          />
-          <p className="px-2 pb-1 pt-1.5 text-[11px] leading-4 text-gray-400">
-            {copy.groupedFilesHint(files.length)}
-          </p>
-        </div>
+        <>
+          <div className="mt-3 flex items-center justify-between gap-2 px-1">
+            <span className="min-w-0 truncate text-[11px] leading-4 text-gray-400">
+              {copy.groupedFilesHint(files.length)}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(copy.clearFileListConfirm(files.length))) {
+                  onClearFiles();
+                }
+              }}
+              disabled={isUploading}
+              className="shrink-0 text-[11px] font-medium text-red-400 underline-offset-2 transition-colors hover:text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {copy.clearFileList}
+            </button>
+          </div>
+          <div className="mt-1.5 max-h-60 overflow-y-auto rounded-xl border border-amber-100 bg-white/80 p-1.5">
+            <FileTree
+              nodes={groupedFileNodes}
+              expandedPaths={expandedGroupDirs}
+              onToggleDir={toggleGroupDir}
+              onSelectFile={() => {}}
+              removable
+              onRemoveNode={handleRemoveNode}
+              removeTitle={copy.removeBackgroundFile}
+              emptyDirLabel={locale === 'zh-CN' ? '（空文件夹）' : '(empty folder)'}
+            />
+          </div>
+        </>
       )}
 
       <p className="mt-2 text-[11px] leading-4 text-gray-500">{copy.imageNote}</p>
@@ -758,6 +865,9 @@ function ReferenceAndAiPanel({
             className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none transition-all focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20"
           />
           <p className="text-[11px] text-gray-500">{copy.targetNameHelper}</p>
+          {textReferenceCount >= LARGE_BATCH_HINT_FILES && !autoTargetName.trim() && (
+            <p className="text-[11px] leading-4 text-amber-700">{copy.targetNameRecommendedHint}</p>
+          )}
         </div>
 
         <div className="space-y-1">
@@ -793,7 +903,24 @@ function ReferenceAndAiPanel({
           {textReferenceCount > 0 && (
             <p className="text-center text-[11px] text-gray-400">
               {copy.aiAnalyzingCount(textReferenceCount)}
+              {aiElapsedText ? ` · ${aiElapsedText}` : ''}
             </p>
+          )}
+          {textReferenceCount >= LARGE_BATCH_HINT_FILES && (
+            <p className="rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-center text-[11px] leading-4 text-violet-800">
+              {copy.aiGenerationLargeSetHint}
+            </p>
+          )}
+          {canCancelDraft && (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={onCancelDraft}
+                className="text-[11px] font-medium text-gray-500 underline-offset-2 transition-colors hover:text-gray-700 hover:underline"
+              >
+                {copy.aiDraftCancel}
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -846,8 +973,6 @@ export default function CreateCharacterSimplifiedForm({
   const [failedUploadCount, setFailedUploadCount] = useState(0);
   // 批量上传进度：done/total 用于进度条与"已上传 X/Y"提示；null 表示不在上传。
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
-  // AI 分析阶段的解说词轮换下标；aiLoading 期间按固定间隔推进。
-  const [aiStageIndex, setAiStageIndex] = useState(0);
   const [autoTargetName, setAutoTargetName] = useState('');
   const [systemPromptPreview, setSystemPromptPreview] = useState('');
   const [uploadingTarget, setUploadingTarget] = useState<'avatar' | 'background' | null>(null);
@@ -862,10 +987,32 @@ export default function CreateCharacterSimplifiedForm({
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const skipNextPromptPreviewSyncRef = useRef(false);
   const loadedCharacterIdRef = useRef<string | null>(null);
+  // 编辑模式加载时的初始资产 id 集合；handleSave 用它计算 detach diff。
+  const initialAssetIdsRef = useRef<Set<string>>(new Set());
 
-  const [generateDraft, { loading: aiLoading }] = useMutation(GENERATE_DRAFT);
+  const [draftJob, setDraftJob] = useState<DraftJobState | null>(null);
+  const [startDraft, { loading: startDraftLoading }] = useMutation(START_DRAFT);
+  const [cancelDraft] = useMutation(CANCEL_DRAFT);
   const [createCharacter, { loading: saveLoading }] = useMutation(CREATE_CHARACTER);
   const [updateCharacter] = useMutation(UPDATE_CHARACTER);
+
+  // 任务进行中轮询真实进度（批次 i/N、合并阶段）；终态由下方 effect 处理。
+  const { data: draftJobData } = useQuery(DRAFT_JOB, {
+    variables: { id: draftJob?.id ?? '' },
+    skip: !draftJob,
+    pollInterval: draftJob ? 1500 : 0,
+    fetchPolicy: 'network-only',
+  });
+
+  // 刷新恢复：页面加载时若本用户仍有进行中的任务，恢复进度显示。
+  const { data: latestDraftJobData } = useQuery(LATEST_DRAFT_JOB, {
+    fetchPolicy: 'network-only',
+  });
+
+  const liveJob = draftJob ? draftJobData?.characterDraftJob : undefined;
+  // 终态到 setDraftJob(null) 之间有一个轮询间隙，视为仍活跃避免闪烁。
+  const draftJobActive =
+    !!draftJob && (!liveJob || liveJob.status === 'running' || liveJob.status === 'canceling');
 
   const { data } = useQuery(GET_CHARACTER, {
     variables: { id: characterId },
@@ -909,15 +1056,20 @@ export default function CreateCharacterSimplifiedForm({
       },
     };
     const nextBackgroundFiles = Array.isArray(char.knowledgeAssets)
-      ? char.knowledgeAssets.map((asset: { fileName: string; fileUrl: string; fileType: string }) => ({
+      ? char.knowledgeAssets.map((asset: { assetId: string; fileName: string; fileUrl: string; fileType: string }) => ({
           name: asset.fileName,
           url: asset.fileUrl,
           type: asset.fileType,
+          assetId: asset.assetId,
         }))
       : [];
 
     setForm(nextForm);
     setBackgroundFiles(nextBackgroundFiles);
+    // 保存初始 assetId 集合，用于 handleSave 计算 diff
+    initialAssetIdsRef.current = new Set(
+      nextBackgroundFiles.map((f: ReferenceFile) => f.assetId).filter((id: string | undefined): id is string => !!id)
+    );
     setAiFilledFields(new Set());
     setAiEditedFields(new Set());
     setPreAiSnapshot(null);
@@ -970,21 +1122,14 @@ export default function CreateCharacterSimplifiedForm({
     return () => clearTimeout(handle);
   }, [now, highlightDeadline, aiUndoDeadline]);
 
-  // AI 分析阶段：await 期间用轮换解说词让用户感知进展。
+  // 任务进行中每秒刷新计时，避免用户面对无反馈的转圈。
   useEffect(() => {
-    if (!aiLoading) {
-      setAiStageIndex(0);
+    if (!draftJobActive) {
       return;
     }
-    const stages = copy.characterForm.aiAnalyzingStages;
-    if (!stages || stages.length === 0) {
-      return;
-    }
-    const handle = setInterval(() => {
-      setAiStageIndex((i) => (i + 1) % stages.length);
-    }, 2600);
+    const handle = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(handle);
-  }, [aiLoading, copy.characterForm.aiAnalyzingStages]);
+  }, [draftJobActive]);
 
   const updateForm = (field: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -1014,6 +1159,7 @@ export default function CreateCharacterSimplifiedForm({
 
     const uploadData = await res.json();
     return {
+      uploadId: String(uploadData.upload_id ?? ''),
       uploadedUrl: uploadData.url || uploadData.uri,
       uploadedName: item.displayName || uploadData.display_name || uploadData.relative_path || uploadData.name || item.file.name,
       uploadedType: item.file.type.startsWith('image/') ? 'image' : 'text',
@@ -1029,7 +1175,7 @@ export default function CreateCharacterSimplifiedForm({
       if (target === 'background') {
         setBackgroundFiles((prev) => [
           ...prev,
-          { name: uploaded.uploadedName, url: uploaded.uploadedUrl, type: uploaded.uploadedType },
+          { name: uploaded.uploadedName, url: uploaded.uploadedUrl, type: uploaded.uploadedType, uploadId: uploaded.uploadId },
         ]);
       } else {
         setForm((prev) => ({ ...prev, avatarUrl: uploaded.uploadedUrl }));
@@ -1050,30 +1196,55 @@ export default function CreateCharacterSimplifiedForm({
     setUploadingTarget('background');
     setUploadProgress({ done: 0, total: items.length });
     try {
-      // 并行上传，每完成一个就把进度 +1：进度条和"已上传 X/Y"随之推进。
-      const results = await Promise.allSettled(
-        items.map(async (item) => {
-          const result = await uploadSingleFile(item);
-          setUploadProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
-          return result;
-        }),
-      );
-      const uploadedFiles = results
-        .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof uploadSingleFile>>> => result.status === 'fulfilled')
-        .map((result) => result.value);
+      // 有界并发 + 单文件重试：几百个文件一次性并发会占满浏览器连接池、
+      // 后端也吃不住瞬时压力；按固定窗口推进，失败退避重试，重试耗尽才
+      // 计入失败数。失败尝试留下的 staging 文件由后端 TTL 清理兜底。
+      type UploadedFile = Awaited<ReturnType<typeof uploadSingleFile>>;
+      const collected: UploadedFile[] = [];
+      let failedCount = 0;
+      let cursor = 0;
 
-      if (uploadedFiles.length) {
+      const runWorker = async () => {
+        while (cursor < items.length) {
+          const item = items[cursor];
+          cursor += 1;
+          let uploaded: UploadedFile | null = null;
+          for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS && !uploaded; attempt += 1) {
+            try {
+              uploaded = await uploadSingleFile(item);
+            } catch (error) {
+              if (attempt === UPLOAD_MAX_ATTEMPTS) {
+                console.error(error);
+              } else {
+                await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+              }
+            }
+          }
+          if (uploaded) {
+            collected.push(uploaded);
+          } else {
+            failedCount += 1;
+          }
+          setUploadProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, items.length) }, () => runWorker()),
+      );
+
+      if (collected.length) {
         setBackgroundFiles((prev) => [
           ...prev,
-          ...uploadedFiles.map((uploaded) => ({
+          ...collected.map((uploaded) => ({
             name: uploaded.uploadedName,
             url: uploaded.uploadedUrl,
             type: uploaded.uploadedType,
+            uploadId: uploaded.uploadId,
           })),
         ]);
       }
 
-      const failedCount = items.length - uploadedFiles.length;
       setFailedUploadCount((prev) => prev + failedCount);
       if (failedCount) {
         alert(copy.characterForm.uploadSomeFailed(failedCount));
@@ -1120,14 +1291,22 @@ export default function CreateCharacterSimplifiedForm({
     }
   };
 
-  const removeBackgroundFile = (targetUrl: string) => {
-    setBackgroundFiles((prev) => prev.filter((file) => file.url !== targetUrl));
+  const removeBackgroundFile = (targetKey: string) => {
+    setBackgroundFiles((prev) => prev.filter((file) => referenceFileKey(file) !== targetKey));
+  };
+
+  const clearBackgroundFiles = () => {
+    setBackgroundFiles([]);
+    // 失败计数随列表一起清零，避免保存时弹出已不存在的"上传失败"确认。
+    setFailedUploadCount(0);
   };
 
   const applyDraftToForm = useCallback((draft: {
     name?: string;
     description?: string;
+    userAddress?: string;
     affiliation?: string;
+    personality?: string;
     tags?: string[];
     exampleDialogue?: string;
   }) => {
@@ -1150,6 +1329,14 @@ export default function CreateCharacterSimplifiedForm({
       if (draft.affiliation && draft.affiliation !== prev.affiliation) {
         next.affiliation = draft.affiliation;
         filled.push('affiliation');
+      }
+      if (draft.userAddress && draft.userAddress !== prev.userAddress) {
+        next.userAddress = draft.userAddress;
+        filled.push('userAddress');
+      }
+      if (draft.personality && draft.personality !== prev.personality) {
+        next.personality = draft.personality;
+        filled.push('personality');
       }
       if (Array.isArray(draft.tags) && draft.tags.length) {
         const nextTags = draft.tags.join(', ');
@@ -1175,6 +1362,52 @@ export default function CreateCharacterSimplifiedForm({
     });
   }, [autoTargetName]);
 
+  // 终态收尾：成功 → 应用草稿；失败 → 报错；取消 → 静默结束。
+  // 只在终态分支里写 state（一次性），运行中的进度展示完全由 liveJob 驱动。
+  useEffect(() => {
+    if (!draftJob || !liveJob || String(liveJob.id) !== String(draftJob.id)) {
+      return;
+    }
+    if (liveJob.status === 'succeeded') {
+      if (liveJob.result) {
+        applyDraftToForm(liveJob.result);
+      }
+      setDraftJob(null);
+      return;
+    }
+    if (liveJob.status === 'failed') {
+      alert(copy.characterForm.generationRequestError(liveJob.error || copy.characterForm.unknownError));
+      setDraftJob(null);
+      return;
+    }
+    if (liveJob.status === 'canceled') {
+      setDraftJob(null);
+    }
+  }, [liveJob, draftJob, applyDraftToForm, copy]);
+
+  // 刷新恢复：mount 后发现仍有进行中的任务 → 接管轮询。
+  useEffect(() => {
+    const latest = latestDraftJobData?.myLatestCharacterDraftJob;
+    if (!latest || (latest.status !== 'running' && latest.status !== 'canceling')) {
+      return;
+    }
+    setDraftJob((prev) => (
+      prev ?? { id: String(latest.id), startedAtMs: Date.parse(latest.createdAt ?? '') || Date.now() }
+    ));
+  }, [latestDraftJobData]);
+
+  const handleCancelDraft = useCallback(async () => {
+    if (!draftJob || !draftJobActive || (liveJob && liveJob.status !== 'running')) {
+      return;
+    }
+    // 协作式取消：后端在批次边界生效；状态以轮询数据为准，无需本地改写。
+    try {
+      await cancelDraft({ variables: { id: draftJob.id } });
+    } catch (error) {
+      console.error('Cancel Draft Error', error);
+    }
+  }, [cancelDraft, draftJob, draftJobActive, liveJob]);
+
   const handleAiGenerate = async () => {
     const draftSourceFiles = backgroundFiles.filter((file) => file.type === 'text');
     if (!draftSourceFiles.length && !autoInputText.trim()) {
@@ -1190,22 +1423,22 @@ export default function CreateCharacterSimplifiedForm({
     combinedContext += `${promptCopy.characterBrief}:\n${autoInputText}`;
 
     try {
-      const response = await generateDraft({
+      const response = await startDraft({
         variables: {
-          fileUrls: draftSourceFiles.map((file) => file.url),
-          fileNames: draftSourceFiles.map((file) => file.name),
+          uploadIds: draftSourceFiles.map((file) => file.uploadId).filter((id): id is string => !!id),
+          // 编辑模式下已挂接的资产没有 uploadId，走 assetIds 让后端从
+          // 事件日志解析——否则对已有角色点"生成"时上传列表为空，
+          // 模型拿到的是空上下文。
+          assetIds: draftSourceFiles.map((file) => file.assetId).filter((id): id is string => !!id),
           textContext: combinedContext,
           locale: promptPreviewLocale,
         }
       });
-
-      const draft = response.data.generateCharacterDraft;
-      if (draft.name === 'Generation Failed' || draft.name === copy.characterForm.generateFailedName) {
-        alert(copy.characterForm.generateFailedAlert(draft.description));
+      const job = response.data?.startCharacterDraft;
+      if (!job) {
         return;
       }
-
-      applyDraftToForm(draft);
+      setDraftJob({ id: String(job.id), startedAtMs: Date.now() });
     } catch (error: unknown) {
       console.error('AI Generation Error', error);
       alert(copy.characterForm.generationRequestError(getErrorMessage(error, copy.characterForm.unknownError)));
@@ -1249,6 +1482,15 @@ export default function CreateCharacterSimplifiedForm({
     }
 
     try {
+      // 增量 diff：新上传（有 uploadId）→ attach；编辑模式下初始集合中
+      // 已被移除的资产 → detach。已存在的资产原样不动，不再全量重建。
+      const currentAssetIds = new Set(
+        backgroundFiles.map((file) => file.assetId).filter((id): id is string => !!id)
+      );
+      const detachedAssetIds = isEditMode
+        ? Array.from(initialAssetIdsRef.current).filter((id) => !currentAssetIds.has(id))
+        : [];
+
       const input = {
         name: form.name.trim(),
         description: form.description.trim(),
@@ -1265,10 +1507,13 @@ export default function CreateCharacterSimplifiedForm({
       enableWebSearch:
         form.webSearchMode === 'on' ? true : form.webSearchMode === 'off' ? false : null,
       ttsConfig: toTtsConfigInput(form.ttsConfig),
-        backgroundFiles: backgroundFiles.map((file) => ({
-          uploadedUrl: file.url,
-          fileName: file.name,
-        })),
+        backgroundFiles: backgroundFiles
+          .filter((file) => !!file.uploadId)
+          .map((file) => ({
+            uploadId: file.uploadId as string,
+            fileName: file.name,
+          })),
+        detachedAssetIds,
       };
 
       if (isEditMode) {
@@ -1287,8 +1532,32 @@ export default function CreateCharacterSimplifiedForm({
   const isUploadingAvatar = uploadingTarget === 'avatar';
   const isUploadingBackground = uploadingTarget === 'background';
   const textReferenceCount = backgroundFiles.filter((file) => file.type === 'text').length;
-  const aiStages = copy.characterForm.aiAnalyzingStages;
-  const aiStageText = aiStages.length > 0 ? aiStages[aiStageIndex % aiStages.length] : '';
+  const isGenerating = startDraftLoading || draftJobActive;
+  // 真实进度文案：直接由轮询数据 liveJob 驱动，不经过中间 state。
+  const draftStageText = (() => {
+    if (!liveJob) {
+      return draftJob ? copy.characterForm.aiStageQueued : '';
+    }
+    switch (liveJob.stage) {
+      case 'queued':
+        return copy.characterForm.aiStageQueued;
+      case 'resolve':
+        return copy.characterForm.aiStageResolve;
+      case 'analyze':
+        return copy.characterForm.aiStageAnalyze(liveJob.progressDone, Math.max(liveJob.progressTotal, liveJob.progressDone));
+      case 'merge':
+        return liveJob.progressTotal > 1
+          ? copy.characterForm.aiStageMerge(liveJob.progressDone, liveJob.progressTotal)
+          : copy.characterForm.aiStageFinalize;
+      case 'canceling':
+        return copy.characterForm.aiDraftCanceling;
+      default:
+        return copy.characterForm.aiStageFinalize;
+    }
+  })();
+  const aiElapsedText = draftJob?.startedAtMs
+    ? copy.characterForm.aiGenerationElapsed(formatAiElapsed(Math.max(0, Math.floor((now - draftJob.startedAtMs) / 1000)), locale))
+    : '';
   // 仅在「跟随全局（全局可能是 genie）/ 明确 genie」且版本不被 genie 支持时提示；
   // gptsovits 引擎下 v2pro/v4 是合法组合，不应打扰。
   const canUndoAiFill = preAiSnapshot !== null && now < aiUndoDeadline;
@@ -1326,7 +1595,7 @@ export default function CreateCharacterSimplifiedForm({
   const fieldHighlightClass = (key: AiDraftKey) =>
     isHighlighted(key) ? 'ring-2 ring-violet-300 transition-shadow' : '';
 
-  return (      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+  return (      <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6">
         {avatarCropSrc && (
           <AvatarCropper
             imageSrc={avatarCropSrc}
@@ -1363,10 +1632,10 @@ export default function CreateCharacterSimplifiedForm({
       </div>
 
       <div className="space-y-6">
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="space-y-6">
           <div className="space-y-6">
-            <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-              <div className="relative mx-auto mb-4 h-40 w-40 overflow-hidden rounded-full border-4 border-white bg-gray-100 shadow-md">
+            <div className="flex items-center gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+              <div className="relative h-24 w-24 shrink-0 overflow-hidden rounded-full border-4 border-white bg-gray-100 shadow-md">
                 {form.avatarUrl ? (
                   /* eslint-disable-next-line @next/next/no-img-element */
                   <img
@@ -1395,7 +1664,7 @@ export default function CreateCharacterSimplifiedForm({
                 />
               </div>
 
-              <div className="space-y-2 text-center">
+              <div className="space-y-1">
                 <p className="text-sm font-medium text-gray-700">{copy.characterForm.avatar}</p>
                 <p className="text-xs leading-6 text-gray-500">{copy.characterForm.avatarHelp}</p>
               </div>
@@ -1405,9 +1674,11 @@ export default function CreateCharacterSimplifiedForm({
               files={backgroundFiles}
               isUploading={isUploadingBackground}
               uploadProgress={uploadProgress}
-              isGenerating={aiLoading}
-              aiStageText={aiStageText}
+              isGenerating={isGenerating}
+              aiStageText={draftStageText}
+              aiElapsedText={aiElapsedText}
               canUndo={canUndoAiFill}
+              canCancelDraft={draftJobActive && liveJob?.status === 'running'}
               textReferenceCount={textReferenceCount}
               autoTargetName={autoTargetName}
               autoInputText={autoInputText}
@@ -1415,7 +1686,9 @@ export default function CreateCharacterSimplifiedForm({
               onAutoInputTextChange={setAutoInputText}
               onFilesAdded={(files) => void processBackgroundFilesUpload(files)}
               onRemoveFile={removeBackgroundFile}
+              onClearFiles={clearBackgroundFiles}
               onGenerate={handleAiGenerate}
+              onCancelDraft={() => void handleCancelDraft()}
               onUndo={handleUndoAiFill}
               copy={copy.characterForm}
               locale={promptPreviewLocale}
@@ -1467,26 +1740,32 @@ export default function CreateCharacterSimplifiedForm({
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-bold text-gray-700">{copy.characterForm.userAddress}</label>
+                <label className="text-sm font-bold text-gray-700">
+                  {copy.characterForm.userAddress}
+                  {renderFieldBadge('userAddress')}
+                </label>
                 <input
                   value={form.userAddress}
                   onChange={(e) => updateForm('userAddress', e.target.value)}
                   placeholder={copy.characterForm.userAddressPlaceholder}
-                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  className={`w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${fieldHighlightClass('userAddress')}`}
                 />
                 <p className="text-xs text-gray-500">
                   {copy.characterForm.userAddressHelp}
                 </p>
               </div>
 
-              <div className="grid gap-6 xl:grid-cols-2">
+              <div className="space-y-6">
                 <div className="space-y-2">
-                  <label className="text-sm font-bold text-gray-700">{copy.characterForm.personalityNotes}</label>
+                  <label className="text-sm font-bold text-gray-700">
+                    {copy.characterForm.personalityNotes}
+                    {renderFieldBadge('personality')}
+                  </label>
                   <textarea
                     value={form.personality}
                     onChange={(e) => updateForm('personality', e.target.value)}
                     rows={5}
-                    className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                    className={`w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${fieldHighlightClass('personality')}`}
                   />
                 </div>
 
@@ -1502,7 +1781,7 @@ export default function CreateCharacterSimplifiedForm({
                 </div>
               </div>
 
-              <div className="grid gap-6 md:grid-cols-2">
+              <div className="space-y-6">
                 <div className="space-y-2">
                   <label className="text-sm font-bold text-gray-700">
                     {copy.characterForm.affiliation}
@@ -1645,7 +1924,7 @@ export default function CreateCharacterSimplifiedForm({
           />
         </div>
 
-        <div className="flex justify-end gap-4">
+        <div className="sticky bottom-4 z-10 flex justify-end gap-3">
           <button
             onClick={() => {
               if (onCancel) {
@@ -1654,7 +1933,7 @@ export default function CreateCharacterSimplifiedForm({
                 router.push('/');
               }
             }}
-            className="rounded-xl bg-gray-100 px-6 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-200"
+            className="rounded-xl border border-gray-200 bg-white px-6 py-3 font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
             type="button"
           >
             {copy.characterForm.cancel}
@@ -1663,7 +1942,7 @@ export default function CreateCharacterSimplifiedForm({
             type="button"
             onClick={handleSave}
             disabled={saveLoading || uploadingTarget !== null}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-70"
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 font-medium text-white shadow-lg transition-colors hover:bg-blue-700 disabled:opacity-70"
           >
             {saveLoading ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
             <span>{isEditMode ? copy.characterForm.updateCharacter : copy.characterForm.saveCharacter}</span>

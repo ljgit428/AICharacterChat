@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import google.generativeai as genai
 import requests
 from celery import shared_task
+from django.conf import settings
 
 from .attachments import (
     MAX_VIDEO_ATTACHMENT_BYTES,
@@ -20,11 +21,22 @@ from .attachments import (
 from .memory.filesystem import CharacterMemoryFilesystem
 from .memory.manager import MemoryManager
 from .memory.prompts import build_memory_extraction_prompt, get_memory_crud_tool_specs
+from .events.compaction import (
+    build_summary_prompt,
+    render_shadowed_conversation,
+    resolve_context_window,
+    select_shadow_range,
+    shadowed_token_total,
+)
+from .events.store import EventStore, active_history_tokens, estimate_str_tokens
+from .events.types import assistant_message_payload, compaction_summary_payload
 from .models import (
     AttachmentKind,
     Character,
     CharacterMemoryItem,
+    ChatEventType,
     ChatSession,
+    LocationPrecision,
     Message,
     ModelConfiguration,
     ModelRole,
@@ -168,6 +180,7 @@ def _model_config_to_runtime(model_config):
         'model_name': model_config.model_name,
         'api_key': model_config.api_key,
         'base_url': model_config.base_url,
+        'context_window': model_config.context_window,
     }
 
 
@@ -931,6 +944,7 @@ def _request_openai_compatible_completion(
     messages,
     base_url,
     tools=None,
+    timeout=None,
 ):
     # openai_compatible 允许本地反代网关自鉴权：仅有 key 时附加 Authorization header。
     headers = {'Content-Type': 'application/json'}
@@ -945,7 +959,7 @@ def _request_openai_compatible_completion(
             'messages': messages,
             **({'tools': tools, 'tool_choice': 'auto'} if tools else {}),
         },
-        timeout=90,
+        timeout=int(timeout or getattr(settings, 'LLM_REQUEST_TIMEOUT', 90)),
     )
     response.raise_for_status()
     return response.json()
@@ -975,12 +989,13 @@ def _execute_local_memory_tool(filesystem, tool_name, raw_arguments):
     }
 
 
-def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, event_sink=None):
-    """Run the OpenAI-compatible tool loop and return the final text.
+def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, timeout=None):
+    """Run the OpenAI-compatible tool loop as a generator.
 
-    When ``event_sink`` (a list) is provided, tool calls and the final round's
-    native reasoning text are appended to it as ``{'type': 'tool' | 'thinking', ...}``
-    dicts so callers can surface them to the user without extra LLM calls.
+    Yields event dicts as they happen so streaming callers can surface tool
+    calls, thinking, and usage in real time (no buffering until the loop
+    finishes): ``{'type': 'tool'|'thinking'|'usage', ...}`` and finally a
+    terminal ``{'type': 'final_text', 'content': ...}``.
     """
     if not tools:
         response_json = _request_openai_compatible_completion(
@@ -988,16 +1003,17 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             api_key=api_key,
             messages=messages,
             base_url=base_url,
+            timeout=timeout,
         )
-        if event_sink is not None:
-            usage = _extract_token_usage(response_json.get('usage'))
-            if usage:
-                event_sink.append({'type': 'usage', 'usage': usage})
-        return _extract_openai_content(response_json)
+        usage = _extract_token_usage(response_json.get('usage'))
+        if usage:
+            yield {'type': 'usage', 'usage': usage}
+        yield {'type': 'final_text', 'content': _extract_openai_content(response_json)}
+        return
 
     usage_total = None
     history = list(messages)
-    for _ in range(OPENAI_LOCAL_TOOL_CALL_LIMIT):
+    for round_no in range(1, OPENAI_LOCAL_TOOL_CALL_LIMIT + 1):
         try:
             response_json = _request_openai_compatible_completion(
                 model_name=model_name,
@@ -1005,6 +1021,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 messages=history,
                 base_url=base_url,
                 tools=tools,
+                timeout=timeout,
             )
         except Exception as exc:
             if _should_retry_without_tools(exc):
@@ -1012,21 +1029,23 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                     "OpenAI-compatible backend rejected local memory tools for model %s; retrying without tools.",
                     model_name,
                 )
-                if event_sink is not None:
-                    del event_sink[:]
                 response_json = _request_openai_compatible_completion(
                     model_name=model_name,
                     api_key=api_key,
                     messages=messages,
                     base_url=base_url,
+                    timeout=timeout,
                 )
-                if event_sink is not None:
-                    usage = _extract_token_usage(response_json.get('usage'))
-                    if usage:
-                        event_sink.append({'type': 'usage', 'usage': usage})
-                return _extract_openai_content(response_json)
+                usage = _extract_token_usage(response_json.get('usage'))
+                if usage:
+                    yield {'type': 'usage', 'usage': usage}
+                yield {'type': 'final_text', 'content': _extract_openai_content(response_json)}
+                return
             raise
-        usage_total = _merge_token_usage(usage_total, _extract_token_usage(response_json.get('usage')))
+        usage = _extract_token_usage(response_json.get('usage'))
+        if usage:
+            usage_total = _merge_token_usage(usage_total, usage)
+            yield {'type': 'usage', 'usage': dict(usage_total)}
         assistant_message = _extract_openai_assistant_message(response_json)
         tool_calls = assistant_message.get('tool_calls') or []
         history.append({
@@ -1035,20 +1054,24 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             **({'tool_calls': tool_calls} if tool_calls else {}),
         })
 
+        # ReAct 时间线：每一轮（含中间轮）的思考都实时流出并标注轮次，
+        # 前端按"思考→工具→思考→工具…"的真实顺序渲染，不再只保留终轮思考。
+        reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
+
         if not tool_calls:
             content = _extract_text_from_content(assistant_message.get('content'))
             if content:
-                reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
-                if reasoning and event_sink is not None:
-                    event_sink.append({'type': 'thinking', 'content': reasoning})
-                if event_sink is not None and usage_total:
-                    event_sink.append({'type': 'usage', 'usage': dict(usage_total)})
-                return content
+                if reasoning:
+                    yield {'type': 'thinking', 'content': reasoning, 'round': round_no}
+                yield {'type': 'final_text', 'content': content}
+                return
             raise ValueError('OpenAI compatible API returned an empty response after tool execution')
 
         if filesystem is None:
             raise ValueError('Local tool execution requires a memory filesystem context')
 
+        if reasoning:
+            yield {'type': 'thinking', 'content': reasoning, 'round': round_no}
         for tool_call in tool_calls:
             function_payload = tool_call.get('function') or {}
             tool_name = function_payload.get('name', '')
@@ -1057,8 +1080,9 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 tool_arguments = json.loads(raw_arguments or '{}')
             except json.JSONDecodeError:
                 tool_arguments = {}
-            if event_sink is not None:
-                event_sink.append({'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments})
+            # 实时 yield 工具调用事件（关键改动：工具执行前就推送给前端，
+            # 用户在检索过程中就能看到当前正在翻阅哪个文件）。
+            yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments, 'round': round_no}
             tool_result = _execute_local_memory_tool(
                 filesystem,
                 tool_name=tool_name,
@@ -1471,18 +1495,20 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
         if not isinstance(prompt_or_messages, list):
             prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
         if tools:
-            event_sink: list[dict] = []
-            buffered_text = _generate_openai_compatible_response(
+            final_parts: list[str] = []
+            for event in _generate_openai_compatible_response(
                 model_name=model_name,
                 api_key=api_key,
                 messages=prompt_or_messages,
                 base_url=runtime_config.get('base_url', ''),
                 tools=tools,
                 filesystem=filesystem,
-                event_sink=event_sink,
-            )
-            yield from event_sink
-            yield from _iter_buffered_chunks(buffered_text)
+            ):
+                if event.get('type') == 'final_text':
+                    final_parts.append(event.get('content') or '')
+                    continue
+                yield event
+            yield from _iter_buffered_chunks(''.join(final_parts))
             return
         yield from _stream_openai_compatible_response(
             model_name=model_name,
@@ -1520,7 +1546,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
     raise ValueError(f"Unsupported model provider: {provider}")
 
 
-def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None):
+def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None, timeout=None):
     provider = runtime_config['provider']
     model_name = runtime_config['model_name']
     api_key = runtime_config['api_key']
@@ -1537,14 +1563,19 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=No
     if provider == 'openai_compatible':
         if not isinstance(prompt_or_messages, list):
             prompt_or_messages = [{'role': 'user', 'content': str(prompt_or_messages)}]
-        return _generate_openai_compatible_response(
+        final_parts: list[str] = []
+        for event in _generate_openai_compatible_response(
             model_name=model_name,
             api_key=api_key,
             messages=prompt_or_messages,
             base_url=runtime_config.get('base_url', ''),
             tools=tools,
             filesystem=filesystem,
-        )
+            timeout=timeout,
+        ):
+            if event.get('type') == 'final_text':
+                final_parts.append(event.get('content') or '')
+        return ''.join(final_parts)
 
     if provider == 'anthropic':
         if not isinstance(prompt_or_messages, list):
@@ -1847,21 +1878,37 @@ def _extract_prompt_memory_body(section):
     return text
 
 
+def _format_utc_offset(aware_dt):
+    offset = aware_dt.utcoffset()
+    if offset is None:
+        return ''
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = '+' if total_minutes >= 0 else '-'
+    return f"UTC{sign}{abs(total_minutes) // 60:02d}:{abs(total_minutes) % 60:02d}"
+
+
 def _build_account_runtime_sections(chat_session):
     profile = _get_user_profile(chat_session)
 
     context_lines = []
     local_now = _get_user_local_datetime(profile)
     if local_now:
-        context_lines.append(f"User Local Time: {local_now.strftime('%Y-%m-%d %H:%M %Z')}")
+        context_lines.append(
+            f"User Local Time: {local_now.strftime('%Y-%m-%d (%A) %H:%M:%S')}"
+            f" ({_format_utc_offset(local_now)}, {profile.timezone})"
+        )
         context_lines.append(f"User Local Daypart: {_describe_daypart(local_now.hour)}")
         context_lines.append(
             "Interpret relative time words such as today, tonight, and tomorrow in the user's local timezone."
         )
     if profile.share_location and profile.location_label:
-        context_lines.append(
-            f"Location Hint ({profile.get_location_precision_display()} level): {profile.location_label}"
-        )
+        hint_line = f"Location Hint ({profile.get_location_precision_display()} level): {profile.location_label}"
+        if profile.location_precision == LocationPrecision.EXACT and profile.location_latitude is not None:
+            hint_line += (
+                f" (approx. latitude {profile.location_latitude:.2f},"
+                f" longitude {profile.location_longitude:.2f})"
+            )
+        context_lines.append(hint_line)
         context_lines.append("Do not imply a more precise real-world location than the user explicitly shared.")
     if profile.share_weather and profile.share_location and profile.location_label:
         context_lines.append(
@@ -1939,6 +1986,22 @@ def _build_stream_memory_prefetch(character, chat_session, generate_greeting=Fal
     return "\n\n".join(section for section in sections if section and section.strip())
 
 
+def _dual_thinking_protocol_text():
+    """每一轮思考（含工具轮）都要同时给出角色心声与原始推理两段的提示文本。
+
+    放在系统提示词最末尾：后续段落（尤其是英文的 MEMORY TOOLING / 工具清单）
+    会主导工具轮的推理风格，只有放在最后才能让"每轮两段"的约束不被盖住。
+    """
+    return "\n".join([
+        "EVERY reasoning step must be laid out as exactly two consecutive blocks - including each round that ends with tool calls, and the final round that produces the reply.",
+        f"Block 1 header (an exact line): {DUAL_THINKING_CHAR_OS_MARKER}",
+        "Block 1 - the character's inner voice, in Chinese: a short continuous first-person monologue (mood, read of the user's intent, confirmation of facts). Natural flowing narration only; never numbered steps or bullet lists.",
+        f"Block 2 header (an exact line): {DUAL_THINKING_RAW_MARKER}",
+        "Block 2 - objective model-native reasoning: decompose the task, verify recalled facts against retrieval results, plan which files to inspect, and sanity-check constraints. Analytical and precise; lists and numbers are allowed here.",
+        "Repeat this two-block structure in every reasoning step of the turn, not only before the final reply. Never mention the protocol or the tags to the user.",
+    ])
+
+
 def _build_system_prompt(character, chat_session, use_memory_tools=False, retrieved_memory=''):
     prompt_context = build_character_prompt_context(character)
     character_setup = prompt_context.get('soul', '')
@@ -1975,12 +2038,14 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
             ]),
         )
         _append_section(sections, "MEMORY FILESYSTEM", build_memory_explorer_manifest(character))
+        _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
         return "\n\n".join(sections)
 
     compact_memory_mode = bool((retrieved_memory or '').strip())
     if compact_memory_mode:
         _append_section(sections, "WORKING STATE", _format_working_state(chat_session))
         _append_section(sections, "RETRIEVED MEMORY", retrieved_memory)
+        _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
         return "\n\n".join(sections)
 
     uploaded_sections = "\n\n".join(
@@ -1994,6 +2059,7 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
     )
     _append_section(sections, "USER UPLOADS", uploaded_sections)
     _append_section(sections, "WORKING STATE", _format_working_state(chat_session))
+    _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
 
     return "\n\n".join(sections)
 
@@ -2095,7 +2161,7 @@ def _analyze_latest_user_media(visible_history, role_configs, text_config):
         (
             item
             for item in reversed(visible_history)
-            if isinstance(item, Message) and item.role == 'user'
+            if not isinstance(item, dict) and getattr(item, 'role', None) == 'user'
         ),
         None,
     )
@@ -2133,7 +2199,15 @@ def _build_provider_messages(
         formatted_research = _format_research_context(research_context)
         if formatted_research:
             system_prompt = f"{system_prompt}\n\n[LIVE WEB RESEARCH]\n{formatted_research}"
-    visible_history = _get_visible_history_messages(chat_session)
+    # Event-sourced history: the model-facing prompt derives from the event
+    # log (compacted view — compaction summaries replace shadowed ranges).
+    # The Message projection remains the full-history view for the UI.
+    visible_history = EventStore.derive_messages(chat_session, compacted=True)
+    # Fallback for sessions that still have Message rows without an event log
+    # (pre-migration data or direct-ORM test code).  This can be removed once
+    # the event backfill has been deployed and verified.
+    if not visible_history and chat_session.messages.exists():
+        visible_history = _get_visible_history_messages(chat_session)
     _analyze_latest_user_media(visible_history, role_configs, runtime_config)
     character_reference_message = _build_character_reference_message(
         character,
@@ -2157,20 +2231,20 @@ def _build_provider_messages(
         if character_reference_message:
             formatted_history.append(character_reference_message)
         for message in visible_history:
-            if isinstance(message, Message):
-                formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
+            if isinstance(message, dict):
+                formatted_history.append({'role': 'user', 'parts': [message['content']]})
                 continue
-            formatted_history.append({'role': 'user', 'parts': [message['content']]})
+            formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
         return runtime_config, formatted_history, tools
 
     formatted_history = [{'role': 'system', 'content': system_prompt}]
     if character_reference_message:
         formatted_history.append(character_reference_message)
     for message in visible_history:
-        if isinstance(message, Message):
-            formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
+        if isinstance(message, dict):
+            formatted_history.append({'role': 'user', 'content': message['content']})
             continue
-        formatted_history.append({'role': 'user', 'content': message['content']})
+        formatted_history.append(_build_provider_message_entry(message, runtime_config, role_configs))
     return runtime_config, formatted_history, tools
 
 
@@ -2578,18 +2652,29 @@ def _finalize_ai_response(
     latency_ms=None,
     research_context=None,
     thinking='',
+    raw_reasoning='',
+    steps=None,
     tool_calls=None,
     token_usage=None,
 ):
-    ai_message = Message.objects.create(
-        chat_session=chat_session,
-        role='assistant',
+    # Event-sourced history: the assistant reply is appended as an
+    # ``assistant/message`` event; the Message row is its write-through
+    # projection (events.projection.project_event).
+    payload = assistant_message_payload(
         content=ai_response_text,
-        character=character,
-        research_payload={},
         thinking=thinking or '',
+        raw_reasoning=raw_reasoning or '',
+        steps=steps or [],
         tool_calls=tool_calls or [],
         token_usage=token_usage or {},
+        research_payload=_build_research_payload(chat_session, research_context or {}),
+        latency_ms=latency_ms,
+    )
+    _event, ai_message = EventStore.append(
+        chat_session,
+        ChatEventType.ASSISTANT_MESSAGE,
+        payload,
+        character=character,
     )
 
     update_fields = ['updated_at']
@@ -2612,11 +2697,8 @@ def _finalize_ai_response(
             )
             _dispatch_session_title_update(chat_session, conversation_text_for_title, runtime_config)
 
-    research_payload = _build_research_payload(chat_session, research_context or {})
-    ai_message.research_payload = research_payload
-    ai_message.save(update_fields=['research_payload'])
-
     _dispatch_memory_sync(chat_session, ai_message, character)
+    _maybe_dispatch_compaction(chat_session, runtime_config)
 
     return ai_message
 
@@ -2648,6 +2730,180 @@ def _dispatch_memory_sync(chat_session, ai_message, character):
                 args=[ai_message.id, chat_session.id, character.id],
                 throw=False,
             )
+
+
+def _compaction_settings():
+    from django.conf import settings
+
+    return {
+        'enabled': getattr(settings, 'COMPACTION_ENABLED', True),
+        'threshold_ratio': getattr(settings, 'COMPACTION_THRESHOLD_RATIO', 0.7),
+        'retain_ratio': getattr(settings, 'COMPACTION_RETAIN_RATIO', 0.3),
+        'min_history_tokens': getattr(settings, 'COMPACTION_MIN_HISTORY_TOKENS', 8000),
+        'min_retain_tokens': getattr(settings, 'COMPACTION_MIN_RETAIN_TOKENS', 4000),
+        'summary_max_tokens': getattr(settings, 'COMPACTION_SUMMARY_MAX_TOKENS', 1024),
+        'inline_fallback': getattr(settings, 'COMPACTION_INLINE_FALLBACK', False),
+    }
+
+
+def _maybe_dispatch_compaction(chat_session, runtime_config):
+    """Enqueue history compaction when the *active* history token estimate
+    crosses the routed model's pressure threshold. Fire-and-forget, like
+    memory sync. ``active_history_tokens`` excludes events already shadowed
+    by a compaction, so a session right after compaction does not re-dispatch
+    until the retained history grows past the threshold again."""
+    cfg = _compaction_settings()
+    if not cfg['enabled']:
+        return
+    try:
+        total_tokens = active_history_tokens(chat_session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Compaction token estimate failed for session %s: %s', chat_session.id, exc)
+        return
+    context_window = resolve_context_window(runtime_config)
+    threshold = max(
+        cfg['min_history_tokens'],
+        int(context_window * cfg['threshold_ratio']),
+    )
+    if total_tokens < threshold:
+        return
+    try:
+        compact_session_history.delay(chat_session_id=chat_session.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'Failed to enqueue compact_session_history (%s); inline fallback=%s', exc, cfg['inline_fallback'],
+        )
+        if cfg['inline_fallback']:
+            compact_session_history.apply(
+                args=[chat_session.id],
+                throw=False,
+            )
+
+
+@shared_task(retry_backoff=True)
+def compact_session_history(chat_session_id):
+    """Compress the oldest active history of a session into a summary event.
+
+    Appends a ``compaction/summary`` event whose shadowed range hides the
+    compressed events from the model-facing derived view, while the full log
+    (and the Message projection the UI reads) stays untouched. Returns a
+    status dict for observability; never raises on expected outcomes.
+    """
+    from django.conf import settings
+
+    try:
+        chat_session = ChatSession.objects.get(id=chat_session_id)
+    except ChatSession.DoesNotExist:
+        return {'status': 'skipped', 'reason': 'session-missing'}
+
+    cfg = _compaction_settings()
+    try:
+        runtime_config = _get_runtime_model_config(chat_session)
+    except ValueError as exc:
+        logger.warning('Compaction skipped for session %s: %s', chat_session.id, exc)
+        return {'status': 'skipped', 'reason': 'no-model-config'}
+
+    try:
+        events = EventStore.load(chat_session)
+        selected = select_shadow_range(
+            events,
+            context_window=resolve_context_window(runtime_config),
+            threshold_ratio=cfg['threshold_ratio'],
+            retain_ratio=cfg['retain_ratio'],
+            min_history_tokens=cfg['min_history_tokens'],
+            min_retain_tokens=cfg['min_retain_tokens'],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Compaction range selection failed for session %s: %s', chat_session.id, exc)
+        return {'status': 'error', 'reason': str(exc)}
+    if selected is None:
+        return {'status': 'skipped', 'reason': 'below-threshold'}
+
+    start_seq, end_seq = selected
+
+    # Cap the summarization input to keep the LLM call cheap.
+    conversation_text = render_shadowed_conversation(events, start_seq, end_seq)
+    MAX_SUMMARY_CHARS = 30000
+    if len(conversation_text) > MAX_SUMMARY_CHARS:
+        # Trim the oldest messages from the shadowed range (keep the tail).
+        shadowed_message_seqs = [
+            e.seq for e in events
+            if start_seq <= e.seq <= end_seq
+            and e.event_type in (ChatEventType.USER_MESSAGE, ChatEventType.ASSISTANT_MESSAGE)
+        ]
+        for seq in reversed(shadowed_message_seqs):
+            candidate = render_shadowed_conversation(events, seq, end_seq)
+            if len(candidate) <= MAX_SUMMARY_CHARS:
+                start_seq = seq
+                conversation_text = candidate
+                break
+        logger.info(
+            'Compaction summarization trimmed to seq %s..%s (was %s..%s, %d chars)',
+            start_seq, end_seq, selected[0], end_seq, len(conversation_text),
+        )
+
+    system, user = build_summary_prompt(conversation_text)
+
+    try:
+        summary_text = _generate_text(
+            runtime_config,
+            [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
+            tools=None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('Compaction summary generation failed for session %s: %s', chat_session.id, exc)
+        return {'status': 'error', 'reason': 'summary-generation-failed'}
+
+    summary_text = (summary_text or '').strip()
+    if not summary_text:
+        summary_text = '（对话历史已被压缩，细节见聊天记录。）'
+
+    shadowed_tokens = shadowed_token_total(events, start_seq, end_seq)
+    payload = compaction_summary_payload(
+        summary=summary_text,
+        shadowed_start_seq=start_seq,
+        shadowed_end_seq=end_seq,
+        shadowed_count=sum(
+            1 for e in events if start_seq <= e.seq <= end_seq
+            and e.event_type in (ChatEventType.USER_MESSAGE, ChatEventType.ASSISTANT_MESSAGE)
+        ),
+        tokens_freed=max(0, shadowed_tokens - estimate_str_tokens(summary_text)),
+        provider=runtime_config['provider'],
+        model=runtime_config['model_name'],
+    )
+
+    # Race guard: another compaction may have appended while we were
+    # generating the summary.  If its shadow range covers the same or
+    # overlapping region, skip the append so we never duplicate summaries
+    # over the same range.
+    fresh_events = EventStore.load(chat_session)
+    for fe in fresh_events:
+        if fe.event_type == ChatEventType.COMPACTION_SUMMARY:
+            fe_data = fe.data or {}
+            fe_end = fe_data.get('shadowed_end_seq', -1)
+            if isinstance(fe_end, int) and fe_end >= start_seq:
+                logger.info(
+                    'Compaction superseded for session %s (another task finished first)',
+                    chat_session.id,
+                )
+                return {'status': 'skipped', 'reason': 'superseded'}
+
+    EventStore.append(
+        chat_session,
+        ChatEventType.COMPACTION_SUMMARY,
+        payload,
+        character=chat_session.character,
+    )
+    logger.info(
+        'Compacted session %s: shadowed seq %s..%s, freed ~%s tokens',
+        chat_session.id, start_seq, end_seq, payload['tokens_freed'],
+    )
+    return {
+        'status': 'compacted',
+        'shadowed_start_seq': start_seq,
+        'shadowed_end_seq': end_seq,
+        'tokens_freed': payload['tokens_freed'],
+    }
 
 
 @shared_task(retry_backoff=True)
@@ -2699,6 +2955,200 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
         }
 
 
+DUAL_THINKING_CHAR_OS_MARKER = '<<<CHARACTER_OS>>>'
+DUAL_THINKING_RAW_MARKER = '<<<RAW_REASONING>>>'
+_DUAL_THINKING_MARKERS = (DUAL_THINKING_CHAR_OS_MARKER, DUAL_THINKING_RAW_MARKER)
+# 未出现任何标记时，前奏缓冲超过该长度就实时透传（保持旧版可见性），
+# 结束再统一归入 raw_reasoning；否则整体缓冲到 done 才分流。
+_DUAL_THINKING_FLUSH_AFTER_CHARS = 1200
+
+
+class _DualThinkingSplitter:
+    """把模型 reasoning 流拆成【角色心声】与【原生推理】两段。
+    符合提示词协议时：``<<<CHARACTER_OS>>>`` 之后的内容实时作为 thinking
+    事件透传（角色独白边生成边显示）；``<<<RAW_REASONING>>>`` 之后的内容
+    静默缓存，在 done 事件里以 raw_reasoning 落库，供前端"原始推理"视图切换。
+    模型完全未按标记输出时回退为旧行为：实时透传，done 时归入 raw_reasoning
+    （前端无切换器、直接显示这条原始推理）。
+    """
+
+    def __init__(self):
+        self._state = 'pending'  # pending | character_os | raw | stream_raw
+        self._pending = ''
+        self._os_parts = []
+        self._raw_parts = []
+        self.total_text = ''
+        self.saw_marker = False
+
+    @staticmethod
+    def _marker_may_still_be_incomplete(buffer: str) -> bool:
+        """缓冲尾部是否可能是某个标记的残缺前缀（标记可能跨 chunk 到达）。"""
+        tail = buffer[-(min(32, len(buffer))):]
+        return any(marker.startswith(tail) for marker in _DUAL_THINKING_MARKERS)
+
+    @staticmethod
+    def _find_earliest_marker(buffer: str):
+        best_index = -1
+        best_marker = None
+        for marker in _DUAL_THINKING_MARKERS:
+            index = buffer.find(marker)
+            if index != -1 and (best_index == -1 or index < best_index):
+                best_index = index
+                best_marker = marker
+        return best_index, best_marker
+
+    def feed(self, text):
+        """喂入一段 reasoning 增量；返回需要实时透传的 thinking 事件列表。"""
+        if not text:
+            return []
+        self.total_text += text
+        if self._state in ('raw', 'stream_raw'):
+            self._raw_parts.append(text)
+            return []
+
+        events = []
+        self._pending += text
+
+        # 一个 chunk 可能同时包含两个标记（工具循环的整块模式），循环扫描直到稳定。
+        while True:
+            index, marker = self._find_earliest_marker(self._pending)
+            if marker is None:
+                break
+            self.saw_marker = True
+            before = self._pending[:index]
+            after = self._pending[index + len(marker):]
+            if marker == DUAL_THINKING_CHAR_OS_MARKER:
+                # 首个心声标记之前的热身文字同样是角色口吻 → 归心声。
+                if before.strip():
+                    self._os_parts.append(before)
+                self._state = 'character_os'
+                self._pending = after
+                continue
+            # RAW_REASONING 标记：心声段到此结束，其后全部归原始推理。
+            if self._state == 'character_os':
+                if before.strip():
+                    self._os_parts.append(before)
+            elif before.strip():
+                # 未出现心声标记即进入原始推理：前奏也一并归 raw。
+                self._raw_parts.append(before)
+            self._raw_parts.append(after)
+            self._pending = ''
+            self._state = 'raw'
+            break
+
+        if self._state == 'character_os' and self._pending:
+            if self._marker_may_still_be_incomplete(self._pending):
+                return events
+            events.append({'type': 'thinking', 'content': self._pending})
+            self._os_parts.append(self._pending)
+            self._pending = ''
+            return events
+
+        if self._state == 'pending' and self._pending:
+            # 尚未见到任何标记：缓冲等待，超限才实时透传（避免长前奏黑屏）。
+            if len(self._pending) > _DUAL_THINKING_FLUSH_AFTER_CHARS:
+                events.append({'type': 'thinking', 'content': self._pending})
+                self._raw_parts.append(self._pending)
+                self._pending = ''
+                self._state = 'stream_raw'
+            return events
+
+        return events
+
+    def finalize(self):
+        """流结束时结算：返回 (角色心声, 原始推理)。"""
+        pending = self._pending
+        self._pending = ''
+        if pending:
+            if self._state == 'character_os':
+                self._os_parts.append(pending)
+            else:
+                self._raw_parts.append(pending)
+        os_text = ''.join(self._os_parts).strip()
+        raw_text = ''.join(self._raw_parts).strip()
+        return os_text, raw_text
+
+
+def _strip_thinking_tags(text: str) -> str:
+    """防御：模型偶尔把协议标记行写进正式回复时，把标记行剔除。"""
+    cleaned = [
+        line for line in text.splitlines()
+        if line.strip() not in _DUAL_THINKING_MARKERS
+    ]
+    return '\n'.join(cleaned).strip()
+
+
+def _parse_json_string_array(text: str):
+    """宽容解析模型输出的 JSON 字符串数组（容忍 ```json 代码块与前后废话）。"""
+    try:
+        data = json.loads(text.strip())
+    except Exception:
+        data = None
+    if isinstance(data, list) and all(isinstance(item, str) for item in data):
+        return data
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            return None
+        if isinstance(data, list) and all(isinstance(item, str) for item in data):
+            return data
+    return None
+
+
+def _refine_steps_with_character_osis(character, collected_steps, runtime_config):
+    """给每轮思考补角色心声（兜底）：steps 变为 text=心声、raw_text=该轮原始推理。
+
+    提示词里的双段协议只能在部分轮次让模型配合；主回复完成后用一次轻量
+    调用（只输出每轮的内心独白）补全缺失的一半。失败时保留单段视图。
+    """
+    thinking_indexes = [i for i, step in enumerate(collected_steps) if step.get('kind') == 'thinking']
+    if not thinking_indexes:
+        return
+    persona = (character.name or '').strip()
+    personality = ((character.personality or character.description or '').strip())[:120]
+    intro = (
+        f"角色：{persona}（{personality}）"
+        if personality and persona
+        else f"角色：{persona or 'the character'}"
+    )
+    prompt = (
+        intro
+        + "\n\n下面是这一轮对话中每一步内部推理的摘要，请为每一步补写角色第一人称的中文内"
+        + "心独白（3~5 句，自然口语化；不要分点，不要出现“工具/检索/文件路径”等执行术语，"
+        + "只表达角色当时的心境与打算）：\n\n"
+        + "\n\n".join(
+            f"第{i + 1}步：\n{(collected_steps[idx].get('text') or '')[:1500]}"
+            for i, idx in enumerate(thinking_indexes)
+        )
+        + '\n\n只输出 JSON 字符串数组（与上面顺序一一对应），例如：["……","……"]'
+    )
+    try:
+        reformatted = _generate_text(runtime_config, prompt, timeout=120)
+    except Exception as exc:
+        logger.warning("Dual-thinking enrichment failed: %s", exc)
+        return
+    os_list = _parse_json_string_array(reformatted)
+    if os_list is None or len(os_list) != len(thinking_indexes):
+        logger.warning(
+            "Dual-thinking enrichment parse failed (got %s entries, need %s)",
+            len(os_list) if os_list is not None else '?',
+            len(thinking_indexes),
+        )
+        return
+    for index, position in enumerate(thinking_indexes):
+        os_text = (os_list[index] or '').strip()
+        if not os_text:
+            continue
+        original_reasoning = collected_steps[position].get('text') or ''
+        collected_steps[position] = {
+            'kind': 'thinking',
+            'text': os_text,
+            'raw_text': original_reasoning,
+        }
+
+
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     collected_tool_calls = []
     # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
@@ -2722,7 +3172,8 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
 
     started_at = time.perf_counter()
     collected_chunks = []
-    collected_thinking = []
+    collected_steps = []
+    thinking_splitter = _DualThinkingSplitter()
     collected_usage = None
 
     for event in _iter_text_chunks(
@@ -2747,13 +3198,26 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
             content = event.get('content') or ''
             if not content:
                 continue
-            collected_thinking.append(content)
-            yield {'type': 'thinking', 'content': content}
+            # 全流拆分器负责实时心声透传 + 汇总 raw_reasoning（跨轮拼接）。
+            for thinking_event in thinking_splitter.feed(content):
+                yield thinking_event
+            # 每轮独立拆分，得到这一轮时间线行的展示文本与原始推理。
+            round_splitter = _DualThinkingSplitter()
+            for _ in round_splitter.feed(content):
+                pass  # 本轮事件已由全流拆分器处理，这里只取结算结果。
+            round_os, round_raw = round_splitter.finalize()
+            if round_os or round_raw:
+                collected_steps.append({
+                    'kind': 'thinking',
+                    'text': round_os or round_raw,
+                    **({'raw_text': round_raw} if round_os and round_raw else {}),
+                })
             continue
         if event_type == 'tool':
             tool_name = event.get('tool') or ''
             tool_arguments = event.get('arguments') or {}
             collected_tool_calls.append({'tool': tool_name, 'arguments': tool_arguments})
+            collected_steps.append({'kind': 'tool', 'tool': tool_name, 'arguments': tool_arguments})
             yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
             continue
 
@@ -2766,6 +3230,19 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     # 情感标记：解析成分段供语音朗读，同时剥掉标记存干净的正文。
     emotion_names = _character_emotion_names(character)
     clean_text, tts_segments = _parse_emotion_segments(ai_response_text, emotion_names)
+    clean_text = _strip_thinking_tags(clean_text)
+
+    character_os, raw_reasoning = thinking_splitter.finalize()
+    if not thinking_splitter.saw_marker:
+        # 模型未按双段协议输出（如 deepseek-v4-flash 的思维链天然是中文角色口吻）：
+        # 恢复旧行为——整段思考作为"思考过程"展示，不出现双视图切换器。
+        character_os = thinking_splitter.total_text.strip()
+        raw_reasoning = ''
+
+    # 每轮双段兜底：提示词协议只在部分轮让模型配合；主回复已流完，
+    # 用一次轻量调用给每轮补写角色心声（原始推理保留该轮原文）。
+    if any(step.get('kind') == 'thinking' for step in collected_steps):
+        _refine_steps_with_character_osis(character, collected_steps, runtime_config)
 
     ai_message = _finalize_ai_response(
         chat_session=chat_session,
@@ -2775,7 +3252,9 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         user_message=user_message,
         latency_ms=latency_ms,
         research_context=research_context,
-        thinking=''.join(collected_thinking).strip(),
+        thinking=character_os,
+        raw_reasoning=raw_reasoning,
+        steps=collected_steps,
         tool_calls=collected_tool_calls,
         token_usage=collected_usage,
     )
@@ -2791,6 +3270,8 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         'model_name': runtime_config['model_name'],
         'research_payload': ai_message.research_payload,
         'thinking': ai_message.thinking,
+        'raw_reasoning': ai_message.raw_reasoning,
+        'steps': ai_message.steps,
         'tool_calls': ai_message.tool_calls,
         'token_usage': ai_message.token_usage,
     }

@@ -1,6 +1,7 @@
 from django.core.validators import MaxLengthValidator
 from django.db import models
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 LONG_TERM_MEMORY_DESC_LIMIT = 200
 
@@ -127,14 +128,22 @@ class UserProfile(models.Model):
     timezone = models.CharField(max_length=64, blank=True, default="UTC")
     interface_language = models.CharField(max_length=50, blank=True, default="zh-CN")
     share_local_time = models.BooleanField(default=True)
-    share_location = models.BooleanField(default=False)
+    share_location = models.BooleanField(default=True)
     location_precision = models.CharField(
         max_length=16,
         choices=LocationPrecision.choices,
         default=LocationPrecision.CITY,
     )
     location_label = models.CharField(max_length=255, blank=True, default="")
-    share_weather = models.BooleanField(default=False)
+    # 自动检测得到的近似坐标：仅用于「精确」档提示词与后续天气等外部服务定位，
+    # 角色可见内容仍由 location_precision 决定。
+    location_latitude = models.FloatField(null=True, blank=True)
+    location_longitude = models.FloatField(null=True, blank=True)
+    share_weather = models.BooleanField(default=True)
+    # 打开时前端把时区自动对齐到浏览器时区；关闭后以手动填写的为准。
+    auto_sync_timezone = models.BooleanField(default=True)
+    # 打开时前端通过 IP 定位自动检测位置提示；关闭后以手动填写的为准。
+    auto_sync_location = models.BooleanField(default=True)
     preferred_relationship_style = models.CharField(max_length=64, blank=True, default="")
     preferred_reply_length = models.CharField(
         max_length=16,
@@ -312,6 +321,42 @@ class Character(models.Model):
         return self.name
 
 
+class TtsAudioOutput(models.Model):
+    """一条已保存的语音输出（「音频输出」浏览页的数据源）。
+
+    每次 /chat/tts 合成成功后把音频字节落盘并登记一行，供浏览页回放与
+    下载；也保留了文本/情感/引擎/耗时等元数据。删除角色时置空保留历史
+    （SET_NULL），删除用户随 CASCADE 一并清掉。
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="tts_audio_outputs")
+    character = models.ForeignKey(
+        Character,
+        on_delete=models.SET_NULL,
+        related_name="tts_audio_outputs",
+        null=True,
+        blank=True,
+    )
+    text = models.TextField(help_text="本次合成的文本")
+    emotion = models.CharField(max_length=64, blank=True, default="", help_text="情感名，空=默认参考音频")
+    provider = models.CharField(max_length=16, blank=True, default="", help_text="实际使用的 TTS provider")
+    audio = models.FileField(upload_to="tts_outputs/%Y/%m/")
+    content_type = models.CharField(max_length=100, blank=True, default="audio/wav")
+    processing_ms = models.PositiveIntegerField(null=True, blank=True)
+    first_byte_ms = models.PositiveIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [
+            models.Index(fields=["user", "-id"]),
+            models.Index(fields=["character", "-id"]),
+        ]
+
+    def __str__(self):
+        return f"TTS #{self.id} [{self.provider}] {self.text[:30]}..."
+
+
 class CharacterKnowledgeAsset(models.Model):
     character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name='knowledge_assets')
     file = models.FileField(upload_to='character_knowledge_assets/')
@@ -322,6 +367,13 @@ class CharacterKnowledgeAsset(models.Model):
     media_analysis = models.TextField(blank=True, default="")
     gemini_file_name = models.TextField(blank=True, default="")
     sort_order = models.PositiveIntegerField(default=0)
+    # 事件溯源关联：创建本行的 asset/uploaded 事件 id（投影重建/解绑时精确
+    # 定位）。事件日志是事实源，本行是物化投影。
+    upload_event_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        help_text='Id of the asset/uploaded AssetEvent this row projects from.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -330,6 +382,126 @@ class CharacterKnowledgeAsset(models.Model):
 
     def __str__(self):
         return f"{self.character.name}: {self.attachment_name or self.file.name}"
+
+
+class AssetEventType(models.TextChoices):
+    """The append-only event vocabulary for character reference assets.
+
+    ``CharacterKnowledgeAsset`` rows are a materialized projection of this
+    log (see ``chat.assets.projection``). Uploads enter the log as
+    ``asset/uploaded`` with a TTL; binding them to a character appends
+    ``asset/attached``; removal appends ``asset/detached``; abandoned uploads
+    are closed with ``asset/expired``. Events are never updated or deleted.
+    """
+
+    UPLOADED = 'asset/uploaded', 'Uploaded (staged, unattached)'
+    ATTACHED = 'asset/attached', 'Attached to character'
+    DETACHED = 'asset/detached', 'Detached from character'
+    EXPIRED = 'asset/expired', 'Expired unattached upload'
+
+
+class AssetEvent(models.Model):
+    """One append-only entry in a user's character-reference asset log.
+
+    Unlike ``ChatEvent`` (which is session-scoped), asset events belong to a
+    user and optionally a character, so they live in their own table with a
+    global identity (no per-session seq). ``data`` is a lossless JSON payload;
+    ``expires_at`` carries the TTL of ``asset/uploaded`` events.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='asset_events')
+    character = models.ForeignKey(
+        Character,
+        on_delete=models.CASCADE,
+        related_name='asset_events',
+        null=True,
+        blank=True,
+    )
+    event_type = models.CharField(max_length=40, choices=AssetEventType.choices)
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-id']
+        indexes = [
+            models.Index(fields=['user', 'event_type']),
+            models.Index(fields=['character', 'event_type']),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type} #{self.id} [{self.user_id}]"
+
+
+class CharacterDraftJob(models.Model):
+    """一次角色草稿提取任务（后台线程执行，前端轮询进度）。
+
+    同步 mutation 跑 reduce 管线要以分钟计，HTTP 请求超时/页面刷新就前功尽
+    弃。任务行即进度与结果的持久化：stage/progress 随管线推进更新；批次
+    笔记随批写入 ``checkpoint``，重试同一批文件时已完成批次不再重复调用
+    模型（断点续跑）。 runner 进程崩溃留下的 running 行由下次 start 时的
+    过期清扫标记为 failed。
+    """
+
+    class Status(models.TextChoices):
+        RUNNING = 'running', 'Running'
+        SUCCEEDED = 'succeeded', 'Succeeded'
+        FAILED = 'failed', 'Failed'
+        CANCELING = 'canceling', 'Canceling'
+        CANCELED = 'canceled', 'Canceled'
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='character_draft_jobs')
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.RUNNING)
+    stage = models.CharField(max_length=32, blank=True, default='')
+    progress_done = models.PositiveIntegerField(default=0)
+    progress_total = models.PositiveIntegerField(default=0)
+    detail = models.TextField(blank=True, default='')
+    # 同一输入组合的指纹（upload_ids + asset_ids + text_context + locale），
+    # 用于重试时找回可复用的批次笔记 checkpoint。
+    fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    # 内容指纹（全部文件 sha256 + text_context + locale）：同一语料重传后
+    # upload_ids 会变而内容指纹不变，据此直接复用已完成任务的结果（秒级）。
+    content_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    inputs = models.JSONField(default=dict, blank=True)
+    checkpoint = models.JSONField(default=list, blank=True)
+    result = models.JSONField(null=True, blank=True)
+    error = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-id']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+        ]
+
+    def __str__(self):
+        return f"draft job #{self.id} [{self.user_id}] {self.status}"
+
+
+class CharacterProfileNote(models.Model):
+    """按内容寻址的批次笔记缓存表（预留）。
+
+    预筛 + 单请求是当前主链路，本表暂不在请求路径上；保留给未来语料
+    超出单上下文预算、需要恢复多批精读时使用（signature 见
+    character_reduce._batch_signature，内容寻址，重传不失效）。
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='character_profile_notes')
+    signature = models.CharField(max_length=1024, db_index=True)
+    tier = models.CharField(max_length=16, blank=True, default='')
+    files = models.JSONField(default=list, blank=True)
+    note = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'signature'], name='uniq_profile_note_per_user_signature'),
+        ]
+
+    def __str__(self):
+        return f"profile note #{self.id} [{self.user_id}] {self.tier}"
 
 
 class ChatSession(models.Model):
@@ -380,6 +552,22 @@ class Message(models.Model):
         blank=True,
         default="",
         help_text="Model native reasoning text (e.g. DeepSeek reasoning_content) captured during streaming.",
+    )
+    raw_reasoning = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Dual-thinking protocol: the model's objective raw chain of thought (RAW_REASONING block), "
+            "kept separate from the in-character inner monologue in `thinking`."
+        ),
+    )
+    steps = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Full ReAct timeline: ordered [{kind: thinking, text, raw_text} | "
+            "{kind: tool, tool, arguments}] steps across every loop round."
+        ),
     )
     tool_calls = models.JSONField(
         default=list,
@@ -484,6 +672,66 @@ class CharacterMemoryItem(models.Model):
 
     def __str__(self):
         return f"[{self.short_id}] {self.section}: {self.description[:40]}"
+
+
+class ChatEventType(models.TextChoices):
+    """The append-only event vocabulary for a chat session's conversation log.
+
+    Every conversation fact that must survive reload/replay is recorded as one
+    of these events. ``Message`` rows are a materialized projection of this
+    log (see ``chat.events.projection``); this table is the single source of
+    truth. ``ChatSession`` metadata (title / origin / private mode / latency)
+    deliberately stays outside the log — it is session header state, not a
+    conversation event (deepseek-harness SessionHeader principle).
+    """
+
+    SESSION_CREATED = 'session/created', 'Session created'
+    USER_MESSAGE = 'user/message', 'User message'
+    ASSISTANT_MESSAGE = 'assistant/message', 'Assistant message'
+    COMPACTION_SUMMARY = 'compaction/summary', 'Compacted-history summary'
+
+
+class ChatEvent(models.Model):
+    """One append-only entry in a chat session's event log.
+
+    ``seq`` is monotonic per ``chat_session`` (allocated inside a transaction
+    by ``EventStore.append``) and ``data`` is a lossless JSON payload. Events
+    are never updated or deleted — compaction appends a ``compaction/summary``
+    event that *shadows* a seq range instead.
+    """
+
+    chat_session = models.ForeignKey(
+        ChatSession,
+        on_delete=models.CASCADE,
+        related_name='events',
+    )
+    character = models.ForeignKey(
+        Character,
+        on_delete=models.CASCADE,
+        related_name='events',
+        null=True,
+        blank=True,
+    )
+    seq = models.PositiveIntegerField()
+    event_type = models.CharField(max_length=40, choices=ChatEventType.choices)
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['seq']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['chat_session', 'seq'],
+                name='unique_chat_event_seq_per_session',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['chat_session', 'seq']),
+            models.Index(fields=['character', 'seq']),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type} #{self.seq} [{self.chat_session_id}]"
 
 
 class MemoryAuditLog(models.Model):

@@ -79,6 +79,8 @@ export default function ModelApiSettingsPanel({
     models: [],
     error: null,
   });
+  const [probePanelOpen, setProbePanelOpen] = useState(false);
+  const [probeFilter, setProbeFilter] = useState('');
   const [roleSelection, setRoleSelection] = useState<Record<ModelRoleKey, string>>({
     text: '',
     image: '',
@@ -121,6 +123,8 @@ export default function ModelApiSettingsPanel({
     setEditingId(null);
     setError(null);
     setProbeState({ busy: false, models: [], error: null });
+    setProbePanelOpen(false);
+    setProbeFilter('');
     setFormState({ ...EMPTY_FORM });
   };
 
@@ -128,6 +132,8 @@ export default function ModelApiSettingsPanel({
     setEditingId(config.id);
     setError(null);
     setProbeState({ busy: false, models: [], error: null });
+    setProbePanelOpen(false);
+    setProbeFilter('');
     const preset = matchProviderPreset(config.provider, config.baseUrl || '');
     setFormState({
       name: config.name,
@@ -154,8 +160,17 @@ export default function ModelApiSettingsPanel({
     }));
   };
 
+  // 后端 probe 只回英文报错；按可识别的关键词映射成当前界面语言的提示。
+  const localizeProbeError = (raw?: string | null): string => {
+    if (raw?.includes('Gemini API key is required')) return messages.modelApi.fetchModelsKeyRequiredGemini;
+    if (raw?.includes('Anthropic API key is required')) return messages.modelApi.fetchModelsKeyRequiredAnthropic;
+    return messages.modelApi.fetchModelsFailed;
+  };
+
   const handleProbeModels = async () => {
     setProbeState({ busy: true, models: [], error: null });
+    setProbePanelOpen(false);
+    setProbeFilter('');
     try {
       const response = await apiService.probeProviderModels({
         provider: formState.provider,
@@ -163,17 +178,21 @@ export default function ModelApiSettingsPanel({
         apiKey: formState.apiKey,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error || messages.modelApi.fetchModelsFailed);
+        throw new Error(localizeProbeError(response.error));
       }
-      setProbeState({ busy: false, models: response.data.models, error: null });
-      if (response.data.models.length === 0) {
+      const models = response.data.models;
+      if (models.length === 0) {
         setProbeState({ busy: false, models: [], error: messages.modelApi.fetchModelsEmpty });
+        return;
       }
+      setProbeState({ busy: false, models, error: null });
+      // 结果必须立即可见：直接展开候选列表，而不是只写进 datalist 让用户自己发现。
+      setProbePanelOpen(true);
     } catch (probeError) {
       setProbeState({
         busy: false,
         models: [],
-        error: probeError instanceof Error ? probeError.message : messages.modelApi.fetchModelsFailed,
+        error: probeError instanceof Error ? probeError.message : localizeProbeError(null),
       });
     }
   };
@@ -339,7 +358,7 @@ export default function ModelApiSettingsPanel({
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50">
-      <div className="mx-auto max-w-6xl px-6 py-8 md:px-10">
+      <div className="mx-auto max-w-3xl px-6 py-8 md:px-10">
         <div className="mb-8">
           <h2 className="text-2xl font-bold text-slate-900">{messages.modelApi.title}</h2>
           <p className="mt-1 text-sm text-slate-500">{messages.modelApi.subtitle}</p>
@@ -358,7 +377,7 @@ export default function ModelApiSettingsPanel({
         )}
 
         <div className="space-y-8">
-          <section className="rounded-[2rem] border border-slate-200 bg-white/80 p-6 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div>
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
@@ -376,7 +395,7 @@ export default function ModelApiSettingsPanel({
               </button>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+            <div className="space-y-6">
               <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
                 <div className="border-b border-slate-100 px-5 py-4">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
@@ -502,17 +521,11 @@ export default function ModelApiSettingsPanel({
                     <div className="flex gap-2">
                       <input
                         type="text"
-                        list="probe-model-options"
                         value={formState.modelName}
                         onChange={(e) => setFormState((prev) => ({ ...prev, modelName: e.target.value }))}
                         placeholder={messages.modelApi.modelNamePlaceholder}
                         className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                       />
-                      <datalist id="probe-model-options">
-                        {probeState.models.map((model) => (
-                          <option key={model} value={model} />
-                        ))}
-                      </datalist>
                       <button
                         type="button"
                         onClick={handleProbeModels}
@@ -525,6 +538,58 @@ export default function ModelApiSettingsPanel({
                     </div>
                     {probeState.error && (
                       <p className="mt-1 text-xs text-amber-600">{probeState.error}</p>
+                    )}
+                    {!probeState.busy && probeState.models.length > 0 && (
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => setProbePanelOpen((open) => !open)}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 transition-colors hover:text-emerald-700"
+                        >
+                          <CheckCircle2 size={14} />
+                          <span>{messages.modelApi.fetchModelsSuccess(probeState.models.length)}</span>
+                          <span className="underline decoration-dotted underline-offset-2">
+                            {probePanelOpen ? messages.modelApi.fetchModelsHideList : messages.modelApi.fetchModelsShowList}
+                          </span>
+                        </button>
+                        {probePanelOpen && (
+                          <div className="mt-1.5 rounded-lg border border-slate-200 bg-white shadow-sm">
+                            <div className="border-b border-slate-100 p-1.5">
+                              <input
+                                type="text"
+                                value={probeFilter}
+                                onChange={(e) => setProbeFilter(e.target.value)}
+                                placeholder={messages.modelApi.fetchModelsSearchPlaceholder}
+                                autoFocus
+                                className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                              />
+                            </div>
+                            <div className="max-h-48 overflow-y-auto">
+                              {probeState.models
+                                .filter((model) => model.toLowerCase().includes(probeFilter.trim().toLowerCase()))
+                                .map((model) => (
+                                  <button
+                                    key={model}
+                                    type="button"
+                                    onClick={() => {
+                                      setFormState((prev) => ({ ...prev, modelName: model }));
+                                      setProbePanelOpen(false);
+                                    }}
+                                    className={`block w-full truncate px-3 py-1.5 text-left text-sm transition-colors hover:bg-slate-50 ${
+                                      formState.modelName === model ? 'bg-sky-50 text-sky-700' : 'text-slate-700'
+                                    }`}
+                                  >
+                                    {model}
+                                  </button>
+                                ))}
+                              {probeFilter.trim() &&
+                                !probeState.models.some((model) => model.toLowerCase().includes(probeFilter.trim().toLowerCase())) && (
+                                  <p className="px-3 py-2 text-sm text-slate-400">{messages.modelApi.fetchModelsNoMatch}</p>
+                                )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
 
@@ -595,7 +660,7 @@ export default function ModelApiSettingsPanel({
             </div>
           </section>
 
-          <section className="rounded-[2rem] border border-slate-200 bg-white/80 p-6 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
               <CheckCircle2 size={16} />
               <span>{messages.modelApi.rolesSectionTitle}</span>
@@ -668,7 +733,7 @@ export default function ModelApiSettingsPanel({
             <p className="mt-4 text-xs text-slate-400">{messages.modelApi.audioFormatNote}</p>
           </section>
 
-          <section className="rounded-[2rem] border border-slate-200 bg-white/80 p-6 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-6 flex items-start gap-3">
               <div className="rounded-full bg-sky-50 p-2 text-sky-700">
                 <Globe size={18} />
@@ -686,7 +751,7 @@ export default function ModelApiSettingsPanel({
               </div>
             )}
 
-            <div className="grid gap-6 lg:grid-cols-[0.78fr_1.22fr]">
+            <div className="space-y-6">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4">
                   <h4 className="text-base font-semibold text-slate-900">{messages.modelApi.currentWebSearchConfiguration}</h4>

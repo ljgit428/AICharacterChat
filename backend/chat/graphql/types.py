@@ -17,11 +17,48 @@ class PrisMateDraft:
     tags: List[str]
     visual_summary: str
     example_dialogue: str = ""
+    # 角色对用户的直接称呼（从语料台词归纳，如 老师/前辈/指挥官）。
+    user_address: str = ""
+
+
+@strawberry.type
+class CharacterDraftJobType:
+    """后台草稿任务：前端启动后轮询本类型直到终态。"""
+
+    id: strawberry.ID
+    status: str
+    stage: str
+    progress_done: int
+    progress_total: int
+    error: Optional[str]
+    result: Optional[PrisMateDraft]
+    created_at: Optional[str]
+
+
+def _serialize_character_draft_job(job) -> CharacterDraftJobType:
+    return CharacterDraftJobType(
+        id=str(job.id),
+        status=job.status,
+        stage=job.stage or "",
+        progress_done=job.progress_done,
+        progress_total=job.progress_total,
+        error=job.error or None,
+        result=PrisMateDraft(**job.result) if job.result else None,
+        created_at=job.created_at.isoformat() if job.created_at else None,
+    )
 
 @strawberry.input
 class CharacterKnowledgeAssetInput:
-    uploaded_url: str
-    file_name: str
+    """One staged upload to attach to the character.
+
+    ``upload_id`` is the ``asset/uploaded`` AssetEvent id returned by the
+    upload endpoint; ``file_name`` preserves the folder-group relative path.
+    ``uploaded_url`` is kept for backward compatibility with older clients.
+    """
+
+    upload_id: Optional[str] = ""
+    file_name: str = ""
+    uploaded_url: Optional[str] = ""
 
 
 @strawberry.input
@@ -43,6 +80,8 @@ class CharacterInput:
     background_file_url: Optional[str] = ""
     background_file_name: Optional[str] = ""
     background_files: Optional[List[CharacterKnowledgeAssetInput]] = None
+    # 编辑时明确删除的已有资产 id（增量 diff；None/缺省 = 不动资产）
+    detached_asset_ids: Optional[List[str]] = None
     # 角色级联网搜索三态开关：None=跟随用户全局设置
     enable_web_search: Optional[bool] = None
     # 角色级语音模型配置（引擎/模型版本/音色名/ONNX 目录/参考音频）
@@ -51,6 +90,7 @@ class CharacterInput:
 
 @strawberry.type
 class CharacterKnowledgeAssetType:
+    asset_id: Optional[str]
     file_url: str
     file_name: str
     file_type: str
@@ -59,6 +99,7 @@ class CharacterKnowledgeAssetType:
 
 def _serialize_character_knowledge_asset(asset: CharacterKnowledgeAsset) -> CharacterKnowledgeAssetType:
     return CharacterKnowledgeAssetType(
+        asset_id=str(asset.id),
         file_url=asset.file.url if asset.file else "",
         file_name=asset.attachment_name or os.path.basename(asset.file.name or ""),
         file_type=asset.attachment_kind or "",
@@ -129,6 +170,7 @@ class CharacterType:
 
         return [
             CharacterKnowledgeAssetType(
+                asset_id=None,
                 file_url=self.file.url,
                 file_name=os.path.basename(self.file.name or ""),
                 file_type='text',

@@ -1,9 +1,11 @@
 import json
+import os
 from pathlib import Path
 from uuid import uuid4
 
 import requests
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.http import HttpResponse, StreamingHttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -17,12 +19,16 @@ from .attachments import extract_text_attachment_content, guess_attachment_kind,
 from . import asr as chat_asr
 from . import tts as chat_tts
 from .cleanup import cleanup_character_files
+from .geo import detect_location_from_request
 from .memory.interface import LongTermMemoryInterface as CharacterLongTermMemory
 from .memory.manager import MemoryItemNotFoundError, MemoryManager
+from .events.store import EventStore
+from .events.types import user_message_payload, assistant_message_payload
 from .models import (
     AttachmentKind,
     Character,
     CharacterKnowledgeAsset,
+    ChatEventType,
     ChatSession,
     MemoryAuditSource,
     Message,
@@ -30,6 +36,7 @@ from .models import (
     ModelConfiguration,
     ModelRole,
     ModelRoleAssignment,
+    TtsAudioOutput,
     TtsEngine,
     TtsServiceSettings,
     TtsVoiceModel,
@@ -46,6 +53,7 @@ from .serializers import (
     MessageSerializer,
     MessageCreateSerializer,
     ModelConfigurationSerializer,
+    TtsAudioOutputSerializer,
     TtsServiceSettingsSerializer,
     TtsVoiceModelSerializer,
     UserProfileSerializer,
@@ -61,6 +69,30 @@ logger = logging.getLogger(__name__)
 
 def _message_serializer(message, request):
     return MessageSerializer(message, context={'request': request})
+
+
+def _persist_attachment_files(attachment_payloads):
+    """Save uploaded files to the chat-attachments storage.
+
+    Each payload dict has a ``file`` key (the uploaded file object) that is
+    replaced by the resulting storage name (``file_name``) so the event
+    payload can reference it. The projection recreates ``MessageAttachment``
+    rows from those names without re-saving the bytes.
+    """
+    persisted = []
+    for payload in attachment_payloads:
+        file_obj = payload.pop('file', None)
+        saved_name = ''
+        if file_obj:
+            saved_name = default_storage.save(
+                os.path.join('chat_attachments', os.path.basename(file_obj.name or 'uploaded_file')),
+                file_obj,
+            )
+        persisted.append({
+            **payload,
+            'file_name': saved_name,
+        })
+    return persisted
 
 
 def _get_required_model_config(user, model_config_id=None):
@@ -146,43 +178,25 @@ class CharacterViewSet(viewsets.ModelViewSet):
         if not files:
             raise ValidationError({'files': 'At least one file is required.'})
 
-        # Optional parallel array of folder-group relative paths (e.g. from a
-        # browser upload that preserves webkitRelativePath). Files land inside
-        # the memory filesystem tree at raw/character_setup/uploads/<rel>.
+        # Optional parallel array of folder-group relative paths.
         relative_paths = self._extract_relative_paths(request)
         if len(relative_paths) not in (0, len(files)):
             raise ValidationError({'relative_paths': 'relative_paths must match the number of uploaded files.'})
 
-        next_sort_order = (
-            character.knowledge_assets.order_by('-sort_order').values_list('sort_order', flat=True).first() or 0
-        )
-        created_assets = []
-        for index, uploaded_file in enumerate(files, start=1):
-            attachment_kind, attachment_mime_type = guess_attachment_kind(uploaded_file)
-            if attachment_kind not in {AttachmentKind.TEXT, AttachmentKind.IMAGE}:
-                raise ValidationError({'files': 'Only text files and images are supported for character reference uploads.'})
+        from .assets.store import AssetStore
 
-            validate_attachment_size(uploaded_file, attachment_kind)
-            attachment_text_content = ''
-            if attachment_kind == AttachmentKind.TEXT:
-                attachment_text_content = extract_text_attachment_content(uploaded_file)
+        upload_ids = []
+        for index, uploaded_file in enumerate(files):
+            rel_path = sanitize_memory_relative_path(relative_paths[index]) if relative_paths else ''
+            try:
+                event, _metadata = AssetStore.upload(request.user, uploaded_file, rel_path)
+            except ValueError as exc:
+                raise ValidationError({'files': str(exc)}) from exc
+            upload_ids.append(event.id)
 
-            relative_path = sanitize_memory_relative_path(relative_paths[index - 1]) if relative_paths else ''
-            attachment_name = relative_path or (uploaded_file.name or '')
-
-            created_assets.append(
-                CharacterKnowledgeAsset.objects.create(
-                    character=character,
-                    file=uploaded_file,
-                    attachment_name=attachment_name,
-                    attachment_mime_type=attachment_mime_type,
-                    attachment_kind=attachment_kind,
-                    attachment_text_content=attachment_text_content,
-                    sort_order=next_sort_order + index,
-                )
-            )
-
-        serializer = CharacterKnowledgeAssetSerializer(created_assets, many=True, context={'request': request})
+        # Attach all uploaded events to the character and return the assets.
+        assets = AssetStore.attach(character, upload_ids)
+        serializer = CharacterKnowledgeAssetSerializer(assets, many=True, context={'request': request})
         return Response({'assets': serializer.data}, status=status.HTTP_201_CREATED)
 
     @staticmethod
@@ -210,8 +224,8 @@ class CharacterViewSet(viewsets.ModelViewSet):
         except CharacterKnowledgeAsset.DoesNotExist as exc:
             raise ValidationError({'asset_id': 'Knowledge asset not found for this character.'}) from exc
 
-        asset.file.delete(save=False)
-        asset.delete()
+        from .assets.store import AssetStore
+        AssetStore.detach(character, [asset.id], reason='user delete')
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get', 'post', 'delete'], url_path='memory')
@@ -417,6 +431,15 @@ class UserProfileViewSet(viewsets.ViewSet):
         serializer.save()
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get'], url_path='detect-location')
+    def detect_location(self, request):
+        """按出口 IP 检测位置提示要素与 IANA 时区，供设置页「自动对齐位置」使用。
+
+        ok=False 时附 reason（private_network / unavailable），文案由前端本地化。
+        """
+        lang = 'zh-CN' if str(request.query_params.get('lang') or '').lower().startswith('zh') else 'en'
+        return Response(detect_location_from_request(request, lang=lang))
+
 
 class WebSearchConfigurationViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -487,6 +510,29 @@ def _save_upload_to(directory: Path, uploaded) -> Path:
         for chunk in uploaded.chunks():
             handle.write(chunk)
     return target
+
+
+def _persist_tts_output(user, character, text, provider, emotion, result):
+    """把一次成功的 TTS 合成登记为 TtsAudioOutput（「音频输出」浏览页数据源）。
+
+    尽力而为的旁路：落盘/入库失败只记日志，不影响音频流本身返回。
+    """
+    try:
+        from django.core.files.base import ContentFile
+        ext = 'wav' if result.get('content_type') == 'audio/wav' else 'bin'
+        output = TtsAudioOutput(
+            user=user,
+            character=character,
+            text=text,
+            emotion=emotion or '',
+            provider=result.get('provider', ''),
+            content_type=result.get('content_type', 'audio/wav'),
+            processing_ms=result.get('processing_ms'),
+            first_byte_ms=result.get('first_byte_ms'),
+        )
+        output.audio.save(f'tts-{uuid4().hex}.{ext}', ContentFile(result['audio']), save=True)
+    except Exception:
+        logger.warning("Failed to persist TTS audio output", exc_info=True)
 
 
 class TtsServiceSettingsViewSet(viewsets.ViewSet):
@@ -677,6 +723,30 @@ class TtsVoiceModelViewSet(viewsets.ModelViewSet):
                     handle.write(chunk)
 
         return Response({'path': str(output_dir), 'name': str(output_dir.name)})
+
+
+class TtsAudioOutputViewSet(viewsets.ModelViewSet):
+    """语音输出历史（「音频输出」浏览页）：只读 + 删除。
+
+    每条记录对应一次 /chat/tts 合成落盘的音频文件与元数据。删除时把
+    磁盘上的音频文件一并清掉，避免 MEDIA_ROOT 堆积孤儿文件。
+    """
+
+    queryset = TtsAudioOutput.objects.none()
+    serializer_class = TtsAudioOutputSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = TtsAudioOutput.objects.filter(user=self.request.user).select_related('character')
+        character_id = self.request.query_params.get('character_id')
+        if character_id:
+            queryset = queryset.filter(character_id=character_id)
+        return queryset
+
+    def perform_destroy(self, instance):
+        if instance.audio:
+            instance.audio.delete(save=False)
+        instance.delete()
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
@@ -891,27 +961,52 @@ class MessageViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(chat_session_id=chat_session_id)
         return queryset
 
-    def perform_create(self, serializer):
-        chat_session_id = self.request.data.get('chat_session_id')
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        chat_session_id = request.data.get('chat_session_id')
         if not chat_session_id:
-            return Response(
-                {'error': 'chat_session_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
+            raise ValidationError('chat_session_id is required')
         try:
-            user = self.request.user
-
             chat_session = ChatSession.objects.get(
                 id=chat_session_id,
-                user=user
+                user=request.user,
             )
-            serializer.save(chat_session=chat_session)
         except ChatSession.DoesNotExist:
-            return Response(
-                {'error': 'Chat session not found or access denied'},
-                status=status.HTTP_404_NOT_FOUND
+            raise ValidationError('Chat session not found or access denied')
+
+        validated = serializer.validated_data
+        role = validated.get('role') or 'user'
+        content = validated.get('content') or ''
+        character = validated.get('character')
+
+        # Every message is a conversation event; the Message row is the
+        # write-through projection.
+        if not chat_session.events.exists():
+            EventStore.append(
+                chat_session,
+                ChatEventType.SESSION_CREATED,
+                {'origin': chat_session.origin, 'title': chat_session.title},
             )
+        if role == 'assistant':
+            _event, message = EventStore.append(
+                chat_session,
+                ChatEventType.ASSISTANT_MESSAGE,
+                assistant_message_payload(content=content),
+                character=character,
+            )
+        else:
+            _event, message = EventStore.append(
+                chat_session,
+                ChatEventType.USER_MESSAGE,
+                user_message_payload(content=content),
+                character=character,
+            )
+        return Response(
+            MessageSerializer(message, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 class ChatViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -986,7 +1081,35 @@ class ChatViewSet(viewsets.ViewSet):
                     'error': str(exc),
                 })
 
-        return StreamingHttpResponse(event_stream(), content_type='application/x-ndjson')
+        # Under ASGI (uvicorn) Django's StreamingHttpResponse handler bridges
+        # sync generators by consuming the whole iterator before sending.
+        # Wrapping it in an async generator keeps each chunk flowing in real
+        # time — the first tool event reaches the client in ~1 s instead of
+        # after the entire generation completes.
+        import asyncio
+        from asgiref.sync import sync_to_async
+
+        _SENTINEL = object()
+
+        def _next_chunk(sync_gen):
+            """Pull the next chunk; return _SENTINEL on exhaustion.
+
+            Avoids raising StopIteration through sync_to_async, which asyncio
+            rejects (``StopIteration interacts badly with generators``)."""
+            try:
+                return next(sync_gen)
+            except StopIteration:
+                return _SENTINEL
+
+        async def async_event_stream():
+            sync_gen = event_stream()
+            while True:
+                chunk = await sync_to_async(_next_chunk)(sync_gen)
+                if chunk is _SENTINEL:
+                    break
+                yield chunk
+
+        return StreamingHttpResponse(async_event_stream(), content_type='application/x-ndjson')
 
     @action(detail=False, methods=['post'])
     def asr(self, request):
@@ -1054,6 +1177,7 @@ class ChatViewSet(viewsets.ViewSet):
         # voice_model_id 引用；旧数据的直填字段仍兼容）。无效/不属于当前用户
         # 的 character_id 视作未提供配置，genie 通道会直接报"请先配置语音模型"。
         character_tts_config = None
+        character = None
         character_id = str(request.data.get('character_id') or '').strip()
         if character_id:
             try:
@@ -1078,6 +1202,7 @@ class ChatViewSet(viewsets.ViewSet):
         except Exception as exc:
             logger.exception("TTS synthesis failed")
             return Response({'error': f'TTS failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        _persist_tts_output(request.user, character, text, provider, emotion, result)
         audio_response = HttpResponse(result['audio'], content_type=result['content_type'])
         audio_response['X-TTS-Provider'] = result['provider']
         audio_response['X-TTS-Processing-Ms'] = str(result['processing_ms'])
@@ -1159,38 +1284,30 @@ class ChatViewSet(viewsets.ViewSet):
             and not attachment_payloads
             and not has_existing_messages
         )
+
+        # Event-sourced history: every session gets a ``session/created`` marker
+        # (exactly once — also covers sessions created via GraphQL), and every
+        # user turn becomes a ``user/message`` event. The Message row is the
+        # write-through projection of that event.
+        if not chat_session.events.exists():
+            EventStore.append(
+                chat_session,
+                ChatEventType.SESSION_CREATED,
+                {'origin': chat_session.origin, 'title': chat_session.title},
+            )
+
         user_message = None
         if not generate_greeting:
-            user_message = Message.objects.create(
-                chat_session=chat_session,
-                role='user',
-                content=message_content,
+            # Persist uploaded files first so the event payload can carry the
+            # storage names; the projection recreates MessageAttachment rows
+            # from them without touching the bytes again.
+            attachment_payloads = _persist_attachment_files(attachment_payloads)
+            _, user_message = EventStore.append(
+                chat_session,
+                ChatEventType.USER_MESSAGE,
+                user_message_payload(content=message_content, attachments=attachment_payloads),
                 character=character,
             )
-            created_attachments = []
-            for payload in attachment_payloads:
-                created_attachments.append(
-                    MessageAttachment.objects.create(
-                        message=user_message,
-                        file=payload['file'],
-                        attachment_name=payload['attachment_name'],
-                        attachment_mime_type=payload['attachment_mime_type'],
-                        attachment_kind=payload['attachment_kind'],
-                        attachment_text_content=payload['attachment_text_content'],
-                        sort_order=payload['sort_order'],
-                    )
-                )
-
-            if created_attachments:
-                primary_attachment = created_attachments[0]
-                Message.objects.filter(pk=user_message.pk).update(
-                    attachment=primary_attachment.file.name,
-                    attachment_name=primary_attachment.attachment_name,
-                    attachment_mime_type=primary_attachment.attachment_mime_type,
-                    attachment_kind=primary_attachment.attachment_kind,
-                    attachment_text_content=primary_attachment.attachment_text_content,
-                )
-                user_message.refresh_from_db()
             chat_session.save(update_fields=['updated_at'])
 
         return chat_session, character, user_message, generate_greeting
