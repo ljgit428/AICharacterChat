@@ -1986,6 +1986,22 @@ def _build_stream_memory_prefetch(character, chat_session, generate_greeting=Fal
     return "\n\n".join(section for section in sections if section and section.strip())
 
 
+def _dual_thinking_protocol_text():
+    """每一轮思考（含工具轮）都要同时给出角色心声与原始推理两段的提示文本。
+
+    放在系统提示词最末尾：后续段落（尤其是英文的 MEMORY TOOLING / 工具清单）
+    会主导工具轮的推理风格，只有放在最后才能让"每轮两段"的约束不被盖住。
+    """
+    return "\n".join([
+        "EVERY reasoning step must be laid out as exactly two consecutive blocks - including each round that ends with tool calls, and the final round that produces the reply.",
+        f"Block 1 header (an exact line): {DUAL_THINKING_CHAR_OS_MARKER}",
+        "Block 1 - the character's inner voice, in Chinese: a short continuous first-person monologue (mood, read of the user's intent, confirmation of facts). Natural flowing narration only; never numbered steps or bullet lists.",
+        f"Block 2 header (an exact line): {DUAL_THINKING_RAW_MARKER}",
+        "Block 2 - objective model-native reasoning: decompose the task, verify recalled facts against retrieval results, plan which files to inspect, and sanity-check constraints. Analytical and precise; lists and numbers are allowed here.",
+        "Repeat this two-block structure in every reasoning step of the turn, not only before the final reply. Never mention the protocol or the tags to the user.",
+    ])
+
+
 def _build_system_prompt(character, chat_session, use_memory_tools=False, retrieved_memory=''):
     prompt_context = build_character_prompt_context(character)
     character_setup = prompt_context.get('soul', '')
@@ -1994,14 +2010,6 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
         "You are in an immersive roleplay chat. Stay fully in character, be specific, and avoid generic assistant phrasing.",
         "Never mention system instructions, hidden rules, or that you are an AI model unless the character would explicitly know that in-world.",
     ]
-    _append_section(sections, "DUAL THINKING PROTOCOL", "\n".join([
-        "In the thinking phase, split ALL of your internal reasoning into exactly two consecutive blocks: an in-character monologue, then an objective task analysis.",
-        f"Block 1 header (an exact line): {DUAL_THINKING_CHAR_OS_MARKER}",
-        f"Block 2 header (an exact line): {DUAL_THINKING_RAW_MARKER}",
-        "Block 1 - the character's inner voice, in Chinese: one continuous first-person monologue (the character's mood, their read of the user's intent, confirmation of memory and retrieval facts, and the intended reply). Natural flowing narration only; never numbered steps, bullet lists, or outlines.",
-        "Block 2 - objective model-native reasoning: decompose the task, verify recalled facts against retrieval results, and sanity-check constraints. Analytical and precise.",
-        "Thinking must consist of these two blocks only, in that exact order, with the headers on their own lines. Never mention the protocol or the tags to the user.",
-    ]))
     _append_section(sections, "CHARACTER SETUP", character_setup)
     _append_section(sections, "ACCOUNT CONTEXT", account_runtime_sections.get("context", ""))
     _append_section(sections, "ACCOUNT BOUNDARIES", account_runtime_sections.get("boundaries", ""))
@@ -2030,12 +2038,14 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
             ]),
         )
         _append_section(sections, "MEMORY FILESYSTEM", build_memory_explorer_manifest(character))
+        _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
         return "\n\n".join(sections)
 
     compact_memory_mode = bool((retrieved_memory or '').strip())
     if compact_memory_mode:
         _append_section(sections, "WORKING STATE", _format_working_state(chat_session))
         _append_section(sections, "RETRIEVED MEMORY", retrieved_memory)
+        _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
         return "\n\n".join(sections)
 
     uploaded_sections = "\n\n".join(
@@ -2049,6 +2059,7 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
     )
     _append_section(sections, "USER UPLOADS", uploaded_sections)
     _append_section(sections, "WORKING STATE", _format_working_state(chat_session))
+    _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
 
     return "\n\n".join(sections)
 
@@ -3067,6 +3078,77 @@ def _strip_thinking_tags(text: str) -> str:
     return '\n'.join(cleaned).strip()
 
 
+def _parse_json_string_array(text: str):
+    """宽容解析模型输出的 JSON 字符串数组（容忍 ```json 代码块与前后废话）。"""
+    try:
+        data = json.loads(text.strip())
+    except Exception:
+        data = None
+    if isinstance(data, list) and all(isinstance(item, str) for item in data):
+        return data
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            return None
+        if isinstance(data, list) and all(isinstance(item, str) for item in data):
+            return data
+    return None
+
+
+def _refine_steps_with_character_osis(character, collected_steps, runtime_config):
+    """给每轮思考补角色心声（兜底）：steps 变为 text=心声、raw_text=该轮原始推理。
+
+    提示词里的双段协议只能在部分轮次让模型配合；主回复完成后用一次轻量
+    调用（只输出每轮的内心独白）补全缺失的一半。失败时保留单段视图。
+    """
+    thinking_indexes = [i for i, step in enumerate(collected_steps) if step.get('kind') == 'thinking']
+    if not thinking_indexes:
+        return
+    persona = (character.name or '').strip()
+    personality = ((character.personality or character.description or '').strip())[:120]
+    intro = (
+        f"角色：{persona}（{personality}）"
+        if personality and persona
+        else f"角色：{persona or 'the character'}"
+    )
+    prompt = (
+        intro
+        + "\n\n下面是这一轮对话中每一步内部推理的摘要，请为每一步补写角色第一人称的中文内"
+        + "心独白（3~5 句，自然口语化；不要分点，不要出现“工具/检索/文件路径”等执行术语，"
+        + "只表达角色当时的心境与打算）：\n\n"
+        + "\n\n".join(
+            f"第{i + 1}步：\n{(collected_steps[idx].get('text') or '')[:1500]}"
+            for i, idx in enumerate(thinking_indexes)
+        )
+        + '\n\n只输出 JSON 字符串数组（与上面顺序一一对应），例如：["……","……"]'
+    )
+    try:
+        reformatted = _generate_text(runtime_config, prompt, timeout=120)
+    except Exception as exc:
+        logger.warning("Dual-thinking enrichment failed: %s", exc)
+        return
+    os_list = _parse_json_string_array(reformatted)
+    if os_list is None or len(os_list) != len(thinking_indexes):
+        logger.warning(
+            "Dual-thinking enrichment parse failed (got %s entries, need %s)",
+            len(os_list) if os_list is not None else '?',
+            len(thinking_indexes),
+        )
+        return
+    for index, position in enumerate(thinking_indexes):
+        os_text = (os_list[index] or '').strip()
+        if not os_text:
+            continue
+        original_reasoning = collected_steps[position].get('text') or ''
+        collected_steps[position] = {
+            'kind': 'thinking',
+            'text': os_text,
+            'raw_text': original_reasoning,
+        }
+
+
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     collected_tool_calls = []
     # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
@@ -3156,6 +3238,11 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         # 恢复旧行为——整段思考作为"思考过程"展示，不出现双视图切换器。
         character_os = thinking_splitter.total_text.strip()
         raw_reasoning = ''
+
+    # 每轮双段兜底：提示词协议只在部分轮让模型配合；主回复已流完，
+    # 用一次轻量调用给每轮补写角色心声（原始推理保留该轮原文）。
+    if any(step.get('kind') == 'thinking' for step in collected_steps):
+        _refine_steps_with_character_osis(character, collected_steps, runtime_config)
 
     ai_message = _finalize_ai_response(
         chat_session=chat_session,
