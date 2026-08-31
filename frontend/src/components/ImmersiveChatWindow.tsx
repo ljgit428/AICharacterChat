@@ -1326,45 +1326,115 @@ function AgentSteps({
   isStreaming: boolean;
 }) {
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
-  // 双段思维链：默认看角色心声，可一键切到模型原生推理。
-  const [thinkingView, setThinkingView] = useState<'character' | 'raw'>('character');
+  // 每个思考行的双段切换状态（角色心声 / 原始推理），按行独立记忆。
+  const [thinkingViews, setThinkingViews] = useState<Record<string, 'character' | 'raw'>>({});
   const thinking = message.thinking?.trim() || '';
   const rawThinking = message.rawReasoning?.trim() || '';
   const toolCalls = message.toolCalls || [];
-  if (!thinking && !rawThinking && toolCalls.length === 0) {
+
+  // 完整 ReAct 时间线优先（思考→工具→思考→工具…→终轮思考→回复，按真实顺序）；
+  // 老消息没有 steps 时回退为 [思考, 工具…] 旧布局。
+  const reactSteps = Array.isArray(message.steps) ? message.steps : [];
+  const reactOrdered = reactSteps.length > 0;
+
+  type RowDef = {
+    key: string;
+    type: 'thinking' | 'tool';
+    title: string;
+    body: string;
+    rawBody?: string;
+    preview?: string;
+    streaming?: boolean;
+    tool?: string;
+    args?: Record<string, unknown>;
+  };
+  const rows: RowDef[] = [];
+
+  if (reactOrdered) {
+    const thinkingCount = reactSteps.filter((step) => step.kind === 'thinking' && (step.text || '').trim()).length;
+    let thinkNo = 0;
+    reactSteps.forEach((step, index) => {
+      if (step.kind === 'thinking') {
+        const text = (step.text || '').trim();
+        if (!text) {
+          return;
+        }
+        thinkNo += 1;
+        const rawText = (step.raw_text || '').trim();
+        rows.push({
+          key: `think-${index}`,
+          type: 'thinking',
+          title: thinkingCount > 1
+            ? copy.immersiveChat.thinkingRound(thinkNo)
+            : copy.immersiveChat.thinking,
+          body: text,
+          rawBody: rawText || undefined,
+          preview: thinkingCount === 1 ? text.replace(/\s+/g, ' ').slice(0, 90) : undefined,
+          streaming: isStreaming && index === reactSteps.length - 1,
+        });
+      } else {
+        const toolName = step.tool || '';
+        const args = step.arguments || {};
+        rows.push({
+          key: `tool-${index}`,
+          type: 'tool',
+          title: copy.immersiveChat.toolDefault(toolName),
+          body: Object.keys(args).length
+            ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(args, null, 2)}`
+            : '',
+          tool: toolName,
+          args,
+        });
+      }
+    });
+  } else {
+    if (thinking || rawThinking) {
+      rows.push({
+        key: 'thinking',
+        type: 'thinking',
+        title: copy.immersiveChat.thinking,
+        body: thinking || rawThinking,
+        rawBody: thinking && rawThinking ? rawThinking : undefined,
+        preview: (thinking || rawThinking).replace(/\s+/g, ' ').slice(0, 90),
+        streaming: isStreaming,
+      });
+    }
+    toolCalls.forEach((toolCall, index) => {
+      rows.push({
+        key: `tool-${index}`,
+        type: 'tool',
+        title: describeToolCall(toolCall, copy),
+        body: Object.keys(toolCall.arguments || {}).length
+          ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(toolCall.arguments, null, 2)}`
+          : '',
+        tool: toolCall.tool,
+        args: toolCall.arguments,
+      });
+    });
+  }
+
+  if (rows.length === 0) {
     return null;
   }
 
   const toggleStep = (key: string) =>
     setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const steps: Array<{ key: string; icon: React.ReactNode; title: string; body: string; rawBody?: string; preview?: string; streaming?: boolean }> = [];
-  if (thinking || rawThinking) {
-    steps.push({
-      key: 'thinking',
-      icon: <BrainCircuit className="h-3 w-3" />,
-      title: copy.immersiveChat.thinking,
-      body: thinking || rawThinking,
-      rawBody: thinking && rawThinking ? rawThinking : undefined,
-      preview: (thinking || rawThinking).replace(/\s+/g, ' ').slice(0, 90),
-      streaming: isStreaming,
-    });
-  }
-  toolCalls.forEach((toolCall, index) => {
-    steps.push({
-      key: `tool-${index}`,
-      icon: <ToolIcon tool={toolCall.tool} />,
-      title: describeToolCall(toolCall, copy),
-      body: Object.keys(toolCall.arguments || {}).length
-        ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(toolCall.arguments, null, 2)}`
-        : '',
-    });
-  });
+  const steps = rows.map((row) => ({
+    key: row.key,
+    icon: row.type === 'thinking' ? <BrainCircuit className="h-3 w-3" /> : <ToolIcon tool={row.tool || ''} />,
+    title: row.title,
+    body: row.body,
+    rawBody: row.rawBody,
+    preview: row.preview,
+    streaming: row.streaming,
+  }));
 
   return (
     <div className="space-y-0.5">
       {steps.map((step, index) => {
         const open = Boolean(openKeys[step.key]);
+        const view = thinkingViews[step.key] || 'character';
         return (
           <div key={step.key} className="relative">
             {index < steps.length - 1 && (
@@ -1400,9 +1470,9 @@ function AgentSteps({
                   <div className="mb-2 inline-flex items-center gap-0.5 rounded-lg bg-white/90 p-0.5 ring-1 ring-slate-200/80">
                     <button
                       type="button"
-                      onClick={() => setThinkingView('character')}
+                      onClick={() => setThinkingViews((prev) => ({ ...prev, [step.key]: 'character' }))}
                       className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                        thinkingView === 'character'
+                        view === 'character'
                           ? 'bg-sky-100 text-sky-700'
                           : 'text-slate-500 hover:text-slate-700'
                       }`}
@@ -1411,9 +1481,9 @@ function AgentSteps({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setThinkingView('raw')}
+                      onClick={() => setThinkingViews((prev) => ({ ...prev, [step.key]: 'raw' }))}
                       className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                        thinkingView === 'raw'
+                        view === 'raw'
                           ? 'bg-slate-900 text-white'
                           : 'text-slate-500 hover:text-slate-700'
                       }`}
@@ -1423,7 +1493,7 @@ function AgentSteps({
                   </div>
                 )}
                 <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-slate-600">
-                  {thinkingView === 'raw' && step.rawBody ? step.rawBody : step.body}
+                  {view === 'raw' && step.rawBody ? step.rawBody : step.body}
                 </p>
               </div>
             )}

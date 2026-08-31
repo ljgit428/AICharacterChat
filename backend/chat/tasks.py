@@ -1013,7 +1013,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
 
     usage_total = None
     history = list(messages)
-    for _ in range(OPENAI_LOCAL_TOOL_CALL_LIMIT):
+    for round_no in range(1, OPENAI_LOCAL_TOOL_CALL_LIMIT + 1):
         try:
             response_json = _request_openai_compatible_completion(
                 model_name=model_name,
@@ -1054,12 +1054,15 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             **({'tool_calls': tool_calls} if tool_calls else {}),
         })
 
+        # ReAct 时间线：每一轮（含中间轮）的思考都实时流出并标注轮次，
+        # 前端按"思考→工具→思考→工具…"的真实顺序渲染，不再只保留终轮思考。
+        reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
+
         if not tool_calls:
             content = _extract_text_from_content(assistant_message.get('content'))
             if content:
-                reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
                 if reasoning:
-                    yield {'type': 'thinking', 'content': reasoning}
+                    yield {'type': 'thinking', 'content': reasoning, 'round': round_no}
                 yield {'type': 'final_text', 'content': content}
                 return
             raise ValueError('OpenAI compatible API returned an empty response after tool execution')
@@ -1067,6 +1070,8 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
         if filesystem is None:
             raise ValueError('Local tool execution requires a memory filesystem context')
 
+        if reasoning:
+            yield {'type': 'thinking', 'content': reasoning, 'round': round_no}
         for tool_call in tool_calls:
             function_payload = tool_call.get('function') or {}
             tool_name = function_payload.get('name', '')
@@ -1077,7 +1082,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 tool_arguments = {}
             # 实时 yield 工具调用事件（关键改动：工具执行前就推送给前端，
             # 用户在检索过程中就能看到当前正在翻阅哪个文件）。
-            yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
+            yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments, 'round': round_no}
             tool_result = _execute_local_memory_tool(
                 filesystem,
                 tool_name=tool_name,
@@ -2637,6 +2642,7 @@ def _finalize_ai_response(
     research_context=None,
     thinking='',
     raw_reasoning='',
+    steps=None,
     tool_calls=None,
     token_usage=None,
 ):
@@ -2647,6 +2653,7 @@ def _finalize_ai_response(
         content=ai_response_text,
         thinking=thinking or '',
         raw_reasoning=raw_reasoning or '',
+        steps=steps or [],
         tool_calls=tool_calls or [],
         token_usage=token_usage or {},
         research_payload=_build_research_payload(chat_session, research_context or {}),
@@ -3083,6 +3090,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
 
     started_at = time.perf_counter()
     collected_chunks = []
+    collected_steps = []
     thinking_splitter = _DualThinkingSplitter()
     collected_usage = None
 
@@ -3108,13 +3116,26 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
             content = event.get('content') or ''
             if not content:
                 continue
+            # 全流拆分器负责实时心声透传 + 汇总 raw_reasoning（跨轮拼接）。
             for thinking_event in thinking_splitter.feed(content):
                 yield thinking_event
+            # 每轮独立拆分，得到这一轮时间线行的展示文本与原始推理。
+            round_splitter = _DualThinkingSplitter()
+            for _ in round_splitter.feed(content):
+                pass  # 本轮事件已由全流拆分器处理，这里只取结算结果。
+            round_os, round_raw = round_splitter.finalize()
+            if round_os or round_raw:
+                collected_steps.append({
+                    'kind': 'thinking',
+                    'text': round_os or round_raw,
+                    **({'raw_text': round_raw} if round_os and round_raw else {}),
+                })
             continue
         if event_type == 'tool':
             tool_name = event.get('tool') or ''
             tool_arguments = event.get('arguments') or {}
             collected_tool_calls.append({'tool': tool_name, 'arguments': tool_arguments})
+            collected_steps.append({'kind': 'tool', 'tool': tool_name, 'arguments': tool_arguments})
             yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
             continue
 
@@ -3146,6 +3167,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         research_context=research_context,
         thinking=character_os,
         raw_reasoning=raw_reasoning,
+        steps=collected_steps,
         tool_calls=collected_tool_calls,
         token_usage=collected_usage,
     )
@@ -3162,6 +3184,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         'research_payload': ai_message.research_payload,
         'thinking': ai_message.thinking,
         'raw_reasoning': ai_message.raw_reasoning,
+        'steps': ai_message.steps,
         'tool_calls': ai_message.tool_calls,
         'token_usage': ai_message.token_usage,
     }

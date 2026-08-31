@@ -66,6 +66,15 @@ export interface ToolCallInfo {
   arguments?: Record<string, unknown>;
 }
 
+/** ReAct 时间线步骤：思考（含该轮心声/原始推理）或工具调用，按真实顺序排列。 */
+export interface AgentStep {
+  kind: 'thinking' | 'tool';
+  text?: string;
+  raw_text?: string;
+  tool?: string;
+  arguments?: Record<string, unknown>;
+}
+
 export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
@@ -86,6 +95,8 @@ export interface Message {
   thinking?: string;
   /** 双段思维链协议中模型的原生推理块（RAW_REASONING），角色心声在 thinking。 */
   rawReasoning?: string;
+  /** 完整 ReAct 时间线（后端按轮记录：思考→工具→思考→…），老消息为空。 */
+  steps?: AgentStep[];
   toolCalls?: ToolCallInfo[];
   /** 后端返回的情感分段（【情感】标记解析产物），供逐句 TTS 继承语气。 */
   ttsSegments?: Array<{ emotion?: string; text?: string | null }>;

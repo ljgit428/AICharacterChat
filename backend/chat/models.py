@@ -561,6 +561,14 @@ class Message(models.Model):
             "kept separate from the in-character inner monologue in `thinking`."
         ),
     )
+    steps = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Full ReAct timeline: ordered [{kind: thinking, text, raw_text} | "
+            "{kind: tool, tool, arguments}] steps across every loop round."
+        ),
+    )
     tool_calls = models.JSONField(
         default=list,
         blank=True,

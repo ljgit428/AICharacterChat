@@ -44,6 +44,7 @@ function normalizeStreamMessage(apiMessage: {
   timestamp: string;
   thinking?: string | null;
   raw_reasoning?: string | null;
+  steps?: Array<{ kind: 'thinking' | 'tool'; text?: string; raw_text?: string; tool?: string; arguments?: Record<string, unknown> }>;
   tool_calls?: Array<{
     tool: string;
     arguments?: Record<string, unknown>;
@@ -87,6 +88,7 @@ function normalizeStreamMessage(apiMessage: {
     timestamp: apiMessage.timestamp,
     thinking: apiMessage.thinking || '',
     rawReasoning: apiMessage.raw_reasoning || '',
+    steps: apiMessage.steps || undefined,
     toolCalls: (apiMessage.tool_calls || [])
       .filter((call) => call?.tool)
       .map((call) => ({
@@ -857,6 +859,7 @@ export default function ChatInterface({
               senderType: 'character',
               thinking: event.thinking || '',
               rawReasoning: event.raw_reasoning || '',
+              steps: Array.isArray(event.steps) ? event.steps : undefined,
               toolCalls: (event.tool_calls || [])
                 .filter((call) => call?.tool)
                 .map((call) => ({
