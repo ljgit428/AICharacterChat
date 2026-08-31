@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Check, ChevronRight, Cpu, Download, Expand, FileText, FolderTree, ImageIcon, Loader2, Music, Plus, Search, Sparkles, Square, Terminal, Video, Volume2, X } from 'lucide-react';
+import { BrainCircuit, Check, ChevronRight, Cpu, Download, Expand, FileText, FolderTree, ImageIcon, Loader2, Music, Plus, Search, Square, Terminal, Video, Volume2, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { SpeechSegment, buildSpeechSegments } from '@/utils/replySegments';
@@ -482,21 +482,6 @@ export default function ImmersiveChatWindow({
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(243,247,250,0.95))] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
-      <div className="border-b border-slate-200/70 bg-[radial-gradient(circle_at_top,#ffffff_0%,#f7fafc_100%)] px-5 py-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-400">{copy.immersiveChat.conversationSpace}</p>
-            <h3 className="mt-1 text-base font-semibold text-slate-900">
-              {character ? copy.immersiveChat.talkingWith(character.name) : copy.immersiveChat.preparingConversation}
-            </h3>
-          </div>
-          <div className="inline-flex items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">
-            <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-            <span>{messages.length > 0 ? copy.immersiveChat.messagesCount(messages.length) : copy.immersiveChat.immersiveMode}</span>
-          </div>
-        </div>
-      </div>
-
       <div className="relative min-h-0 flex-1">
         {turns.length > 1 && (
           <div className="absolute left-1 top-1/2 z-10 hidden -translate-y-1/2 flex-col items-center gap-1 md:flex">
