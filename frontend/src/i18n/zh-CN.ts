@@ -298,6 +298,8 @@ export const zhCNMessages = {
     lastChatAt: "最近对话",
     noChatYet: "还没有对话",
     online: "在线",
+    deleteSession: "删除会话",
+    confirmDeleteSession: (name: string) => `确定要删除与「${name}」的最近对话吗？此操作不可撤销。`,
     noCharacters: "暂无角色，先去话题界面创建一个吧",
     noResults: "没有匹配的角色",
     noResultsHint: "换个关键词，或清除搜索查看全部角色。",

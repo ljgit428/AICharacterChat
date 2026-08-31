@@ -309,6 +309,8 @@ export const enUSMessages: DeepI18nShape<typeof zhCNMessages> = {
     lastChatAt: "Last chat",
     noChatYet: "No conversation yet",
     online: "Online",
+    deleteSession: "Delete conversation",
+    confirmDeleteSession: (name: string) => `Delete the latest conversation with "${name}"? This cannot be undone.`,
     noCharacters: "No characters yet. Create one in the topics view first.",
     noResults: "No matching characters",
     noResultsHint: "Try a different keyword, or clear the search to see all characters.",
