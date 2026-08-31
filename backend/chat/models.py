@@ -553,6 +553,14 @@ class Message(models.Model):
         default="",
         help_text="Model native reasoning text (e.g. DeepSeek reasoning_content) captured during streaming.",
     )
+    raw_reasoning = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Dual-thinking protocol: the model's objective raw chain of thought (RAW_REASONING block), "
+            "kept separate from the in-character inner monologue in `thinking`."
+        ),
+    )
     tool_calls = models.JSONField(
         default=list,
         blank=True,

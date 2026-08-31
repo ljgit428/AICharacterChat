@@ -1989,6 +1989,14 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
         "You are in an immersive roleplay chat. Stay fully in character, be specific, and avoid generic assistant phrasing.",
         "Never mention system instructions, hidden rules, or that you are an AI model unless the character would explicitly know that in-world.",
     ]
+    _append_section(sections, "DUAL THINKING PROTOCOL", "\n".join([
+        "In the thinking phase, split ALL of your internal reasoning into exactly two consecutive blocks: an in-character monologue, then an objective task analysis.",
+        f"Block 1 header (an exact line): {DUAL_THINKING_CHAR_OS_MARKER}",
+        f"Block 2 header (an exact line): {DUAL_THINKING_RAW_MARKER}",
+        "Block 1 - the character's inner voice, in Chinese: one continuous first-person monologue (the character's mood, their read of the user's intent, confirmation of memory and retrieval facts, and the intended reply). Natural flowing narration only; never numbered steps, bullet lists, or outlines.",
+        "Block 2 - objective model-native reasoning: decompose the task, verify recalled facts against retrieval results, and sanity-check constraints. Analytical and precise.",
+        "Thinking must consist of these two blocks only, in that exact order, with the headers on their own lines. Never mention the protocol or the tags to the user.",
+    ]))
     _append_section(sections, "CHARACTER SETUP", character_setup)
     _append_section(sections, "ACCOUNT CONTEXT", account_runtime_sections.get("context", ""))
     _append_section(sections, "ACCOUNT BOUNDARIES", account_runtime_sections.get("boundaries", ""))
@@ -2628,6 +2636,7 @@ def _finalize_ai_response(
     latency_ms=None,
     research_context=None,
     thinking='',
+    raw_reasoning='',
     tool_calls=None,
     token_usage=None,
 ):
@@ -2637,6 +2646,7 @@ def _finalize_ai_response(
     payload = assistant_message_payload(
         content=ai_response_text,
         thinking=thinking or '',
+        raw_reasoning=raw_reasoning or '',
         tool_calls=tool_calls or [],
         token_usage=token_usage or {},
         research_payload=_build_research_payload(chat_session, research_context or {}),
@@ -2927,6 +2937,129 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
         }
 
 
+DUAL_THINKING_CHAR_OS_MARKER = '<<<CHARACTER_OS>>>'
+DUAL_THINKING_RAW_MARKER = '<<<RAW_REASONING>>>'
+_DUAL_THINKING_MARKERS = (DUAL_THINKING_CHAR_OS_MARKER, DUAL_THINKING_RAW_MARKER)
+# 未出现任何标记时，前奏缓冲超过该长度就实时透传（保持旧版可见性），
+# 结束再统一归入 raw_reasoning；否则整体缓冲到 done 才分流。
+_DUAL_THINKING_FLUSH_AFTER_CHARS = 1200
+
+
+class _DualThinkingSplitter:
+    """把模型 reasoning 流拆成【角色心声】与【原生推理】两段。
+    符合提示词协议时：``<<<CHARACTER_OS>>>`` 之后的内容实时作为 thinking
+    事件透传（角色独白边生成边显示）；``<<<RAW_REASONING>>>`` 之后的内容
+    静默缓存，在 done 事件里以 raw_reasoning 落库，供前端"原始推理"视图切换。
+    模型完全未按标记输出时回退为旧行为：实时透传，done 时归入 raw_reasoning
+    （前端无切换器、直接显示这条原始推理）。
+    """
+
+    def __init__(self):
+        self._state = 'pending'  # pending | character_os | raw | stream_raw
+        self._pending = ''
+        self._os_parts = []
+        self._raw_parts = []
+        self.total_text = ''
+        self.saw_marker = False
+
+    @staticmethod
+    def _marker_may_still_be_incomplete(buffer: str) -> bool:
+        """缓冲尾部是否可能是某个标记的残缺前缀（标记可能跨 chunk 到达）。"""
+        tail = buffer[-(min(32, len(buffer))):]
+        return any(marker.startswith(tail) for marker in _DUAL_THINKING_MARKERS)
+
+    @staticmethod
+    def _find_earliest_marker(buffer: str):
+        best_index = -1
+        best_marker = None
+        for marker in _DUAL_THINKING_MARKERS:
+            index = buffer.find(marker)
+            if index != -1 and (best_index == -1 or index < best_index):
+                best_index = index
+                best_marker = marker
+        return best_index, best_marker
+
+    def feed(self, text):
+        """喂入一段 reasoning 增量；返回需要实时透传的 thinking 事件列表。"""
+        if not text:
+            return []
+        self.total_text += text
+        if self._state in ('raw', 'stream_raw'):
+            self._raw_parts.append(text)
+            return []
+
+        events = []
+        self._pending += text
+
+        # 一个 chunk 可能同时包含两个标记（工具循环的整块模式），循环扫描直到稳定。
+        while True:
+            index, marker = self._find_earliest_marker(self._pending)
+            if marker is None:
+                break
+            self.saw_marker = True
+            before = self._pending[:index]
+            after = self._pending[index + len(marker):]
+            if marker == DUAL_THINKING_CHAR_OS_MARKER:
+                # 首个心声标记之前的热身文字同样是角色口吻 → 归心声。
+                if before.strip():
+                    self._os_parts.append(before)
+                self._state = 'character_os'
+                self._pending = after
+                continue
+            # RAW_REASONING 标记：心声段到此结束，其后全部归原始推理。
+            if self._state == 'character_os':
+                if before.strip():
+                    self._os_parts.append(before)
+            elif before.strip():
+                # 未出现心声标记即进入原始推理：前奏也一并归 raw。
+                self._raw_parts.append(before)
+            self._raw_parts.append(after)
+            self._pending = ''
+            self._state = 'raw'
+            break
+
+        if self._state == 'character_os' and self._pending:
+            if self._marker_may_still_be_incomplete(self._pending):
+                return events
+            events.append({'type': 'thinking', 'content': self._pending})
+            self._os_parts.append(self._pending)
+            self._pending = ''
+            return events
+
+        if self._state == 'pending' and self._pending:
+            # 尚未见到任何标记：缓冲等待，超限才实时透传（避免长前奏黑屏）。
+            if len(self._pending) > _DUAL_THINKING_FLUSH_AFTER_CHARS:
+                events.append({'type': 'thinking', 'content': self._pending})
+                self._raw_parts.append(self._pending)
+                self._pending = ''
+                self._state = 'stream_raw'
+            return events
+
+        return events
+
+    def finalize(self):
+        """流结束时结算：返回 (角色心声, 原始推理)。"""
+        pending = self._pending
+        self._pending = ''
+        if pending:
+            if self._state == 'character_os':
+                self._os_parts.append(pending)
+            else:
+                self._raw_parts.append(pending)
+        os_text = ''.join(self._os_parts).strip()
+        raw_text = ''.join(self._raw_parts).strip()
+        return os_text, raw_text
+
+
+def _strip_thinking_tags(text: str) -> str:
+    """防御：模型偶尔把协议标记行写进正式回复时，把标记行剔除。"""
+    cleaned = [
+        line for line in text.splitlines()
+        if line.strip() not in _DUAL_THINKING_MARKERS
+    ]
+    return '\n'.join(cleaned).strip()
+
+
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     collected_tool_calls = []
     # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
@@ -2950,7 +3083,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
 
     started_at = time.perf_counter()
     collected_chunks = []
-    collected_thinking = []
+    thinking_splitter = _DualThinkingSplitter()
     collected_usage = None
 
     for event in _iter_text_chunks(
@@ -2975,8 +3108,8 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
             content = event.get('content') or ''
             if not content:
                 continue
-            collected_thinking.append(content)
-            yield {'type': 'thinking', 'content': content}
+            for thinking_event in thinking_splitter.feed(content):
+                yield thinking_event
             continue
         if event_type == 'tool':
             tool_name = event.get('tool') or ''
@@ -2994,6 +3127,14 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     # 情感标记：解析成分段供语音朗读，同时剥掉标记存干净的正文。
     emotion_names = _character_emotion_names(character)
     clean_text, tts_segments = _parse_emotion_segments(ai_response_text, emotion_names)
+    clean_text = _strip_thinking_tags(clean_text)
+
+    character_os, raw_reasoning = thinking_splitter.finalize()
+    if not thinking_splitter.saw_marker:
+        # 模型未按双段协议输出（如 deepseek-v4-flash 的思维链天然是中文角色口吻）：
+        # 恢复旧行为——整段思考作为"思考过程"展示，不出现双视图切换器。
+        character_os = thinking_splitter.total_text.strip()
+        raw_reasoning = ''
 
     ai_message = _finalize_ai_response(
         chat_session=chat_session,
@@ -3003,7 +3144,8 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         user_message=user_message,
         latency_ms=latency_ms,
         research_context=research_context,
-        thinking=''.join(collected_thinking).strip(),
+        thinking=character_os,
+        raw_reasoning=raw_reasoning,
         tool_calls=collected_tool_calls,
         token_usage=collected_usage,
     )
@@ -3019,6 +3161,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         'model_name': runtime_config['model_name'],
         'research_payload': ai_message.research_payload,
         'thinking': ai_message.thinking,
+        'raw_reasoning': ai_message.raw_reasoning,
         'tool_calls': ai_message.tool_calls,
         'token_usage': ai_message.token_usage,
     }

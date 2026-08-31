@@ -40,6 +40,7 @@ def assistant_message_payload(
     *,
     content: str,
     thinking: str = '',
+    raw_reasoning: str = '',
     tool_calls: list | None = None,
     token_usage: dict | None = None,
     research_payload: dict | None = None,
@@ -49,6 +50,7 @@ def assistant_message_payload(
     return {
         'content': content or '',
         'thinking': thinking or '',
+        'raw_reasoning': raw_reasoning or '',
         'tool_calls': tool_calls or [],
         'token_usage': token_usage or {},
         'research_payload': research_payload or {},

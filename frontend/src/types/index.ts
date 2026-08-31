@@ -84,6 +84,8 @@ export interface Message {
   senderType?: 'user' | 'character' | 'system';
   researchPayload?: ResearchPayload | null;
   thinking?: string;
+  /** 双段思维链协议中模型的原生推理块（RAW_REASONING），角色心声在 thinking。 */
+  rawReasoning?: string;
   toolCalls?: ToolCallInfo[];
   /** 后端返回的情感分段（【情感】标记解析产物），供逐句 TTS 继承语气。 */
   ttsSegments?: Array<{ emotion?: string; text?: string | null }>;

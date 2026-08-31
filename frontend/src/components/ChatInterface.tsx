@@ -43,6 +43,7 @@ function normalizeStreamMessage(apiMessage: {
   role: 'user' | 'assistant';
   timestamp: string;
   thinking?: string | null;
+  raw_reasoning?: string | null;
   tool_calls?: Array<{
     tool: string;
     arguments?: Record<string, unknown>;
@@ -85,6 +86,7 @@ function normalizeStreamMessage(apiMessage: {
     role: apiMessage.role,
     timestamp: apiMessage.timestamp,
     thinking: apiMessage.thinking || '',
+    rawReasoning: apiMessage.raw_reasoning || '',
     toolCalls: (apiMessage.tool_calls || [])
       .filter((call) => call?.tool)
       .map((call) => ({
@@ -854,6 +856,7 @@ export default function ChatInterface({
               senderAvatarUrl: character.avatarUrl,
               senderType: 'character',
               thinking: event.thinking || '',
+              rawReasoning: event.raw_reasoning || '',
               toolCalls: (event.tool_calls || [])
                 .filter((call) => call?.tool)
                 .map((call) => ({

@@ -376,6 +376,8 @@ export const zhCNMessages = {
     system: "系统",
     character: "角色",
     thinking: "思考过程",
+    thinkingCharacterOs: "角色心声",
+    thinkingRawCoT: "原始推理",
     playAllSentences: "连贯播放",
     stopSpeech: "停止朗读",
     sentencesCount: (count: number) => `共 ${count} 句`,

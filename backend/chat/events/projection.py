@@ -77,6 +77,7 @@ def _project_assistant_message(event: ChatEvent) -> Message:
         character=event.character,
         research_payload=data.get('research_payload') or {},
         thinking=data.get('thinking') or '',
+        raw_reasoning=data.get('raw_reasoning') or '',
         tool_calls=data.get('tool_calls') or [],
         token_usage=data.get('token_usage') or {},
     )

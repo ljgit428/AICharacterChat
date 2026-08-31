@@ -78,6 +78,7 @@ interface ApiMessage {
     error?: string;
   };
   thinking?: string | null;
+  raw_reasoning?: string | null;
   tool_calls?: Array<{
     tool: string;
     arguments?: Record<string, unknown>;
@@ -251,6 +252,7 @@ function normalizeMessage(apiData: ApiMessage): Message {
     senderType: apiData.sender_type,
     researchPayload: normalizeResearchPayload(apiData.research_payload),
     thinking: apiData.thinking || '',
+    rawReasoning: apiData.raw_reasoning || '',
     toolCalls: normalizeToolCalls(apiData.tool_calls),
     tokenUsage: normalizeTokenUsage(apiData.token_usage),
     attachments,
@@ -721,6 +723,7 @@ interface StreamDoneEvent {
   model_name?: string;
   research_payload?: ApiMessage['research_payload'];
   thinking?: string | null;
+  raw_reasoning?: string | null;
   tool_calls?: ApiMessage['tool_calls'];
   token_usage?: ApiMessage['token_usage'];
 }

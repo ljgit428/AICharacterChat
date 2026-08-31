@@ -1326,23 +1326,27 @@ function AgentSteps({
   isStreaming: boolean;
 }) {
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
+  // 双段思维链：默认看角色心声，可一键切到模型原生推理。
+  const [thinkingView, setThinkingView] = useState<'character' | 'raw'>('character');
   const thinking = message.thinking?.trim() || '';
+  const rawThinking = message.rawReasoning?.trim() || '';
   const toolCalls = message.toolCalls || [];
-  if (!thinking && toolCalls.length === 0) {
+  if (!thinking && !rawThinking && toolCalls.length === 0) {
     return null;
   }
 
   const toggleStep = (key: string) =>
     setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const steps: Array<{ key: string; icon: React.ReactNode; title: string; body: string; preview?: string; streaming?: boolean }> = [];
-  if (thinking) {
+  const steps: Array<{ key: string; icon: React.ReactNode; title: string; body: string; rawBody?: string; preview?: string; streaming?: boolean }> = [];
+  if (thinking || rawThinking) {
     steps.push({
       key: 'thinking',
       icon: <BrainCircuit className="h-3 w-3" />,
       title: copy.immersiveChat.thinking,
-      body: thinking,
-      preview: thinking.replace(/\s+/g, ' ').slice(0, 90),
+      body: thinking || rawThinking,
+      rawBody: thinking && rawThinking ? rawThinking : undefined,
+      preview: (thinking || rawThinking).replace(/\s+/g, ' ').slice(0, 90),
       streaming: isStreaming,
     });
   }
@@ -1392,7 +1396,35 @@ function AgentSteps({
             )}
             {open && step.body && (
               <div className="mb-1.5 ml-8 mr-1 rounded-lg border border-slate-200/70 bg-slate-50/80 p-2.5">
-                <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-slate-600">{step.body}</p>
+                {step.rawBody && (
+                  <div className="mb-2 inline-flex items-center gap-0.5 rounded-lg bg-white/90 p-0.5 ring-1 ring-slate-200/80">
+                    <button
+                      type="button"
+                      onClick={() => setThinkingView('character')}
+                      className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                        thinkingView === 'character'
+                          ? 'bg-sky-100 text-sky-700'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      {copy.immersiveChat.thinkingCharacterOs}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setThinkingView('raw')}
+                      className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                        thinkingView === 'raw'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      {copy.immersiveChat.thinkingRawCoT}
+                    </button>
+                  </div>
+                )}
+                <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-slate-600">
+                  {thinkingView === 'raw' && step.rawBody ? step.rawBody : step.body}
+                </p>
               </div>
             )}
           </div>
