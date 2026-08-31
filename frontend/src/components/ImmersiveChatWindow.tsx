@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
+import { AgentStep, Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
 import { BrainCircuit, Check, ChevronRight, Cpu, Download, Expand, FileText, FolderTree, ImageIcon, Loader2, Music, Plus, Search, Square, Terminal, Video, Volume2, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
@@ -1298,8 +1298,8 @@ function SentenceSpan({
 }
 
 /**
- * ZCode 式 agent 步骤时间线：思考过程与工具调用各自一行，点击展开详情，
- * 行间用竖线连接。流式思考中图标呼吸闪烁。
+ * ZCode 式 agent 步骤时间线：思考（思考 · 第 N 轮，双模式角色心声/原始推理）与
+ * 工具调用各自一行，点击展开详情，行间用竖线连接。流式思考中图标呼吸闪烁。
  */
 function AgentSteps({
   message,
@@ -1317,10 +1317,29 @@ function AgentSteps({
   const rawThinking = message.rawReasoning?.trim() || '';
   const toolCalls = message.toolCalls || [];
 
-  // 完整 ReAct 时间线优先（思考→工具→思考→工具…→终轮思考→回复，按真实顺序）；
-  // 老消息没有 steps 时回退为 [思考, 工具…] 旧布局。
+  // 完整 ReAct 时间线优先（思考→工具→思考→工具…→终轮思考→回复，按真实顺序）。
+  // 老消息没有 steps（v0.1.4 前历史）时，把消息级 thinking/rawReasoning 与工具调用
+  // 合成为"一次思考 + 工具序列"，与最新时间线共用同一渲染与【角色心声 | 原始推理】双模式。
   const reactSteps = Array.isArray(message.steps) ? message.steps : [];
-  const reactOrdered = reactSteps.length > 0;
+  const legacySteps: AgentStep[] = [];
+  if ((thinking || rawThinking) || toolCalls.length > 0) {
+    if (thinking || rawThinking) {
+      legacySteps.push({
+        kind: 'thinking',
+        text: thinking || rawThinking,
+        raw_text: thinking ? rawThinking : undefined,
+      });
+    }
+    toolCalls.forEach((toolCall) => {
+      legacySteps.push({
+        kind: 'tool',
+        tool: toolCall.tool,
+        arguments: toolCall.arguments || {},
+      });
+    });
+  }
+  const orderedSteps = reactSteps.length > 0 ? reactSteps : legacySteps;
+  const reactOrdered = orderedSteps.length > 0;
 
   type RowDef = {
     key: string;
@@ -1336,9 +1355,9 @@ function AgentSteps({
   const rows: RowDef[] = [];
 
   if (reactOrdered) {
-    const thinkingCount = reactSteps.filter((step) => step.kind === 'thinking' && (step.text || '').trim()).length;
+    const thinkingCount = orderedSteps.filter((step) => step.kind === 'thinking' && (step.text || '').trim()).length;
     let thinkNo = 0;
-    reactSteps.forEach((step, index) => {
+    orderedSteps.forEach((step, index) => {
       if (step.kind === 'thinking') {
         const text = (step.text || '').trim();
         if (!text) {
@@ -1349,13 +1368,11 @@ function AgentSteps({
         rows.push({
           key: `think-${index}`,
           type: 'thinking',
-          title: thinkingCount > 1
-            ? copy.immersiveChat.thinkingRound(thinkNo)
-            : copy.immersiveChat.thinking,
+          title: copy.immersiveChat.thinkingRound(thinkNo),
           body: text,
           rawBody: rawText || undefined,
           preview: thinkingCount === 1 ? text.replace(/\s+/g, ' ').slice(0, 90) : undefined,
-          streaming: isStreaming && index === reactSteps.length - 1,
+          streaming: isStreaming && index === orderedSteps.length - 1,
         });
       } else {
         const toolName = step.tool || '';
@@ -1363,7 +1380,7 @@ function AgentSteps({
         rows.push({
           key: `tool-${index}`,
           type: 'tool',
-          title: copy.immersiveChat.toolDefault(toolName),
+          title: describeToolCall({ tool: toolName, arguments: args }, copy),
           body: Object.keys(args).length
             ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(args, null, 2)}`
             : '',
@@ -1371,30 +1388,6 @@ function AgentSteps({
           args,
         });
       }
-    });
-  } else {
-    if (thinking || rawThinking) {
-      rows.push({
-        key: 'thinking',
-        type: 'thinking',
-        title: copy.immersiveChat.thinking,
-        body: thinking || rawThinking,
-        rawBody: thinking && rawThinking ? rawThinking : undefined,
-        preview: (thinking || rawThinking).replace(/\s+/g, ' ').slice(0, 90),
-        streaming: isStreaming,
-      });
-    }
-    toolCalls.forEach((toolCall, index) => {
-      rows.push({
-        key: `tool-${index}`,
-        type: 'tool',
-        title: describeToolCall(toolCall, copy),
-        body: Object.keys(toolCall.arguments || {}).length
-          ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(toolCall.arguments, null, 2)}`
-          : '',
-        tool: toolCall.tool,
-        args: toolCall.arguments,
-      });
     });
   }
 
