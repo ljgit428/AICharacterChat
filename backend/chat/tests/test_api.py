@@ -51,6 +51,7 @@ from chat.tasks import (
     _build_system_prompt,
     _build_anthropic_request_messages,
     _convert_tools_to_anthropic,
+    _DualThinkingSplitter,
     _generate_anthropic_response,
     _generate_openai_compatible_response,
     _get_or_upload_generativeai_file,
@@ -1681,34 +1682,39 @@ class PromptMemoryTests(TestCase):
         self.assertEqual(runtime_config['provider'], 'gemini')
         self.assertEqual(tools, [])
 
-    @patch('chat.tasks._request_openai_compatible_completion')
-    def test_openai_tool_loop_reads_memory_files_before_final_answer(self, mock_request_openai_completion):
-        mock_request_openai_completion.side_effect = [
-            {
-                'choices': [{
-                    'message': {
-                        'role': 'assistant',
-                        'content': '',
-                        'tool_calls': [{
-                                'id': 'call_1',
-                                'type': 'function',
-                                'function': {
-                                    'name': 'read_memory_file',
-                                    'arguments': json.dumps({'path': 'schema/soul.md'}),
-                                },
-                            }],
-                    },
-                }],
-            },
-            {
-                'choices': [{
-                    'message': {
-                        'role': 'assistant',
-                        'content': 'I still call you Gatewalker.',
-                    },
-                }],
-            },
-        ]
+    @patch('chat.tasks._stream_openai_compatible_round')
+    def test_openai_tool_loop_reads_memory_files_before_final_answer(self, mock_round):
+        def round_one(**kwargs):
+            yield {
+                'type': 'round_finished',
+                'assistant_message': {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [{
+                        'id': 'call_1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'read_memory_file',
+                            'arguments': json.dumps({'path': 'schema/soul.md'}),
+                        },
+                    }],
+                },
+                'usage': None,
+            }
+
+        def round_two(**kwargs):
+            yield {
+                'type': 'round_finished',
+                'assistant_message': {'role': 'assistant', 'content': 'I still call you Gatewalker.'},
+                'usage': None,
+            }
+
+        def _round_factory(**kwargs):
+            calls = _round_factory.calls
+            _round_factory.calls += 1
+            return (round_one if calls == 0 else round_two)(**kwargs)
+        _round_factory.calls = 0
+        mock_round.side_effect = _round_factory
 
         result = ''.join(
             e.get('content') or '' for e in _generate_openai_compatible_response(
@@ -1723,26 +1729,23 @@ class PromptMemoryTests(TestCase):
         )
 
         self.assertEqual(result, 'I still call you Gatewalker.')
-        self.assertEqual(mock_request_openai_completion.call_count, 2)
+        self.assertEqual(mock_round.call_count, 2)
 
-        second_call_messages = mock_request_openai_completion.call_args_list[1].kwargs['messages']
+        second_call_messages = mock_round.call_args_list[1].kwargs['messages']
         tool_messages = [message for message in second_call_messages if message.get('role') == 'tool']
         self.assertEqual(len(tool_messages), 1)
         self.assertIn('Gatewalker', tool_messages[0]['content'])
 
     @patch('chat.tasks._request_openai_compatible_completion')
-    def test_openai_tool_loop_falls_back_when_backend_rejects_tools(self, mock_request_openai_completion):
-        mock_request_openai_completion.side_effect = [
-            requests.HTTPError('Unsupported parameter: tools'),
-            {
-                'choices': [{
-                    'message': {
-                        'role': 'assistant',
-                        'content': 'Fallback answer without tools.',
-                    },
-                }],
-            },
-        ]
+    @patch('chat.tasks._stream_openai_compatible_round')
+    def test_openai_tool_loop_falls_back_when_backend_rejects_tools(self, mock_round, mock_request_openai_completion):
+        def _round_rejects_tools(**kwargs):
+            raise requests.HTTPError('Unsupported parameter: tools')
+
+        mock_round.side_effect = _round_rejects_tools
+        mock_request_openai_completion.return_value = {
+            'choices': [{'message': {'role': 'assistant', 'content': 'Fallback answer without tools.'}}],
+        }
 
         result = ''.join(
             e.get('content') or '' for e in _generate_openai_compatible_response(
@@ -1757,8 +1760,8 @@ class PromptMemoryTests(TestCase):
         )
 
         self.assertEqual(result, 'Fallback answer without tools.')
-        self.assertEqual(mock_request_openai_completion.call_count, 2)
-        self.assertNotIn('tools', mock_request_openai_completion.call_args_list[1].kwargs)
+        self.assertEqual(mock_request_openai_completion.call_count, 1)
+        self.assertNotIn('tools', mock_request_openai_completion.call_args_list[0].kwargs)
 
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
@@ -3305,14 +3308,18 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks._iter_text_chunks')
     @patch('chat.tasks.build_research_context')
     @patch('chat.tasks._get_user_profile')
+    @patch('chat.tasks._refine_steps_with_character_osis')
+    @patch('chat.tasks._collect_memory_actions', return_value=[])
     def test_stream_ai_response_surfaces_tool_and_thinking_events_and_persists(
-        self, mock_profile, mock_research, mock_chunks, mock_config, mock_build
+        self, mock_memory_actions, mock_refine, mock_profile, mock_research, mock_chunks, mock_config, mock_build
     ):
         mock_profile.return_value = self._profile(default_enable_web_search=False)
         mock_research.return_value = {'query': '', 'items': [], 'provider': '', 'error': ''}
         mock_chunks.return_value = iter([
             {'type': 'tool', 'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
-            {'type': 'thinking', 'content': 'Let me check what happened last time...'},
+            # 双段思考协议：CHARACTER_OS 标记之后的内容才实时透传为 thinking 事件
+            # （不带标记的模型推理会被拆分器缓冲，只有 done 时给出）。
+            {'type': 'thinking', 'content': '<<<CHARACTER_OS>>>Let me check what happened last time...'},
             {'type': 'delta', 'content': 'Hello'},
             {'type': 'delta', 'content': ' there'},
         ])
@@ -3354,8 +3361,10 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks.build_research_context')
     @patch('chat.tasks._build_search_query')
     @patch('chat.tasks._get_user_profile')
+    @patch('chat.tasks._refine_steps_with_character_osis')
+    @patch('chat.tasks._collect_memory_actions', return_value=[])
     def test_stream_ai_response_emits_web_search_tool_event(
-        self, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
+        self, mock_memory_actions, mock_refine, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
     ):
         mock_profile.return_value = self._profile(default_enable_web_search=True)
         mock_query.return_value = 'best ramen in tokyo'
@@ -3385,23 +3394,42 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks._execute_local_memory_tool', return_value={'entries': []})
     @patch('chat.tasks.requests.post')
     def test_openai_tool_loop_emits_tool_and_thinking_events(self, mock_post, _mock_tool):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.side_effect = [
-            {'choices': [{'message': {
-                'role': 'assistant',
-                'content': None,
-                'tool_calls': [{
-                    'id': 'call_1',
-                    'type': 'function',
-                    'function': {'name': 'list_memory_files', 'arguments': '{"path_prefix": "wiki"}'},
-                }],
-            }}]},
-            {'choices': [{'message': {
-                'role': 'assistant',
-                'content': 'All set.',
-                'reasoning_content': 'I should check the wiki first.',
-            }}]},
+        """工具循环已流式化（v0.1.6）：思考增量在轮内实时流出，
+        工具调用分片累积，轮末产出最终文本。"""
+
+        def _sse_response(chunks):
+            class FakeResponse:
+                status_code = 200
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def raise_for_status(self):
+                    pass
+
+                def close(self):
+                    pass
+
+                def iter_lines(self, decode_unicode=True):
+                    for chunk in chunks:
+                        yield 'data: ' + json.dumps(chunk)
+
+            return FakeResponse()
+
+        round1 = [
+            {'choices': [{'delta': {'role': 'assistant', 'reasoning_content': '先看看记忆里有什么'}, 'finish_reason': None}]},
+            {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_1', 'type': 'function', 'function': {'name': 'list_memory_files', 'arguments': ''}}]}, 'finish_reason': None}]},
+            {'choices': [{'delta': {'tool_calls': [{'index': 0, 'function': {'arguments': '{"path_prefix": "wiki"}'}}]}, 'finish_reason': 'tool_calls'}]},
         ]
+        round2 = [
+            {'choices': [{'delta': {'reasoning_content': '那现在直接回答'}, 'finish_reason': None}]},
+            # 模型把双段协议/think 标签写进正文：final_text 必须已被清洗。
+            {'choices': [{'delta': {'content': '<<<RAW_REASONING>>>提炼一下…<think>All set.</think>'}, 'finish_reason': 'stop'}]},
+        ]
+        mock_post.side_effect = [_sse_response(round1), _sse_response(round2)]
 
         result = _generate_openai_compatible_response(
             model_name='deepseek-r1',
@@ -3411,15 +3439,18 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
             tools=_build_memory_tool_specs(),
             filesystem=object(),
         )
-        # The function is now a generator: collect final_text + tool/thinking events.
+        # The function is a generator: collect final_text + tool/thinking events.
         events = list(result)
         final_text = ''.join(e.get('content') or '' for e in events if e.get('type') == 'final_text')
         tool_events = [e for e in events if e.get('type') in ('tool', 'thinking')]
 
         self.assertEqual(final_text, 'All set.')
+        # 思考按轮实时流（每段一个事件、标注轮次），工具调用紧随其后，
+        # 前端按"思考→工具→思考"顺序渲染。
         self.assertEqual(tool_events, [
-            {'type': 'tool', 'tool': 'list_memory_files', 'arguments': {'path_prefix': 'wiki'}},
-            {'type': 'thinking', 'content': 'I should check the wiki first.'},
+            {'type': 'thinking', 'content': '先看看记忆里有什么', 'round': 1},
+            {'type': 'tool', 'tool': 'list_memory_files', 'arguments': {'path_prefix': 'wiki'}, 'round': 1},
+            {'type': 'thinking', 'content': '那现在直接回答', 'round': 2},
         ])
 
     @patch('chat.views.stream_ai_response')
@@ -3461,6 +3492,132 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(payload_lines[1]['tool'], 'web_search')
         self.assertEqual(payload_lines[2]['content'], 'hmm')
         self.assertEqual(payload_lines[4]['thinking'], 'hmm')
+
+
+@override_settings(DEV_AUTO_LOGIN_ENABLED=False)
+class DualThinkingSplitterTests(TestCase):
+    """思考流的实时可见性：无标记推理必须立即实时透传（v0.1.6 修复）。"""
+
+    def test_unmarked_reasoning_streams_live_and_lands_in_thinking(self):
+        splitter = _DualThinkingSplitter()
+
+        first_events = splitter.feed('这段推理立刻可见')
+        self.assertEqual(first_events, [{'type': 'thinking', 'content': '这段推理立刻可见'}])
+        # 后续增量也要持续透传（旧实现只透传一次，之后又恢复静默）。
+        second_events = splitter.feed('第二段也实时')
+        self.assertEqual(second_events, [{'type': 'thinking', 'content': '第二段也实时'}])
+
+        self.assertFalse(splitter.saw_marker)
+        # 无标记回退 = "思考过程"而非原始推理（raw 只收 RAW 标记之后的内容）。
+        os_text, raw_text = splitter.finalize()
+        self.assertEqual(os_text, '这段推理立刻可见第二段也实时')
+        self.assertEqual(raw_text, '')
+
+    def test_incomplete_marker_prefix_waits_for_next_chunk(self):
+        splitter = _DualThinkingSplitter()
+
+        # '<<<CHAR' 可能是残缺标记前缀：按住不透传。
+        self.assertEqual(splitter.feed('<<<CHAR'), [])
+        # 下一 chunk 补齐标记：标记后的文本作为角色心声实时透传。
+        events = splitter.feed('ACTER_OS>>>我的独白')
+        self.assertEqual(events, [{'type': 'thinking', 'content': '我的独白'}])
+        self.assertTrue(splitter.saw_marker)
+        os_text, raw_text = splitter.finalize()
+        self.assertEqual(os_text, '我的独白')
+        self.assertEqual(raw_text, '')
+
+    def test_raw_reasoning_after_marker_stays_quiet_until_done(self):
+        splitter = _DualThinkingSplitter()
+
+        splitter.feed('<<<CHARACTER_OS>>>心声')
+        # RAW 标记后的内容按双段协议静默缓存（原始推理只在 done 提供）。
+        self.assertEqual(splitter.feed('<<<RAW_REASONING>>>硬核推理'), [])
+        self.assertTrue(splitter.saw_marker)
+        os_text, raw_text = splitter.finalize()
+        self.assertEqual(os_text, '心声')
+        self.assertEqual(raw_text, '硬核推理')
+
+    def test_multiround_raw_reasoning_only_collects_raw_marker_sections(self):
+        """工具循环每轮重复协议标记：raw_reasoning 只收 RAW 标记之后的内容，
+        第二轮的角色心声不得混入原始推理（v0.1.6 用户实测）。"""
+        splitter = _DualThinkingSplitter()
+
+        splitter.feed('<<<CHARACTER_OS>>>第一轮心声')
+        splitter.feed('<<<RAW_REASONING>>>第一轮硬核')
+        # 第二轮再次回到心声协议：旧实现在这里会把"第二轮心声"错误归入 raw。
+        self.assertEqual(splitter.feed('<<<CHARACTER_OS>>>第二轮心声'),
+                         [{'type': 'thinking', 'content': '第二轮心声'}])
+        splitter.feed('<<<RAW_REASONING>>>第二轮硬核')
+
+        os_text, raw_text = splitter.finalize()
+        self.assertEqual(os_text, '第一轮心声第二轮心声')
+        self.assertEqual(raw_text, '第一轮硬核第二轮硬核')
+
+    def test_prefix_before_first_raw_marker_is_not_raw(self):
+        """未出现过心声标记时，RAW 标记之前的前奏不得计入 raw_reasoning。"""
+        splitter = _DualThinkingSplitter()
+
+        splitter.feed('前奏文字')
+        splitter.feed('<<<RAW_REASONING>>>真正的原始推理')
+
+        os_text, raw_text = splitter.finalize()
+        self.assertEqual(raw_text, '真正的原始推理')
+
+    def test_extract_real_reply_text_strips_protocol_pollution(self):
+        """deepseek-v4-flash 实测会把双段协议与 <think> 标签写进正文：清洗后
+        只剩真正的回复（v0.1.6）。"""
+        from chat.tasks import _extract_real_reply_text
+
+        polluted = (
+            '<<<CHARACTER_OS>>>\n\n'
+            '哇，是老师了！这是角色心声段落……\n\n'
+            '<<<RAW_REASONING>>>\n\n'
+            '用户用简单的中文打招呼……直接以活泼的语气回应即可。\n'
+            '<think>真正的回答来了！</think>'
+        )
+        self.assertEqual(_extract_real_reply_text(polluted), '真正的回答来了！')
+
+    def test_extract_real_reply_text_keeps_normal_replies(self):
+        from chat.tasks import _extract_real_reply_text
+
+        normal = '你好呀，老师！今天也要元气满满唷～'
+        self.assertEqual(_extract_real_reply_text(normal), normal)
+
+    def test_extract_real_reply_text_trims_self_instruction_prefix(self):
+        """模型把查询计划+自我指令写进正文（无标记）：只保留正式回复
+        （v0.1.6 用户实测"系统思考混入角色输出"）。"""
+        from chat.tasks import _extract_real_reply_text
+
+        polluted = (
+            '用户问爱丽丝什么时候获得阿比舒机甲套装。\n\n'
+            '- 阿比舒机甲是在最终决战前夕获得的（资料确认）\n\n'
+            '回答时用爱丽丝的游戏玩家口吻，讲述获得机甲的故事。\n\n'
+            '咦，老师还记得阿比舒的事呀！'
+        )
+        self.assertEqual(_extract_real_reply_text(polluted), '咦，老师还记得阿比舒的事呀！')
+
+    def test_extract_real_reply_text_trims_fused_single_line_plan(self):
+        """计划段被模型用单换行熔成一整段（无 \n\n 段落边界）时，
+        按句子粒度仍能切到正确的"自我指令"句。"""
+        from chat.tasks import _extract_real_reply_text
+
+        polluted = (
+            '用户问爱丽丝何时获得阿比舒机甲。'
+            '已检索记忆文件确认相关信息：阿比舒是最终章前由莉央会长给予的机甲装备。'
+            '回复需以游戏术语、第三人称、拟声词，保持天真活泼又带点认真回忆的口吻。'
+            '核心要点：大战前夕获得、来自莉央会长、训练摔伤被背回、对机甲有怜惜之情。'
+            '\n\n嗯，想好了。'
+            '爱丽丝要用"读档回忆"的方式来回答老师，把阿比舒那天的故事讲得又认真又温暖。'
+            '\n\n确认回复方案：以爱丽丝视角叙述获得阿比舒的时间点。'
+            '\n\n保持角色语气，第三人称+拟声词，游戏术语包装。'
+            '\n\n最终回复：组织语言，以游戏存档比喻开场，讲述阿比舒获得经历，语气真挚活泼。'
+            '\n\n哇，老师还记得阿比舒呀！'
+            '爱丽丝好高兴唷！'
+        )
+        self.assertEqual(
+            _extract_real_reply_text(polluted),
+            '哇，老师还记得阿比舒呀！爱丽丝好高兴唷！',
+        )
 
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)

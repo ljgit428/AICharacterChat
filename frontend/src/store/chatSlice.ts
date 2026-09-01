@@ -1,6 +1,6 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { current } from 'immer';
-import { ChatState, Message, Character, ChatSession, ToolCallInfo } from '@/types';
+import { ChatState, Message, Character, ChatSession, ToolCallInfo, AgentStep } from '@/types';
 
 // 会话消息缓存持久化到 sessionStorage：页面刷新、话题/聊天模式切换、
 // 重进聊天页后第一帧仍直接渲染历史钉底，切换过程无感知。SSR 环境跳过。
@@ -72,6 +72,14 @@ const chatSlice = createSlice({
         target.toolCalls = [...(target.toolCalls || []), action.payload.toolCall];
       }
     },
+    // 流式时间线：按"思考 · 第 N 轮 / 工具"逐步更新占位消息的 steps，
+    // 生成过程中就能按序看到一个个步骤（不再只有 done 之后才出现完整列表）。
+    updateMessageSteps: (state, action: PayloadAction<{ id: string; steps: AgentStep[] }>) => {
+      const target = state.messages.find((message) => message.id === action.payload.id);
+      if (target) {
+        target.steps = action.payload.steps;
+      }
+    },
     removeMessage: (state, action: PayloadAction<string>) => {
       state.messages = state.messages.filter((message) => message.id !== action.payload);
     },
@@ -126,6 +134,7 @@ export const {
   appendToMessage,
   appendToMessageThinking,
   appendToMessageToolCall,
+  updateMessageSteps,
   removeMessage,
   replaceMessage,
   setLoading,

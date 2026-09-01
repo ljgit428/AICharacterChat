@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile } from '@/types';
+import { RootState, Message, ChatSession, ModelConfig, ModelRoleAssignments, MessageAttachment, UserProfile, AgentStep } from '@/types';
 import { useDispatch, useSelector } from 'react-redux';
-import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, removeMessage, replaceMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
+import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat, setChatSession, upsertMessage, appendToMessage, appendToMessageThinking, appendToMessageToolCall, updateMessageSteps, removeMessage, replaceMessage, updateChatSession, cacheMessages } from '@/store/chatSlice';
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import CameraPanel from '@/components/CameraPanel';
 import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
@@ -768,6 +768,27 @@ export default function ChatInterface({
     dispatch(setLoading(true));
     dispatch(setError(null));
 
+    // 流式时间线（v0.1.6）：按轮构建"思考 · 第 N 轮 / 工具"步骤——生成过程中
+    // 按序逐步出现在占位消息上，不再只有 done 之后才看到完整列表。
+    const streamSteps: AgentStep[] = [];
+    let streamThinkingRound: number | null = null;
+    let streamThinkingParts: string[] = [];
+    const buildLiveSteps = (): AgentStep[] => {
+      const result = [...streamSteps];
+      const pending = streamThinkingParts.join('');
+      if (pending.trim()) {
+        result.push({ kind: 'thinking', text: pending });
+      }
+      return result;
+    };
+    const flushLiveThinking = () => {
+      const text = streamThinkingParts.join('').trim();
+      if (text) {
+        streamSteps.push({ kind: 'thinking', text });
+      }
+      streamThinkingParts = [];
+    };
+
     const controller = new AbortController();
     abortRef.current = controller;
     let streamedContent = '';
@@ -824,6 +845,15 @@ export default function ChatInterface({
           }
 
           if (event.type === 'thinking') {
+            // 轮次切换时把上一轮思考结算成一条"思考 · 第 N 轮"步骤；
+            // 同轮增量追加到当前步骤文本（随时间增长）。
+            const roundKey = (event as StreamMessageEvent & { round?: number }).round ?? null;
+            if (roundKey !== streamThinkingRound) {
+              flushLiveThinking();
+              streamThinkingRound = roundKey;
+            }
+            streamThinkingParts.push(event.content);
+            dispatch(updateMessageSteps({ id: streamingAssistantId, steps: buildLiveSteps() }));
             dispatch(appendToMessageThinking({
               id: streamingAssistantId,
               content: event.content,
@@ -832,6 +862,10 @@ export default function ChatInterface({
           }
 
           if (event.type === 'tool') {
+            // 工具步骤紧随本轮思考之后，保证"思考→工具→思考→工具…"的顺序。
+            flushLiveThinking();
+            streamSteps.push({ kind: 'tool', tool: event.tool, arguments: event.arguments || {} });
+            dispatch(updateMessageSteps({ id: streamingAssistantId, steps: buildLiveSteps() }));
             dispatch(appendToMessageToolCall({
               id: streamingAssistantId,
               toolCall: {

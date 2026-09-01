@@ -12,6 +12,7 @@ import google.generativeai as genai
 import requests
 from celery import shared_task
 from django.conf import settings
+from django.db import transaction
 
 from .attachments import (
     MAX_VIDEO_ATTACHMENT_BYTES,
@@ -34,6 +35,7 @@ from .models import (
     AttachmentKind,
     Character,
     CharacterMemoryItem,
+    ChatEvent,
     ChatEventType,
     ChatSession,
     LocationPrecision,
@@ -1015,14 +1017,25 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
     history = list(messages)
     for round_no in range(1, OPENAI_LOCAL_TOOL_CALL_LIMIT + 1):
         try:
-            response_json = _request_openai_compatible_completion(
+            assistant_message = None
+            round_usage = None
+            for event in _stream_openai_compatible_round(
                 model_name=model_name,
                 api_key=api_key,
                 messages=history,
                 base_url=base_url,
                 tools=tools,
                 timeout=timeout,
-            )
+            ):
+                if event.get('type') == 'thinking':
+                    # 思考增量在轮内实时透传（v0.1.6），不再等整轮完成。
+                    yield {'type': 'thinking', 'content': event['content'], 'round': round_no}
+                elif event.get('type') == 'round_finished':
+                    assistant_message = event['assistant_message']
+                    round_usage = event['usage']
+            if round_usage:
+                usage_total = _merge_token_usage(usage_total, round_usage)
+                yield {'type': 'usage', 'usage': dict(usage_total)}
         except Exception as exc:
             if _should_retry_without_tools(exc):
                 logger.warning(
@@ -1039,14 +1052,10 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 usage = _extract_token_usage(response_json.get('usage'))
                 if usage:
                     yield {'type': 'usage', 'usage': usage}
-                yield {'type': 'final_text', 'content': _extract_openai_content(response_json)}
+                yield {'type': 'final_text', 'content': _extract_real_reply_text(_extract_openai_content(response_json))}
                 return
             raise
-        usage = _extract_token_usage(response_json.get('usage'))
-        if usage:
-            usage_total = _merge_token_usage(usage_total, usage)
-            yield {'type': 'usage', 'usage': dict(usage_total)}
-        assistant_message = _extract_openai_assistant_message(response_json)
+
         tool_calls = assistant_message.get('tool_calls') or []
         history.append({
             'role': 'assistant',
@@ -1054,15 +1063,9 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
             **({'tool_calls': tool_calls} if tool_calls else {}),
         })
 
-        # ReAct 时间线：每一轮（含中间轮）的思考都实时流出并标注轮次，
-        # 前端按"思考→工具→思考→工具…"的真实顺序渲染，不再只保留终轮思考。
-        reasoning = assistant_message.get('reasoning_content') or assistant_message.get('reasoning')
-
         if not tool_calls:
-            content = _extract_text_from_content(assistant_message.get('content'))
+            content = _extract_real_reply_text(_extract_text_from_content(assistant_message.get('content')))
             if content:
-                if reasoning:
-                    yield {'type': 'thinking', 'content': reasoning, 'round': round_no}
                 yield {'type': 'final_text', 'content': content}
                 return
             raise ValueError('OpenAI compatible API returned an empty response after tool execution')
@@ -1070,8 +1073,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
         if filesystem is None:
             raise ValueError('Local tool execution requires a memory filesystem context')
 
-        if reasoning:
-            yield {'type': 'thinking', 'content': reasoning, 'round': round_no}
+        # 轮内已实时透传思考增量，这里只发工具调用事件并执行。
         for tool_call in tool_calls:
             function_payload = tool_call.get('function') or {}
             tool_name = function_payload.get('name', '')
@@ -1125,6 +1127,9 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
         # many vendors still attach usage to the final chunk by default.
         response.close()
         response = _open_stream(include_usage=False)
+    # SSE 响应头不一定带 charset；requests 会回退成 ISO-8859-1，中文全变乱码
+    # （v0.1.6 实测）。流式必须显式按 UTF-8 解码。
+    response.encoding = 'utf-8'
     try:
         response.raise_for_status()
 
@@ -1169,6 +1174,113 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
             text = _extract_text_from_content(content)
             if text:
                 yield {'type': 'delta', 'content': text}
+    finally:
+        response.close()
+
+
+def _stream_openai_compatible_round(model_name, api_key, messages, base_url, tools=None, timeout=None):
+    """流式执行一次 openai-compatible 工具轮补全（事件生成器）。
+
+    思考（reasoning_content / reasoning）在到达时**实时**产出
+    ``{'type': 'thinking', 'content': ...}``——工具循环不再等整轮完成才拿到
+    思考（v0.1.6：原非流式实现要等一轮全部生成完，事件一次性到达，用户看到
+    "思考最后一股脑出现"）。工具调用的流式增量（name/arguments 分片）就地
+    累积；轮结束时产出 ``{'type': 'round_finished', 'assistant_message': ...,
+    'usage': {...}}`` 由调用方继续 ReAct 循环。
+    """
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    def _open_stream(include_usage):
+        payload = {
+            'model': model_name,
+            'messages': messages,
+            'stream': True,
+        }
+        if include_usage:
+            payload['stream_options'] = {'include_usage': True}
+        if tools:
+            payload['tools'] = tools
+        return requests.post(
+            _build_openai_endpoint(base_url),
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=timeout or 90,
+        )
+
+    response = _open_stream(include_usage=True)
+    if response.status_code == 400:
+        # Older gateways reject unknown body params; retry without the flag.
+        response.close()
+        response = _open_stream(include_usage=False)
+    # SSE 响应头不一定带 charset；requests 默认 ISO-8859-1 会把中文解成乱码，
+    # 必须显式按 UTF-8 解码（v0.1.6 实测）。
+    response.encoding = 'utf-8'
+    try:
+        response.raise_for_status()
+        content_parts = []
+        reasoning_parts = []
+        tool_call_buffers: dict[int, dict] = {}
+        usage = None
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if line.startswith('data:'):
+                line = line[5:].strip()
+            if line == '[DONE]':
+                break
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            chunk_usage = _extract_token_usage(data.get('usage'))
+            if chunk_usage:
+                usage = _merge_token_usage(usage, chunk_usage)
+
+            for choice in data.get('choices') or []:
+                delta = choice.get('delta') or {}
+                reasoning = delta.get('reasoning_content') or delta.get('reasoning')
+                if isinstance(reasoning, str) and reasoning:
+                    reasoning_parts.append(reasoning)
+                    yield {'type': 'thinking', 'content': reasoning}
+                content = delta.get('content')
+                if isinstance(content, str) and content:
+                    content_parts.append(content)
+                else:
+                    text = _extract_text_from_content(content)
+                    if text:
+                        content_parts.append(text)
+                for tool_call in delta.get('tool_calls') or []:
+                    index = tool_call.get('index', 0)
+                    buffer = tool_call_buffers.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+                    if tool_call.get('id'):
+                        buffer['id'] = tool_call['id']
+                    function = tool_call.get('function') or {}
+                    if function.get('name'):
+                        buffer['name'] += function['name']
+                    if function.get('arguments'):
+                        buffer['arguments'] += function['arguments']
+
+        assistant_message = {
+            'role': 'assistant',
+            'content': ''.join(content_parts),
+            'reasoning_content': ''.join(reasoning_parts),
+        }
+        executed_tool_calls = [
+            {
+                'id': buffer['id'],
+                'type': 'function',
+                'function': {'name': buffer['name'], 'arguments': buffer['arguments']},
+            }
+            for index, buffer in sorted(tool_call_buffers.items())
+            if buffer['name']
+        ]
+        if executed_tool_calls:
+            assistant_message['tool_calls'] = executed_tool_calls
+        yield {'type': 'round_finished', 'assistant_message': assistant_message, 'usage': usage}
     finally:
         response.close()
 
@@ -1419,6 +1531,8 @@ def _stream_anthropic_response(model_name, api_key, messages, base_url):
         timeout=90,
     ) as response:
         response.raise_for_status()
+        # SSE 响应头不一定带 charset；显式按 UTF-8 解码，避免中文乱码。
+        response.encoding = 'utf-8'
 
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line:
@@ -2656,10 +2770,13 @@ def _finalize_ai_response(
     steps=None,
     tool_calls=None,
     token_usage=None,
+    reply_draft=None,
 ):
     # Event-sourced history: the assistant reply is appended as an
     # ``assistant/message`` event; the Message row is its write-through
-    # projection (events.projection.project_event).
+    # projection (events.projection.project_event). When a streaming draft
+    # exists (incremental persistence), the same event/row is updated in
+    # place — the turn started life as an empty 'streaming' row.
     payload = assistant_message_payload(
         content=ai_response_text,
         thinking=thinking or '',
@@ -2669,13 +2786,18 @@ def _finalize_ai_response(
         token_usage=token_usage or {},
         research_payload=_build_research_payload(chat_session, research_context or {}),
         latency_ms=latency_ms,
+        status='',
     )
-    _event, ai_message = EventStore.append(
-        chat_session,
-        ChatEventType.ASSISTANT_MESSAGE,
-        payload,
-        character=character,
-    )
+    if reply_draft is not None:
+        reply_draft.sync(**payload)
+        ai_message = reply_draft.message
+    else:
+        _event, ai_message = EventStore.append(
+            chat_session,
+            ChatEventType.ASSISTANT_MESSAGE,
+            payload,
+            character=character,
+        )
 
     update_fields = ['updated_at']
     if latency_ms is not None:
@@ -2958,9 +3080,7 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
 DUAL_THINKING_CHAR_OS_MARKER = '<<<CHARACTER_OS>>>'
 DUAL_THINKING_RAW_MARKER = '<<<RAW_REASONING>>>'
 _DUAL_THINKING_MARKERS = (DUAL_THINKING_CHAR_OS_MARKER, DUAL_THINKING_RAW_MARKER)
-# 未出现任何标记时，前奏缓冲超过该长度就实时透传（保持旧版可见性），
-# 结束再统一归入 raw_reasoning；否则整体缓冲到 done 才分流。
-_DUAL_THINKING_FLUSH_AFTER_CHARS = 1200
+_NO_ROUND_SENTINEL = object()
 
 
 class _DualThinkingSplitter:
@@ -2998,18 +3118,22 @@ class _DualThinkingSplitter:
         return best_index, best_marker
 
     def feed(self, text):
-        """喂入一段 reasoning 增量；返回需要实时透传的 thinking 事件列表。"""
+        """喂入一段 reasoning 增量；返回需要实时透传的 thinking 事件列表。
+
+        状态机（v0.1.6 修正）：工具循环的每一轮都可能重复出现
+        ``<<<CHARACTER_OS>>>`` / ``<<<RAW_REASONING>>>`` 标记，所以标记扫描对
+        所有状态统一执行——旧实现在见到第一个 RAW 标记后把后续整段永远归入
+        raw，第二轮的角色心声会被错误算进 raw_reasoning。
+
+        归档规则（与前端展示口径一致）：raw_reasoning 只收 ``<<<RAW_REASONING>>>``
+        标记之后的内容；其余（心声段、未标记前奏、无标记回退）都归 thinking。
+        """
         if not text:
             return []
         self.total_text += text
-        if self._state in ('raw', 'stream_raw'):
-            self._raw_parts.append(text)
-            return []
-
-        events = []
         self._pending += text
+        events = []
 
-        # 一个 chunk 可能同时包含两个标记（工具循环的整块模式），循环扫描直到稳定。
         while True:
             index, marker = self._find_earliest_marker(self._pending)
             if marker is None:
@@ -3017,21 +3141,34 @@ class _DualThinkingSplitter:
             self.saw_marker = True
             before = self._pending[:index]
             after = self._pending[index + len(marker):]
+
             if marker == DUAL_THINKING_CHAR_OS_MARKER:
-                # 首个心声标记之前的热身文字同样是角色口吻 → 归心声。
+                # 新一轮的角色心声（或等待中出现的心声标记）：标记前的内容按
+                # 当前状态归档——raw 状态下是上一轮原始推理的尾部，仍归 raw；
+                # stream_raw/等待状态是角色口吻或已流出的回退文本，归心声。
                 if before.strip():
-                    self._os_parts.append(before)
+                    if self._state == 'raw':
+                        self._raw_parts.append(before)
+                    else:
+                        self._os_parts.append(before)
+                        if self._state == 'stream_raw':
+                            events.append({'type': 'thinking', 'content': before})
                 self._state = 'character_os'
                 self._pending = after
                 continue
-            # RAW_REASONING 标记：心声段到此结束，其后全部归原始推理。
-            if self._state == 'character_os':
-                if before.strip():
+
+            # RAW_REASONING 标记：标记之后的内容归原始推理（静默），
+            # 直到下一轮心声标记出现。未出现过心声标记时的前奏不入 raw
+            # （只收 RAW 标记之后的内容）。
+            if before.strip():
+                if self._state == 'raw':
+                    self._raw_parts.append(before)
+                else:
                     self._os_parts.append(before)
-            elif before.strip():
-                # 未出现心声标记即进入原始推理：前奏也一并归 raw。
-                self._raw_parts.append(before)
-            self._raw_parts.append(after)
+                    if self._state != 'character_os':
+                        events.append({'type': 'thinking', 'content': before})
+            if after.strip():
+                self._raw_parts.append(after)
             self._pending = ''
             self._state = 'raw'
             break
@@ -3044,13 +3181,27 @@ class _DualThinkingSplitter:
             self._pending = ''
             return events
 
+        if self._state == 'stream_raw' and self._pending:
+            # 无标记回退：全部推理实时透传（旧实现只透传一次，之后恢复静默）；
+            # 若尾部出现协议标记，上面的扫描会重新分流。回退文本归心声
+            # （raw_reasoning 只收 RAW 标记之后的内容）。
+            if self._marker_may_still_be_incomplete(self._pending):
+                return events
+            events.append({'type': 'thinking', 'content': self._pending})
+            self._os_parts.append(self._pending)
+            self._pending = ''
+            return events
+
         if self._state == 'pending' and self._pending:
-            # 尚未见到任何标记：缓冲等待，超限才实时透传（避免长前奏黑屏）。
-            if len(self._pending) > _DUAL_THINKING_FLUSH_AFTER_CHARS:
-                events.append({'type': 'thinking', 'content': self._pending})
-                self._raw_parts.append(self._pending)
-                self._pending = ''
-                self._state = 'stream_raw'
+            # 尚未见到任何标记：尾部可能是残缺标记时按住（等下一 chunk 补齐），
+            # 否则立刻实时透传——旧实现缓冲 1200 字符且只透传一次，之后又恢复
+            # 静默，短推理在生成期间完全不可见（v0.1.6 实测"一股脑输出"）。
+            if self._marker_may_still_be_incomplete(self._pending):
+                return events
+            events.append({'type': 'thinking', 'content': self._pending})
+            self._os_parts.append(self._pending)
+            self._pending = ''
+            self._state = 'stream_raw'
             return events
 
         return events
@@ -3060,10 +3211,13 @@ class _DualThinkingSplitter:
         pending = self._pending
         self._pending = ''
         if pending:
-            if self._state == 'character_os':
-                self._os_parts.append(pending)
-            else:
+            if self._state == 'raw':
+                # pending 在 raw 状态剩余 = RAW 段尾部。
                 self._raw_parts.append(pending)
+            else:
+                # character_os / pending / stream_raw 的残余都是心声口径
+                # （raw_reasoning 只收 RAW 标记之后的内容）。
+                self._os_parts.append(pending)
         os_text = ''.join(self._os_parts).strip()
         raw_text = ''.join(self._raw_parts).strip()
         return os_text, raw_text
@@ -3076,6 +3230,66 @@ def _strip_thinking_tags(text: str) -> str:
         if line.strip() not in _DUAL_THINKING_MARKERS
     ]
     return '\n'.join(cleaned).strip()
+
+
+def _extract_real_reply_text(text: str) -> str:
+    """从被协议污染的正文中提取真正的回复文本（v0.1.6）。
+
+    deepseek-v4-flash（b.ai）实测会把整段双段协议写进 content 而不是
+    reasoning 流：正文形如：
+
+        <<<CHARACTER_OS>>>\n\n<角色心声>\n\n<<<RAW_REASONING>>>\n\n<原始推理>\n
+        <think>真正的回复……</think>……
+
+    处理顺序：RAW 标记之前的一切（角色心声段落）丢弃；``<think>`` 之前
+    的原始推理段落丢弃；去掉 ``</think>`` 闭合标签；再剔除残余的孤立标记行，
+    最后裁掉"自我指令"前缀段（模型在正文末尾先写一句"回答时用XX口吻……"
+    再给正式回复）。无任何协议痕迹时原样返回（不可误伤正常回复）。
+    """
+    cleaned = (text or '').strip()
+    if not cleaned:
+        return cleaned
+
+    raw_marker_index = cleaned.find(DUAL_THINKING_RAW_MARKER)
+    if raw_marker_index != -1:
+        cleaned = cleaned[raw_marker_index + len(DUAL_THINKING_RAW_MARKER):]
+    think_start = cleaned.find('<think>')
+    if think_start != -1:
+        cleaned = cleaned[think_start + len('<think>'):]
+    cleaned = cleaned.replace('</think>', '')
+    cleaned = _strip_thinking_tags(cleaned)
+    cleaned = _trim_self_instruction_prefix(cleaned)
+
+    # 若剥离后只剩协议碎片（无实质回复），保留最终补救结果而不是空串。
+    return cleaned.strip()
+
+
+def _trim_self_instruction_prefix(text: str) -> str:
+    """裁掉正文里模型自写的"思考/指令"前缀，只保留正式回复。
+
+    deepseek-v4-flash（b.ai）实测常把计划写进正文再给回复，两种形态都有：
+    换行成段的（"回答时用爱丽丝的游戏玩家口吻……"）和**用单换行熔成一整段**
+    的（多句计划连排）。按句子粒度（。！？ 切分）取**最后一处**同时含
+    "回答/回复/回应/答复" 与 "口吻/语气/方式/风格" 的句子，裁掉其之前的所有
+    内容；仅当该句之后仍有文本时生效，避免误伤正常回复。
+    """
+    body = (text or '').strip()
+    if not body:
+        return body
+    sentences = re.split(r'(?<=[。！？])', body)
+    cut_at = None
+    for index in range(len(sentences) - 1):
+        sentence = sentences[index].strip()
+        if not sentence or len(sentence) > 300:
+            continue
+        has_verb = any(keyword in sentence for keyword in ('回答', '回复', '回应', '答复'))
+        has_style = any(keyword in sentence for keyword in ('口吻', '语气', '方式', '风格'))
+        if has_verb and has_style:
+            cut_at = index
+    if cut_at is None:
+        return body
+    trimmed = ''.join(sentences[cut_at + 1:]).strip()
+    return trimmed or body
 
 
 def _parse_json_string_array(text: str):
@@ -3149,6 +3363,107 @@ def _refine_steps_with_character_osis(character, collected_steps, runtime_config
         }
 
 
+class _StreamingReplyDraft:
+    """回复草稿：增量落库的写者句柄（每出来一段就记一段）。
+
+    生成开始时先把一条 ``assistant/message`` 事件（status='streaming'）写入
+    事件日志并投影出 Message 行；之后每个 delta / thinking / tool 片段都在
+    原事件和投影行上就地更新——思考文本、工具调用与正文每生成一段就持久化
+    一段，中途断连不丢已生成内容。完成时（_finalize_ai_response）在同一
+    事件上补齐最终字段并清空 status；失败时保留已生成部分并标记
+    interrupted；完全没有内容时撤销草稿，回到旧行为（error 事件兜底）。
+
+    单写者：只有驱动本轮生成的同步线程写它。消费端断开后生成器立即被放弃、
+    不再有写入——即"断线即停、已生成内容保留"的语义，不做后台续生成。
+    """
+
+    def __init__(self, chat_session, character, event, message):
+        self.chat_session = chat_session
+        self.character = character
+        self.event = event
+        self.message = message
+
+    @classmethod
+    def create(cls, chat_session, character):
+        event, message = EventStore.append(
+            chat_session,
+            ChatEventType.ASSISTANT_MESSAGE,
+            assistant_message_payload(content='', status='streaming'),
+            character=character,
+        )
+        return cls(chat_session, character, event, message)
+
+    def sync(self, **fields):
+        """就地更新事件 payload 与投影行（字段名与 assistant_message_payload 一致）。
+
+        事件日志仍是单一真相来源：chunk 内容同时写进事件 data 与投影行，
+        rebuild_session_messages 重建的结果与 UI 所见一致。内存中的 message
+        对象同步赋值，保证 done 事件读到的是最新值。
+        """
+        data = dict(self.event.data or {})
+        data.update(fields)
+        row_values = {
+            'content': data.get('content') or '',
+            'thinking': data.get('thinking') or '',
+            'raw_reasoning': data.get('raw_reasoning') or '',
+            'steps': data.get('steps') or [],
+            'tool_calls': data.get('tool_calls') or [],
+            'token_usage': data.get('token_usage') or {},
+            'research_payload': data.get('research_payload') or {},
+            'status': data.get('status') or '',
+        }
+        with transaction.atomic():
+            ChatEvent.objects.filter(pk=self.event.pk).update(data=data)
+            Message.objects.filter(pk=self.message.pk).update(**row_values)
+        self.event.data = data
+        for field, value in row_values.items():
+            setattr(self.message, field, value)
+        return self
+
+    def discard(self):
+        """撤销草稿：生成失败且未产生任何内容时，事件与投影行一并删除。"""
+        with transaction.atomic():
+            Message.objects.filter(pk=self.message.pk).delete()
+            ChatEvent.objects.filter(pk=self.event.pk).delete()
+
+    def mark_interrupted(self, *, content='', thinking='', raw_reasoning='',
+                         steps=None, tool_calls=None):
+        return self.sync(
+            content=content,
+            thinking=thinking,
+            raw_reasoning=raw_reasoning,
+            steps=list(steps or []),
+            tool_calls=list(tool_calls or []),
+            status='interrupted',
+        )
+
+
+def _finish_draft_after_failure(draft, character, collected_chunks, thinking_splitter,
+                                collected_steps, collected_tool_calls, streamed_thinking_parts):
+    """生成失败时的草稿收尾（v0.1.6 增量落库的失败语义）。
+
+    已产生任何内容（正文/思考/工具调用）→ 保留为 interrupted，正文剥掉
+    【情感】与思考标记；什么都没产生 → 撤销草稿，视图继续发 error 事件。
+    """
+    raw_text = ''.join(collected_chunks).strip()
+    has_thinking = bool(''.join(streamed_thinking_parts).strip() or thinking_splitter.total_text.strip())
+    has_tool = bool(collected_tool_calls or collected_steps)
+    if not raw_text and not has_thinking and not has_tool:
+        draft.discard()
+        return
+    clean_text = _extract_real_reply_text(raw_text)
+    emotion_names = _character_emotion_names(character)
+    clean_text, _ = _parse_emotion_segments(clean_text, emotion_names)
+    _character_os, raw_reasoning = thinking_splitter.finalize()
+    draft.mark_interrupted(
+        content=clean_text,
+        thinking=''.join(streamed_thinking_parts).strip(),
+        raw_reasoning=raw_reasoning,
+        steps=list(collected_steps),
+        tool_calls=list(collected_tool_calls),
+    )
+
+
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     collected_tool_calls = []
     # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
@@ -3175,103 +3490,168 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     collected_steps = []
     thinking_splitter = _DualThinkingSplitter()
     collected_usage = None
+    # 增量落库：实时透传的思考文本（展示口径），与 collected_* 一起同步进草稿。
+    streamed_thinking_parts = []
 
-    for event in _iter_text_chunks(
-        runtime_config,
-        formatted_history,
-        tools=tools,
-        filesystem=CharacterMemoryFilesystem(character),
-    ):
-        event_type = event.get('type')
-        if event_type == 'usage':
-            # Internal bookkeeping event; folded into the done payload below.
-            collected_usage = _merge_token_usage(collected_usage, event.get('usage'))
-            continue
-        if event_type == 'delta':
-            content = event.get('content') or ''
-            if not content:
+    # 增量落库（v0.1.6）：先落一条 status='streaming' 的空回复，之后每个
+    # delta/thinking/tool 片段都同步写进事件日志与投影行——思考文本、工具
+    # 调用、正文"每出来一个就记录一个"，页面中途关闭也不丢已生成内容。
+    draft = _StreamingReplyDraft.create(chat_session, character)
+    finalized = False
+
+    def _persist_progress():
+        # 全量累计同步（正文/思考/工具/时间线轮次各字段当次合并写库）。
+        draft.sync(
+            content=''.join(collected_chunks),
+            thinking=''.join(streamed_thinking_parts),
+            tool_calls=list(collected_tool_calls),
+            steps=list(collected_steps),
+        )
+
+    # 时间线聚合状态：思考增量按轮归并成一条"思考 · 第 N 轮"步骤。
+    current_round_key = _NO_ROUND_SENTINEL
+    round_splitter = _DualThinkingSplitter()
+
+    def _flush_round_steps():
+        nonlocal current_round_key, round_splitter
+        if current_round_key is _NO_ROUND_SENTINEL:
+            return
+        round_os, round_raw = round_splitter.finalize()
+        if round_os or round_raw:
+            collected_steps.append({
+                'kind': 'thinking',
+                'text': round_os or round_raw,
+                **({'raw_text': round_raw} if round_os and round_raw else {}),
+            })
+            _persist_progress()
+        current_round_key = _NO_ROUND_SENTINEL
+        round_splitter = _DualThinkingSplitter()
+
+    try:
+        for event in _iter_text_chunks(
+            runtime_config,
+            formatted_history,
+            tools=tools,
+            filesystem=CharacterMemoryFilesystem(character),
+        ):
+            event_type = event.get('type')
+            if event_type == 'usage':
+                # Internal bookkeeping event; folded into the done payload below.
+                collected_usage = _merge_token_usage(collected_usage, event.get('usage'))
                 continue
-            collected_chunks.append(content)
-            yield {'type': 'delta', 'content': content}
-            continue
-        if event_type == 'thinking':
-            content = event.get('content') or ''
-            if not content:
+            if event_type == 'delta':
+                content = event.get('content') or ''
+                if not content:
+                    continue
+                collected_chunks.append(content)
+                _persist_progress()
+                yield {'type': 'delta', 'content': content}
                 continue
-            # 全流拆分器负责实时心声透传 + 汇总 raw_reasoning（跨轮拼接）。
-            for thinking_event in thinking_splitter.feed(content):
-                yield thinking_event
-            # 每轮独立拆分，得到这一轮时间线行的展示文本与原始推理。
-            round_splitter = _DualThinkingSplitter()
-            for _ in round_splitter.feed(content):
-                pass  # 本轮事件已由全流拆分器处理，这里只取结算结果。
-            round_os, round_raw = round_splitter.finalize()
-            if round_os or round_raw:
-                collected_steps.append({
-                    'kind': 'thinking',
-                    'text': round_os or round_raw,
-                    **({'raw_text': round_raw} if round_os and round_raw else {}),
-                })
-            continue
-        if event_type == 'tool':
-            tool_name = event.get('tool') or ''
-            tool_arguments = event.get('arguments') or {}
-            collected_tool_calls.append({'tool': tool_name, 'arguments': tool_arguments})
-            collected_steps.append({'kind': 'tool', 'tool': tool_name, 'arguments': tool_arguments})
-            yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
-            continue
+            if event_type == 'thinking':
+                content = event.get('content') or ''
+                if not content:
+                    continue
+                # 时间线步骤按"轮"聚合：思考增量可能被拆成多个小 chunk（工具循环
+                # 已流式化），round 键相同则共享一个轮次拆分器，轮切换/工具到达时
+                # 才结算成"思考 · 第 N 轮"一条步骤。
+                round_key = event.get('round')
+                if round_key != current_round_key:
+                    _flush_round_steps()
+                    current_round_key = round_key
+                # 全流拆分器负责实时心声透传 + 汇总 raw_reasoning（跨轮拼接）。
+                for thinking_event in thinking_splitter.feed(content):
+                    streamed_thinking_parts.append(thinking_event.get('content') or '')
+                    _persist_progress()
+                    # 携带轮次标记：前端流式时间线按"思考 · 第 N 轮"逐步构建，
+                    # 而不是等到 done 才出现完整步骤列表（v0.1.6 用户实测）。
+                    yield {**thinking_event, **({'round': round_key} if round_key is not None else {})}
+                # 轮次拆分器为本轮时间线行累积（结算在轮切换/工具到达/流结束时）。
+                for _ in round_splitter.feed(content):
+                    pass  # 本轮事件已由全流拆分器处理，这里只取结算结果。
+                continue
+            if event_type == 'tool':
+                # 先结算上一轮思考步骤，保证时间线"思考→工具→思考→工具…"顺序。
+                _flush_round_steps()
+                tool_name = event.get('tool') or ''
+                tool_arguments = event.get('arguments') or {}
+                collected_tool_calls.append({'tool': tool_name, 'arguments': tool_arguments})
+                collected_steps.append({'kind': 'tool', 'tool': tool_name, 'arguments': tool_arguments})
+                _persist_progress()
+                yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
+                continue
 
-    ai_response_text = ''.join(collected_chunks).strip()
-    latency_ms = int((time.perf_counter() - started_at) * 1000)
+        _flush_round_steps()
 
-    if not ai_response_text:
-        raise ValueError('The model returned an empty response')
+        ai_response_text = ''.join(collected_chunks).strip()
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
 
-    # 情感标记：解析成分段供语音朗读，同时剥掉标记存干净的正文。
-    emotion_names = _character_emotion_names(character)
-    clean_text, tts_segments = _parse_emotion_segments(ai_response_text, emotion_names)
-    clean_text = _strip_thinking_tags(clean_text)
+        if not ai_response_text:
+            raise ValueError('The model returned an empty response')
 
-    character_os, raw_reasoning = thinking_splitter.finalize()
-    if not thinking_splitter.saw_marker:
-        # 模型未按双段协议输出（如 deepseek-v4-flash 的思维链天然是中文角色口吻）：
-        # 恢复旧行为——整段思考作为"思考过程"展示，不出现双视图切换器。
-        character_os = thinking_splitter.total_text.strip()
-        raw_reasoning = ''
+        # 协议污染剥离（v0.1.6）：模型偶尔把 <<<CHARACTER_OS>>>/<<<RAW_REASONING>>>
+        # 段落与 <think> 标签直接写进正文，先提取真实回复再做情感解析（只朗读
+        # 真正的回复；兜底其它 provider 的同类行为）。
+        clean_text = _extract_real_reply_text(ai_response_text)
+        emotion_names = _character_emotion_names(character)
+        clean_text, tts_segments = _parse_emotion_segments(clean_text, emotion_names)
 
-    # 每轮双段兜底：提示词协议只在部分轮让模型配合；主回复已流完，
-    # 用一次轻量调用给每轮补写角色心声（原始推理保留该轮原文）。
-    if any(step.get('kind') == 'thinking' for step in collected_steps):
-        _refine_steps_with_character_osis(character, collected_steps, runtime_config)
+        character_os, raw_reasoning = thinking_splitter.finalize()
+        if not thinking_splitter.saw_marker:
+            # 模型未按双段协议输出（如 deepseek-v4-flash 的思维链天然是中文角色口吻）：
+            # 恢复旧行为——整段思考作为"思考过程"展示，不出现双视图切换器。
+            character_os = thinking_splitter.total_text.strip()
+            raw_reasoning = ''
 
-    ai_message = _finalize_ai_response(
-        chat_session=chat_session,
-        character=character,
-        runtime_config=runtime_config,
-        ai_response_text=clean_text,
-        user_message=user_message,
-        latency_ms=latency_ms,
-        research_context=research_context,
-        thinking=character_os,
-        raw_reasoning=raw_reasoning,
-        steps=collected_steps,
-        tool_calls=collected_tool_calls,
-        token_usage=collected_usage,
-    )
+        # 每轮双段兜底：提示词协议只在部分轮让模型配合；主回复已流完，
+        # 用一次轻量调用给每轮补写角色心声（原始推理保留该轮原文）。
+        if any(step.get('kind') == 'thinking' for step in collected_steps):
+            _refine_steps_with_character_osis(character, collected_steps, runtime_config)
 
-    yield {
-        'type': 'done',
-        'message_id': ai_message.id,
-        'content': ai_message.content,
-        'tts_segments': tts_segments,
-        'timestamp': ai_message.timestamp.isoformat(),
-        'latency_ms': latency_ms,
-        'provider': runtime_config['provider'],
-        'model_name': runtime_config['model_name'],
-        'research_payload': ai_message.research_payload,
-        'thinking': ai_message.thinking,
-        'raw_reasoning': ai_message.raw_reasoning,
-        'steps': ai_message.steps,
-        'tool_calls': ai_message.tool_calls,
-        'token_usage': ai_message.token_usage,
-    }
+        ai_message = _finalize_ai_response(
+            chat_session=chat_session,
+            character=character,
+            runtime_config=runtime_config,
+            ai_response_text=clean_text,
+            user_message=user_message,
+            latency_ms=latency_ms,
+            research_context=research_context,
+            thinking=character_os,
+            raw_reasoning=raw_reasoning,
+            steps=collected_steps,
+            tool_calls=collected_tool_calls,
+            token_usage=collected_usage,
+            reply_draft=draft,
+        )
+        finalized = True
+
+        yield {
+            'type': 'done',
+            'message_id': ai_message.id,
+            'content': ai_message.content,
+            'tts_segments': tts_segments,
+            'timestamp': ai_message.timestamp.isoformat(),
+            'latency_ms': latency_ms,
+            'provider': runtime_config['provider'],
+            'model_name': runtime_config['model_name'],
+            'research_payload': ai_message.research_payload,
+            'thinking': ai_message.thinking,
+            'raw_reasoning': ai_message.raw_reasoning,
+            'steps': ai_message.steps,
+            'tool_calls': ai_message.tool_calls,
+            'token_usage': ai_message.token_usage,
+        }
+    except Exception:
+        # 生成失败：保留已生成部分为 interrupted（或撤销空草稿），
+        # 视图层随后发 error 事件给前端。注意 GeneratorExit（消费端断开）
+        # 不是 Exception，不会走到这里——断线即停，已写入的内容保留。
+        if not finalized:
+            _finish_draft_after_failure(
+                draft,
+                character,
+                collected_chunks,
+                thinking_splitter,
+                collected_steps,
+                collected_tool_calls,
+                streamed_thinking_parts,
+            )
+        raise

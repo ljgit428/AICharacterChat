@@ -98,6 +98,9 @@ export interface Message {
   /** 完整 ReAct 时间线（后端按轮记录：思考→工具→思考→…），老消息为空。 */
   steps?: AgentStep[];
   toolCalls?: ToolCallInfo[];
+  /** 增量落库状态：''=已完成；streaming=生成中断（页面关闭时保留已生成部分）；
+   *  interrupted=生成失败但保留了部分内容。历史里这两个取值都渲染为"未完成"。 */
+  status?: string;
   /** 后端返回的情感分段（【情感】标记解析产物），供逐句 TTS 继承语气。 */
   ttsSegments?: Array<{ emotion?: string; text?: string | null }>;
   tokenUsage?: TokenUsage | null;

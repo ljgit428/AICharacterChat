@@ -652,6 +652,13 @@ export default function ImmersiveChatWindow({
                                       />
                                     ))}
                                 </p>
+                                {group.role !== 'user' && (message.status === 'streaming' || message.status === 'interrupted') && (
+                                  <p className="mt-1.5 text-[11px] leading-4 text-amber-600/90">
+                                    {message.status === 'interrupted'
+                                      ? copy.immersiveChat.replyInterrupted
+                                      : copy.immersiveChat.replyIncomplete}
+                                  </p>
+                                )}
                                 {group.role !== 'user' && speechSegments.length > 0 && (onPlayAll || onStopSpeech) && (
                                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
                                     <button

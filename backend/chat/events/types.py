@@ -46,8 +46,16 @@ def assistant_message_payload(
     token_usage: dict | None = None,
     research_payload: dict | None = None,
     latency_ms: int | None = None,
+    status: str = '',
 ) -> dict:
-    """Payload for an ``assistant/message`` event — the complete reply."""
+    """Payload for an ``assistant/message`` event — the complete reply.
+
+    ``status`` mirrors the incremental-persistence lifecycle of the projected
+    ``Message`` row: 'streaming' while the reply is being written chunk by
+    chunk, 'interrupted' when the turn failed but kept partial content, ''
+    (default) once completed. Storing it here keeps the event log lossless
+    for ``rebuild_session_messages``.
+    """
     return {
         'content': content or '',
         'thinking': thinking or '',
@@ -57,6 +65,7 @@ def assistant_message_payload(
         'token_usage': token_usage or {},
         'research_payload': research_payload or {},
         'latency_ms': latency_ms,
+        'status': status or '',
     }
 
 

@@ -365,6 +365,8 @@ export const zhCNMessages = {
     start: "开始",
     send: "发送",
     stop: "停止",
+    replyIncomplete: "这条回复未完成（生成已中断，保留了已生成的部分）",
+    replyInterrupted: "这条回复被中断（保留了已生成的部分）",
     pendingQueuedCount: (count: number) => `${count} 条待发送`,
     pendingAttachmentOnly: "[附件]",
     memoryGrew: (count: number) => `🧠 记忆 +${count}`,
