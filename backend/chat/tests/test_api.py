@@ -3314,7 +3314,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     ):
         mock_profile.return_value = self._profile(default_enable_web_search=False)
         mock_research.return_value = {'query': '', 'items': [], 'provider': '', 'error': ''}
-        # 新架构（v0.1.7）：主生成推理流无协议标记，纯系统思考流式输出；
+        # 新架构（v0.1.5）：主生成推理流无协议标记，纯系统思考流式输出；
         # 结尾补心声由第二次 _iter_text_chunks 调用产生。
         mock_chunks.side_effect = [
             iter([
@@ -3350,7 +3350,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(delta_text, 'Hello there')
 
         done_event = next(event for event in events if event['type'] == 'done')
-        # 角色心声由结尾补生成产生；系统思考存 raw_reasoning（v0.1.7）。
+        # 角色心声由结尾补生成产生；系统思考存 raw_reasoning（v0.1.5）。
         self.assertEqual(done_event['thinking'], '嗯，原来如此…')
         self.assertEqual(done_event['raw_reasoning'], 'Let me check what happened last time...')
         self.assertEqual(done_event['tool_calls'], [
@@ -3599,7 +3599,7 @@ class DualThinkingSplitterTests(TestCase):
 
     def test_extract_real_reply_text_strips_thinking_variant_closing_tag(self):
         """网关把 <thinking>…</thinking> 拆流时，正文可能只剩孤立的 </thinking>
-        开头（v0.1.7 用户实测：回复气泡以 </thinking> 开头）。"""
+        开头（v0.1.5 用户实测：回复气泡以 </thinking> 开头）。"""
         from chat.tasks import _extract_real_reply_text
 
         polluted = (
@@ -3641,7 +3641,7 @@ class DualThinkingSplitterTests(TestCase):
 
     def test_extract_real_reply_text_trims_plan_prefix_with_style_check(self):
         """deepseek-v4-flash 新形态：正文以「分析用户→任务→风格检查」计划段
-        开头再给正式回复（v0.1.7 用户实测），清洗后只剩角色说的话。"""
+        开头再给正式回复（v0.1.5 用户实测），清洗后只剩角色说的话。"""
         from chat.tasks import _extract_real_reply_text
 
         polluted = (

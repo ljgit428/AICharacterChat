@@ -2101,7 +2101,7 @@ def _build_stream_memory_prefetch(character, chat_session, generate_greeting=Fal
 
 
 def _dual_thinking_protocol_text():
-    """回复纯净度约束的提示文本（v0.1.7 起心声改为结尾单独生成）。
+    """回复纯净度约束的提示文本（v0.1.5 起心声改为结尾单独生成）。
 
     双段协议（模型在推理流里同时输出心声+推理）已废弃：模型经常不按协议
     输出，把计划/心声写进正文导致回复被污染。现在只约束一点——正文只能是
@@ -3322,7 +3322,7 @@ def _trim_self_instruction_prefix(text: str) -> str:
 
 
 def _trim_plan_prefix(text: str) -> str:
-    """裁掉正文开头的"计划/自我指令"段（v0.1.7 用户实测新形态）。
+    """裁掉正文开头的"计划/自我指令"段（v0.1.5 用户实测新形态）。
 
     deepseek-v4-flash 会把整段计划写进正文再给回复，且措辞不固定：
     "用户以中文向角色问好。…任务：以雪风人设回应…检查台词风格参考：
@@ -3579,7 +3579,7 @@ def _finish_draft_after_failure(draft, character, collected_chunks, thinking_spl
 def _build_character_os_prompt(character, raw_reasoning):
     """结尾补心声的提示词：把系统思考（原始推理）改写成角色第一人称心声。
 
-    模型只输出纯心声文本，不打任何标签（v0.1.7 修正：标签只在后端内部
+    模型只输出纯心声文本，不打任何标签（v0.1.5 修正：标签只在后端内部
     使用，不要求模型输出——避免标签跨 chunk 残留）。输入侧的系统思考也
     直接给原文，无需 XML 包裹（单块内容，无歧义）。
     """
@@ -3603,7 +3603,7 @@ def _build_character_os_prompt(character, raw_reasoning):
 
 
 def _generate_character_os(character, raw_reasoning, runtime_config):
-    """结尾补心声（v0.1.7 主流程）：主回复流完后，把系统思考喂给模型再生成
+    """结尾补心声（v0.1.5 主流程）：主回复流完后，把系统思考喂给模型再生成
     一遍角色心声，流式 yield 增量文本。失败由调用方兜底（心声留空，前端只
     显示系统思考）。
     """
@@ -3661,7 +3661,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         )
 
     # 时间线聚合状态：思考增量按轮归并成一条"思考 · 第 N 轮"步骤。
-    # （v0.1.7 起：主生成推理流仅实时透传，不再落成 thinking step，
+    # （v0.1.5 起：主生成推理流仅实时透传，不再落成 thinking step，
     #  collected_steps 只保留工具调用与结尾补心声。）
     current_round_key = _NO_ROUND_SENTINEL
 
@@ -3739,7 +3739,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         # 系统思考 = 主生成推理流全文（模型原生 reasoning，无协议标记）。
         raw_reasoning = _strip_reasoning_tags(thinking_splitter.total_text.strip())
 
-        # 结尾补心声（v0.1.7）：主回复已流完，把系统思考喂给模型再生成一遍
+        # 结尾补心声（v0.1.5）：主回复已流完，把系统思考喂给模型再生成一遍
         # 角色心声（character_os），流式透传 thinking 事件供前端实时展示；
         # 生成失败时留空，前端退化为只显示系统思考。
         character_os = ''
