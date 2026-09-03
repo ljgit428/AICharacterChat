@@ -26,7 +26,10 @@ pip install -r requirements.txt
 python manage.py migrate
 
 # Run API + worker (separate terminals)
-python manage.py runserver
+# 注意：聊天流式（SSE/NDJSON）依赖 ASGI 实时转发（views.stream_message），
+# 用 runserver（WSGI，Django 处理层会把流整体缓冲后一次性发出 → 思考/正文
+# 看起来"一股脑全部输出"，v0.1.5 实测），必须用 uvicorn 启动：
+python -m uvicorn prismate.asgi:application --host 0.0.0.0 --port 8000
 python -m celery -A prismate worker --loglevel=info -c 1
 
 # Frontend

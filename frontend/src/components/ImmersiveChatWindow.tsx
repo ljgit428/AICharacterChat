@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
+import { AgentStep, Character, Message, MessageAttachment, ModelConfig, RootState, ToolCallInfo } from '@/types';
 import { useSelector } from 'react-redux';
-import { BrainCircuit, Check, ChevronRight, Cpu, Download, Expand, FileText, FolderTree, ImageIcon, Loader2, Music, Plus, Search, Sparkles, Square, Terminal, Video, Volume2, X } from 'lucide-react';
+import { BrainCircuit, Check, ChevronRight, Cpu, Download, Expand, FileText, FolderTree, ImageIcon, Loader2, Music, Plus, Search, Square, Terminal, Video, Volume2, X } from 'lucide-react';
 import { I18nMessages } from '@/i18n/messages';
 import { AttachmentKind, AttachmentSupport, MediaHandlingMode, classifyAttachmentFile } from '@/utils/modelCapabilities';
 import { SpeechSegment, buildSpeechSegments } from '@/utils/replySegments';
@@ -482,21 +482,6 @@ export default function ImmersiveChatWindow({
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(243,247,250,0.95))] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
-      <div className="border-b border-slate-200/70 bg-[radial-gradient(circle_at_top,#ffffff_0%,#f7fafc_100%)] px-5 py-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-400">{copy.immersiveChat.conversationSpace}</p>
-            <h3 className="mt-1 text-base font-semibold text-slate-900">
-              {character ? copy.immersiveChat.talkingWith(character.name) : copy.immersiveChat.preparingConversation}
-            </h3>
-          </div>
-          <div className="inline-flex items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">
-            <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-            <span>{messages.length > 0 ? copy.immersiveChat.messagesCount(messages.length) : copy.immersiveChat.immersiveMode}</span>
-          </div>
-        </div>
-      </div>
-
       <div className="relative min-h-0 flex-1">
         {turns.length > 1 && (
           <div className="absolute left-1 top-1/2 z-10 hidden -translate-y-1/2 flex-col items-center gap-1 md:flex">
@@ -667,6 +652,13 @@ export default function ImmersiveChatWindow({
                                       />
                                     ))}
                                 </p>
+                                {group.role !== 'user' && (message.status === 'streaming' || message.status === 'interrupted') && (
+                                  <p className="mt-1.5 text-[11px] leading-4 text-amber-600/90">
+                                    {message.status === 'interrupted'
+                                      ? copy.immersiveChat.replyInterrupted
+                                      : copy.immersiveChat.replyIncomplete}
+                                  </p>
+                                )}
                                 {group.role !== 'user' && speechSegments.length > 0 && (onPlayAll || onStopSpeech) && (
                                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
                                     <button
@@ -1313,8 +1305,8 @@ function SentenceSpan({
 }
 
 /**
- * ZCode 式 agent 步骤时间线：思考过程与工具调用各自一行，点击展开详情，
- * 行间用竖线连接。流式思考中图标呼吸闪烁。
+ * ZCode 式 agent 步骤时间线：思考（思考 · 第 N 轮，双模式角色心声/原始推理）与
+ * 工具调用各自一行，点击展开详情，行间用竖线连接。流式思考中图标呼吸闪烁。
  */
 function AgentSteps({
   message,
@@ -1332,10 +1324,29 @@ function AgentSteps({
   const rawThinking = message.rawReasoning?.trim() || '';
   const toolCalls = message.toolCalls || [];
 
-  // 完整 ReAct 时间线优先（思考→工具→思考→工具…→终轮思考→回复，按真实顺序）；
-  // 老消息没有 steps 时回退为 [思考, 工具…] 旧布局。
+  // 完整 ReAct 时间线优先（思考→工具→思考→工具…→终轮思考→回复，按真实顺序）。
+  // 老消息没有 steps（v0.1.4 前历史）时，把消息级 thinking/rawReasoning 与工具调用
+  // 合成为"一次思考 + 工具序列"，与最新时间线共用同一渲染与【角色心声 | 原始推理】双模式。
   const reactSteps = Array.isArray(message.steps) ? message.steps : [];
-  const reactOrdered = reactSteps.length > 0;
+  const legacySteps: AgentStep[] = [];
+  if ((thinking || rawThinking) || toolCalls.length > 0) {
+    if (thinking || rawThinking) {
+      legacySteps.push({
+        kind: 'thinking',
+        text: thinking || rawThinking,
+        raw_text: thinking ? rawThinking : undefined,
+      });
+    }
+    toolCalls.forEach((toolCall) => {
+      legacySteps.push({
+        kind: 'tool',
+        tool: toolCall.tool,
+        arguments: toolCall.arguments || {},
+      });
+    });
+  }
+  const orderedSteps = reactSteps.length > 0 ? reactSteps : legacySteps;
+  const reactOrdered = orderedSteps.length > 0;
 
   type RowDef = {
     key: string;
@@ -1351,9 +1362,9 @@ function AgentSteps({
   const rows: RowDef[] = [];
 
   if (reactOrdered) {
-    const thinkingCount = reactSteps.filter((step) => step.kind === 'thinking' && (step.text || '').trim()).length;
+    const thinkingCount = orderedSteps.filter((step) => step.kind === 'thinking' && (step.text || '').trim()).length;
     let thinkNo = 0;
-    reactSteps.forEach((step, index) => {
+    orderedSteps.forEach((step, index) => {
       if (step.kind === 'thinking') {
         const text = (step.text || '').trim();
         if (!text) {
@@ -1364,13 +1375,11 @@ function AgentSteps({
         rows.push({
           key: `think-${index}`,
           type: 'thinking',
-          title: thinkingCount > 1
-            ? copy.immersiveChat.thinkingRound(thinkNo)
-            : copy.immersiveChat.thinking,
+          title: copy.immersiveChat.thinkingRound(thinkNo),
           body: text,
           rawBody: rawText || undefined,
           preview: thinkingCount === 1 ? text.replace(/\s+/g, ' ').slice(0, 90) : undefined,
-          streaming: isStreaming && index === reactSteps.length - 1,
+          streaming: isStreaming && index === orderedSteps.length - 1,
         });
       } else {
         const toolName = step.tool || '';
@@ -1378,7 +1387,7 @@ function AgentSteps({
         rows.push({
           key: `tool-${index}`,
           type: 'tool',
-          title: copy.immersiveChat.toolDefault(toolName),
+          title: describeToolCall({ tool: toolName, arguments: args }, copy),
           body: Object.keys(args).length
             ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(args, null, 2)}`
             : '',
@@ -1386,30 +1395,6 @@ function AgentSteps({
           args,
         });
       }
-    });
-  } else {
-    if (thinking || rawThinking) {
-      rows.push({
-        key: 'thinking',
-        type: 'thinking',
-        title: copy.immersiveChat.thinking,
-        body: thinking || rawThinking,
-        rawBody: thinking && rawThinking ? rawThinking : undefined,
-        preview: (thinking || rawThinking).replace(/\s+/g, ' ').slice(0, 90),
-        streaming: isStreaming,
-      });
-    }
-    toolCalls.forEach((toolCall, index) => {
-      rows.push({
-        key: `tool-${index}`,
-        type: 'tool',
-        title: describeToolCall(toolCall, copy),
-        body: Object.keys(toolCall.arguments || {}).length
-          ? `${copy.immersiveChat.stepArgs}\n${JSON.stringify(toolCall.arguments, null, 2)}`
-          : '',
-        tool: toolCall.tool,
-        args: toolCall.arguments,
-      });
     });
   }
 

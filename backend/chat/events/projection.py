@@ -81,6 +81,7 @@ def _project_assistant_message(event: ChatEvent) -> Message:
         steps=data.get('steps') or [],
         tool_calls=data.get('tool_calls') or [],
         token_usage=data.get('token_usage') or {},
+        status=data.get('status') or '',
     )
     _align_timestamp(message, event)
     message.refresh_from_db()

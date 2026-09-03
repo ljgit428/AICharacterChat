@@ -582,6 +582,19 @@ class Message(models.Model):
             "{prompt_tokens, completion_tokens, total_tokens, cached_tokens}."
         ),
     )
+    status = models.CharField(
+        max_length=16,
+        blank=True,
+        default='',
+        choices=[('streaming', 'streaming'), ('interrupted', 'interrupted')],
+        help_text=(
+            "Incremental-persistence lifecycle: 'streaming' while the reply is being "
+            "written (content/thinking/tool calls land in real time); '' once the "
+            "turn completed; 'interrupted' when the turn failed but kept its partial "
+            "content. A row still 'streaming' after the page was closed means the "
+            "stream died mid-way — the UI renders it as an incomplete reply."
+        ),
+    )
     attachment = models.FileField(upload_to='chat_attachments/', blank=True, null=True)
     attachment_name = models.CharField(max_length=255, blank=True, default="")
     attachment_mime_type = models.CharField(max_length=100, blank=True, default="")

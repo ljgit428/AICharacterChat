@@ -51,6 +51,29 @@ def _consume_streaming(response):
     return b''.join(content)
 
 
+def _consume_streaming_partial(response, max_events):
+    """Consume at most ``max_events`` NDJSON lines, then abandon the stream.
+
+    Simulates the client closing the page mid-generation: the async iterator
+    is finalized and the underlying sync generator is abandoned exactly where
+    it stands — everything persisted up to that point stays written.
+    """
+    content = response.streaming_content
+    if hasattr(content, '__aiter__'):
+        from asgiref.sync import async_to_sync
+
+        async def _collect():
+            chunks = []
+            async for chunk in content:
+                chunks.append(chunk)
+                if len(chunks) >= max_events:
+                    break
+            return b''.join(chunks)
+
+        return async_to_sync(_collect)()
+    return b''.join(content)
+
+
 class ModelConfigMixin:
     """Reusable model-config and character setup (mirrors test_api.py)."""
 
@@ -327,6 +350,132 @@ class StreamingE2ETests(ModelConfigMixin, TestCase):
         derived = EventStore.derive_messages(session, compacted=False)
         self.assertEqual(len(derived), 2)
         self.assertEqual(derived[1].content, '你好世界！')
+
+    def test_stream_message_persists_partial_reply_after_page_closes(self):
+        """增量落库 e2e：消费端中途断开（模拟关页）后，已生成的工具调用与
+        部分正文已经写库，草稿保持 streaming——重开页面能看到已生成内容。"""
+        fake_chunks = [
+            {'type': 'tool', 'tool': 'web_search', 'arguments': {'query': '今天的天气'}},
+            # 无标记的思考必须立即实时透传（旧拆分器要缓冲 1200 字符）。
+            {'type': 'thinking', 'content': '先想一下'},
+            {'type': 'delta', 'content': '你好'},
+            {'type': 'delta', 'content': '世界！'},
+            {'type': 'usage', 'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}},
+        ]
+
+        with (
+            patch('chat.tasks._iter_text_chunks', return_value=iter(fake_chunks)),
+            # The eager memory-extraction task inside _finalize_ai_response
+            # calls the non-streaming completion; keep it mocked too.
+            patch(
+                'chat.tasks._request_openai_compatible_completion',
+                return_value={'choices': [{'message': {'role': 'assistant', 'content': 'noop', 'tool_calls': []}}]},
+            ),
+        ):
+            response = self.client.post(
+                '/api/chat/stream_message/',
+                data=json.dumps({
+                    'character_id': self.character.id,
+                    'message': '测试增量落库',
+                }),
+                content_type='application/json',
+            )
+            # 只消费 session + tool + thinking 就"关页"。
+            _consume_streaming_partial(response, 3)
+
+        session = self.character.chat_sessions.first()
+        messages = list(Message.objects.filter(chat_session=session).order_by('timestamp'))
+        self.assertEqual(len(messages), 2)
+        reply = messages[1]
+        self.assertEqual(reply.role, 'assistant')
+        # 已生成部分逐段落库；未到达的 delta 与 done 不写。
+        self.assertEqual(reply.content, '')
+        self.assertEqual(reply.thinking, '先想一下')
+        self.assertEqual(reply.tool_calls, [{'tool': 'web_search', 'arguments': {'query': '今天的天气'}}])
+        # 页面关闭 = 流被放弃：没有 done/error 收尾，状态停留在 streaming。
+        self.assertEqual(reply.status, 'streaming')
+
+        # 事件日志与投影一致（单一真相来源，重建不丢部分内容）。
+        assistant_event = ChatEvent.objects.filter(
+            chat_session=session, event_type=ChatEventType.ASSISTANT_MESSAGE,
+        ).get()
+        self.assertEqual(assistant_event.data['content'], '')
+        self.assertEqual(assistant_event.data['thinking'], '先想一下')
+        self.assertEqual(assistant_event.data['status'], 'streaming')
+
+    def test_stream_message_marks_interrupted_and_keeps_partial_on_failure(self):
+        """生成中途报错：已生成部分保留为 interrupted（含思考/工具），
+        前端重开页面能看到部分内容并得到"被中断"标记。"""
+        def _chunks_that_fail(*args, **kwargs):
+            yield {'type': 'delta', 'content': '前半句'}
+            yield {'type': 'delta', 'content': '后半句'}
+            raise RuntimeError('model exploded')
+
+        with (
+            patch('chat.tasks._iter_text_chunks', _chunks_that_fail),
+            patch(
+                'chat.tasks._request_openai_compatible_completion',
+                return_value={'choices': [{'message': {'role': 'assistant', 'content': 'noop', 'tool_calls': []}}]},
+            ),
+        ):
+            response = self.client.post(
+                '/api/chat/stream_message/',
+                data=json.dumps({
+                    'character_id': self.character.id,
+                    'message': '测试失败保留',
+                }),
+                content_type='application/json',
+            )
+            lines = [
+                json.loads(line)
+                for line in _consume_streaming(response).decode('utf-8').splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([line['type'] for line in lines], ['session', 'delta', 'delta', 'error'])
+
+        session = self.character.chat_sessions.first()
+        messages = list(Message.objects.filter(chat_session=session).order_by('timestamp'))
+        self.assertEqual(len(messages), 2)
+        reply = messages[1]
+        self.assertEqual(reply.content, '前半句后半句')
+        self.assertEqual(reply.status, 'interrupted')
+
+    def test_stream_message_discards_draft_when_failure_produces_nothing(self):
+        """生成瞬间报错且没有任何内容：撤销空草稿，回到旧行为（error 事件兜底）。"""
+        def _chunks_fail_immediately(*args, **kwargs):
+            raise RuntimeError('model exploded')
+            yield  # pragma: no cover — 使该函数成为生成器
+
+        with (
+            patch('chat.tasks._iter_text_chunks', _chunks_fail_immediately),
+            patch(
+                'chat.tasks._request_openai_compatible_completion',
+                return_value={'choices': [{'message': {'role': 'assistant', 'content': 'noop', 'tool_calls': []}}]},
+            ),
+        ):
+            response = self.client.post(
+                '/api/chat/stream_message/',
+                data=json.dumps({
+                    'character_id': self.character.id,
+                    'message': '测试空失败',
+                }),
+                content_type='application/json',
+            )
+            lines = [
+                json.loads(line)
+                for line in _consume_streaming(response).decode('utf-8').splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual([line['type'] for line in lines], ['session', 'error'])
+
+        session = self.character.chat_sessions.first()
+        # 事件日志只留 session/created + user/message；投影只有一条用户消息。
+        events = list(ChatEvent.objects.filter(chat_session=session).order_by('seq'))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(Message.objects.filter(chat_session=session).count(), 1)
 
 
 # ---------------------------------------------------------------------------

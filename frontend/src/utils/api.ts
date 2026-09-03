@@ -96,6 +96,8 @@ interface ApiMessage {
     total_tokens?: number;
     cached_tokens?: number;
   } | null;
+  /** 增量落库状态：''=已完成；streaming/interrupted=未完成（见 Message.status）。 */
+  status?: string;
   file_uri?: string | null;
   file_name?: string | null;
   file_preview_url?: string | null;
@@ -263,6 +265,7 @@ function normalizeMessage(apiData: ApiMessage): Message {
     steps: Array.isArray(apiData.steps) ? apiData.steps : undefined,
     toolCalls: normalizeToolCalls(apiData.tool_calls),
     tokenUsage: normalizeTokenUsage(apiData.token_usage),
+    status: apiData.status || '',
     attachments,
     fileUri: primaryAttachment?.fileUri || apiData.file_uri || undefined,
     fileName: primaryAttachment?.fileName || apiData.file_name || undefined,
