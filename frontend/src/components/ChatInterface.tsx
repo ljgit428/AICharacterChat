@@ -768,7 +768,7 @@ export default function ChatInterface({
     dispatch(setLoading(true));
     dispatch(setError(null));
 
-    // 流式时间线（v0.1.6）：按轮构建"思考 · 第 N 轮 / 工具"步骤——生成过程中
+    // 流式时间线（v0.1.5）：按轮构建"思考 · 第 N 轮 / 工具"步骤——生成过程中
     // 按序逐步出现在占位消息上，不再只有 done 之后才看到完整列表。
     const streamSteps: AgentStep[] = [];
     let streamThinkingRound: number | null = null;

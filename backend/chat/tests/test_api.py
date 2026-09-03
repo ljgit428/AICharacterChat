@@ -3408,7 +3408,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks._execute_local_memory_tool', return_value={'entries': []})
     @patch('chat.tasks.requests.post')
     def test_openai_tool_loop_emits_tool_and_thinking_events(self, mock_post, _mock_tool):
-        """工具循环已流式化（v0.1.6）：思考增量在轮内实时流出，
+        """工具循环已流式化（v0.1.5）：思考增量在轮内实时流出，
         工具调用分片累积，轮末产出最终文本。"""
 
         def _sse_response(chunks):
@@ -3510,7 +3510,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
 
 @override_settings(DEV_AUTO_LOGIN_ENABLED=False)
 class DualThinkingSplitterTests(TestCase):
-    """思考流的实时可见性：无标记推理必须立即实时透传（v0.1.6 修复）。"""
+    """思考流的实时可见性：无标记推理必须立即实时透传（v0.1.5 修复）。"""
 
     def test_unmarked_reasoning_streams_live_and_lands_in_thinking(self):
         splitter = _DualThinkingSplitter()
@@ -3553,7 +3553,7 @@ class DualThinkingSplitterTests(TestCase):
 
     def test_multiround_raw_reasoning_only_collects_raw_marker_sections(self):
         """工具循环每轮重复协议标记：raw_reasoning 只收 RAW 标记之后的内容，
-        第二轮的角色心声不得混入原始推理（v0.1.6 用户实测）。"""
+        第二轮的角色心声不得混入原始推理（v0.1.5 用户实测）。"""
         splitter = _DualThinkingSplitter()
 
         splitter.feed('<character_os>第一轮心声')
@@ -3579,7 +3579,7 @@ class DualThinkingSplitterTests(TestCase):
 
     def test_extract_real_reply_text_strips_protocol_pollution(self):
         """deepseek-v4-flash 实测会把双段协议与  thinking 标签写进正文：清洗后
-        只剩真正的回复（v0.1.6）。"""
+        只剩真正的回复（v0.1.5）。"""
         from chat.tasks import _extract_real_reply_text
 
         polluted = (
@@ -3669,7 +3669,7 @@ class DualThinkingSplitterTests(TestCase):
 
     def test_extract_real_reply_text_trims_self_instruction_prefix(self):
         """模型把查询计划+自我指令写进正文（无标记）：只保留正式回复
-        （v0.1.6 用户实测"系统思考混入角色输出"）。"""
+        （v0.1.5 用户实测"系统思考混入角色输出"）。"""
         from chat.tasks import _extract_real_reply_text
 
         polluted = (

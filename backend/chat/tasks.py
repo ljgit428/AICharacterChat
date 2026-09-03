@@ -1028,7 +1028,7 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 timeout=timeout,
             ):
                 if event.get('type') == 'thinking':
-                    # 思考增量在轮内实时透传（v0.1.6），不再等整轮完成。
+                    # 思考增量在轮内实时透传（v0.1.5），不再等整轮完成。
                     yield {'type': 'thinking', 'content': event['content'], 'round': round_no}
                 elif event.get('type') == 'round_finished':
                     assistant_message = event['assistant_message']
@@ -1128,7 +1128,7 @@ def _stream_openai_compatible_response(model_name, api_key, messages, base_url):
         response.close()
         response = _open_stream(include_usage=False)
     # SSE 响应头不一定带 charset；requests 会回退成 ISO-8859-1，中文全变乱码
-    # （v0.1.6 实测）。流式必须显式按 UTF-8 解码。
+    # （v0.1.5 实测）。流式必须显式按 UTF-8 解码。
     response.encoding = 'utf-8'
     try:
         response.raise_for_status()
@@ -1183,7 +1183,7 @@ def _stream_openai_compatible_round(model_name, api_key, messages, base_url, too
 
     思考（reasoning_content / reasoning）在到达时**实时**产出
     ``{'type': 'thinking', 'content': ...}``——工具循环不再等整轮完成才拿到
-    思考（v0.1.6：原非流式实现要等一轮全部生成完，事件一次性到达，用户看到
+    思考（v0.1.5：原非流式实现要等一轮全部生成完，事件一次性到达，用户看到
     "思考最后一股脑出现"）。工具调用的流式增量（name/arguments 分片）就地
     累积；轮结束时产出 ``{'type': 'round_finished', 'assistant_message': ...,
     'usage': {...}}`` 由调用方继续 ReAct 循环。
@@ -1216,7 +1216,7 @@ def _stream_openai_compatible_round(model_name, api_key, messages, base_url, too
         response.close()
         response = _open_stream(include_usage=False)
     # SSE 响应头不一定带 charset；requests 默认 ISO-8859-1 会把中文解成乱码，
-    # 必须显式按 UTF-8 解码（v0.1.6 实测）。
+    # 必须显式按 UTF-8 解码（v0.1.5 实测）。
     response.encoding = 'utf-8'
     try:
         response.raise_for_status()
@@ -3126,7 +3126,7 @@ class _DualThinkingSplitter:
     def feed(self, text):
         """喂入一段 reasoning 增量；返回需要实时透传的 thinking 事件列表。
 
-        状态机（v0.1.6 修正）：工具循环的每一轮都可能重复出现
+        状态机（v0.1.5 修正）：工具循环的每一轮都可能重复出现
         ``<<<CHARACTER_OS>>>`` / ``<<<RAW_REASONING>>>`` 标记，所以标记扫描对
         所有状态统一执行——旧实现在见到第一个 RAW 标记后把后续整段永远归入
         raw，第二轮的角色心声会被错误算进 raw_reasoning。
@@ -3201,7 +3201,7 @@ class _DualThinkingSplitter:
         if self._state == 'pending' and self._pending:
             # 尚未见到任何标记：尾部可能是残缺标记时按住（等下一 chunk 补齐），
             # 否则立刻实时透传——旧实现缓冲 1200 字符且只透传一次，之后又恢复
-            # 静默，短推理在生成期间完全不可见（v0.1.6 实测"一股脑输出"）。
+            # 静默，短推理在生成期间完全不可见（v0.1.5 实测"一股脑输出"）。
             if self._marker_may_still_be_incomplete(self._pending):
                 return events
             events.append({'type': 'thinking', 'content': self._pending})
@@ -3253,7 +3253,7 @@ def _strip_reasoning_tags(text: str) -> str:
 
 
 def _extract_real_reply_text(text: str) -> str:
-    """从被协议污染的正文中提取真正的回复文本（v0.1.6）。
+    """从被协议污染的正文中提取真正的回复文本（v0.1.5）。
 
     deepseek-v4-flash（b.ai）实测会把整段双段协议写进 content 而不是
     reasoning 流：正文形如：
@@ -3552,7 +3552,7 @@ class _StreamingReplyDraft:
 
 def _finish_draft_after_failure(draft, character, collected_chunks, thinking_splitter,
                                 collected_steps, collected_tool_calls, streamed_thinking_parts):
-    """生成失败时的草稿收尾（v0.1.6 增量落库的失败语义）。
+    """生成失败时的草稿收尾（v0.1.5 增量落库的失败语义）。
 
     已产生任何内容（正文/思考/工具调用）→ 保留为 interrupted，正文剥掉
     【情感】与思考标记；什么都没产生 → 撤销草稿，视图继续发 error 事件。
@@ -3645,7 +3645,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
     # 增量落库：实时透传的思考文本（展示口径），与 collected_* 一起同步进草稿。
     streamed_thinking_parts = []
 
-    # 增量落库（v0.1.6）：先落一条 status='streaming' 的空回复，之后每个
+    # 增量落库（v0.1.5）：先落一条 status='streaming' 的空回复，之后每个
     # delta/thinking/tool 片段都同步写进事件日志与投影行——思考文本、工具
     # 调用、正文"每出来一个就记录一个"，页面中途关闭也不丢已生成内容。
     draft = _StreamingReplyDraft.create(chat_session, character)
@@ -3707,7 +3707,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
                     streamed_thinking_parts.append(text)
                     _persist_progress()
                     # 携带轮次标记：前端流式时间线按"思考 · 第 N 轮"逐步构建，
-                    # 而不是等到 done 才出现完整步骤列表（v0.1.6 用户实测）。
+                    # 而不是等到 done 才出现完整步骤列表（v0.1.5 用户实测）。
                     yield {**thinking_event, 'content': text, **({'round': round_key} if round_key is not None else {})}
                 continue
             if event_type == 'tool':
@@ -3728,7 +3728,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         if not ai_response_text:
             raise ValueError('The model returned an empty response')
 
-# 协议污染剥离（v0.1.6）：模型偶尔把 <<<CHARACTER_OS>>>/<<<RAW_REASONING>>>
+# 协议污染剥离（v0.1.5）：模型偶尔把 <<<CHARACTER_OS>>>/<<<RAW_REASONING>>>
         # 段落与  thinking 标签直接写进正文，先提取真实回复再做情感解析（只朗读
         # 真正的回复；兜底其它 provider 的同类行为）。
         clean_text = _extract_real_reply_text(ai_response_text)
