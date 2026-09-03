@@ -3308,21 +3308,26 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks._iter_text_chunks')
     @patch('chat.tasks.build_research_context')
     @patch('chat.tasks._get_user_profile')
-    @patch('chat.tasks._refine_steps_with_character_osis')
     @patch('chat.tasks._collect_memory_actions', return_value=[])
     def test_stream_ai_response_surfaces_tool_and_thinking_events_and_persists(
-        self, mock_memory_actions, mock_refine, mock_profile, mock_research, mock_chunks, mock_config, mock_build
+        self, mock_memory_actions, mock_profile, mock_research, mock_chunks, mock_config, mock_build
     ):
         mock_profile.return_value = self._profile(default_enable_web_search=False)
         mock_research.return_value = {'query': '', 'items': [], 'provider': '', 'error': ''}
-        mock_chunks.return_value = iter([
-            {'type': 'tool', 'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
-            # 双段思考协议：CHARACTER_OS 标记之后的内容才实时透传为 thinking 事件
-            # （不带标记的模型推理会被拆分器缓冲，只有 done 时给出）。
-            {'type': 'thinking', 'content': '<<<CHARACTER_OS>>>Let me check what happened last time...'},
-            {'type': 'delta', 'content': 'Hello'},
-            {'type': 'delta', 'content': ' there'},
-        ])
+        # 新架构（v0.1.7）：主生成推理流无协议标记，纯系统思考流式输出；
+        # 结尾补心声由第二次 _iter_text_chunks 调用产生。
+        mock_chunks.side_effect = [
+            iter([
+                {'type': 'tool', 'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
+                {'type': 'thinking', 'content': 'Let me check what happened last time...'},
+                {'type': 'delta', 'content': 'Hello'},
+                {'type': 'delta', 'content': ' there'},
+            ]),
+            iter([
+                # 结尾补心声：纯 delta（角色心声内容）
+                {'type': 'delta', 'content': '嗯，原来如此…'},
+            ]),
+        ]
         mock_config.return_value = {
             'provider': 'openai_compatible',
             'model_name': 'deepseek-r1',
@@ -3338,19 +3343,29 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         self.assertEqual(events[0]['arguments']['path'], 'raw/chat_sessions/session_1/transcript.md')
 
         thinking_event = next(event for event in events if event['type'] == 'thinking')
+        # 主生成推理流中的 thinking 事件 = 系统思考（原始推理），无标记前缀。
         self.assertEqual(thinking_event['content'], 'Let me check what happened last time...')
 
         delta_text = ''.join(event['content'] for event in events if event['type'] == 'delta')
         self.assertEqual(delta_text, 'Hello there')
 
         done_event = next(event for event in events if event['type'] == 'done')
-        self.assertEqual(done_event['thinking'], 'Let me check what happened last time...')
+        # 角色心声由结尾补生成产生；系统思考存 raw_reasoning（v0.1.7）。
+        self.assertEqual(done_event['thinking'], '嗯，原来如此…')
+        self.assertEqual(done_event['raw_reasoning'], 'Let me check what happened last time...')
         self.assertEqual(done_event['tool_calls'], [
             {'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
         ])
 
         ai_message = Message.objects.get(id=done_event['message_id'])
-        self.assertEqual(ai_message.thinking, 'Let me check what happened last time...')
+        self.assertEqual(ai_message.thinking, '嗯，原来如此…')
+        self.assertEqual(ai_message.raw_reasoning, 'Let me check what happened last time...')
+        # 时间线：系统思考轮 + 心声终轮（text=心声、raw_text=系统思考全文）。
+        self.assertEqual(ai_message.steps[-1], {
+            'kind': 'thinking',
+            'text': '嗯，原来如此…',
+            'raw_text': 'Let me check what happened last time...',
+        })
         self.assertEqual(ai_message.tool_calls, [
             {'tool': 'read_memory_file', 'arguments': {'path': 'raw/chat_sessions/session_1/transcript.md'}},
         ])
@@ -3361,10 +3376,9 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks.build_research_context')
     @patch('chat.tasks._build_search_query')
     @patch('chat.tasks._get_user_profile')
-    @patch('chat.tasks._refine_steps_with_character_osis')
     @patch('chat.tasks._collect_memory_actions', return_value=[])
     def test_stream_ai_response_emits_web_search_tool_event(
-        self, mock_memory_actions, mock_refine, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
+        self, mock_memory_actions, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
     ):
         mock_profile.return_value = self._profile(default_enable_web_search=True)
         mock_query.return_value = 'best ramen in tokyo'
@@ -3427,7 +3441,7 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
         round2 = [
             {'choices': [{'delta': {'reasoning_content': '那现在直接回答'}, 'finish_reason': None}]},
             # 模型把双段协议/think 标签写进正文：final_text 必须已被清洗。
-            {'choices': [{'delta': {'content': '<<<RAW_REASONING>>>提炼一下…<think>All set.</think>'}, 'finish_reason': 'stop'}]},
+            {'choices': [{'delta': {'content': '<raw_reasoning>提炼一下…<think>All set.</think>'}, 'finish_reason': 'stop'}]},
         ]
         mock_post.side_effect = [_sse_response(round1), _sse_response(round2)]
 
@@ -3516,10 +3530,10 @@ class DualThinkingSplitterTests(TestCase):
     def test_incomplete_marker_prefix_waits_for_next_chunk(self):
         splitter = _DualThinkingSplitter()
 
-        # '<<<CHAR' 可能是残缺标记前缀：按住不透传。
-        self.assertEqual(splitter.feed('<<<CHAR'), [])
+        # '<characte' 可能是残缺 XML 标记前缀：按住不透传。
+        self.assertEqual(splitter.feed('<characte'), [])
         # 下一 chunk 补齐标记：标记后的文本作为角色心声实时透传。
-        events = splitter.feed('ACTER_OS>>>我的独白')
+        events = splitter.feed('r_os>我的独白')
         self.assertEqual(events, [{'type': 'thinking', 'content': '我的独白'}])
         self.assertTrue(splitter.saw_marker)
         os_text, raw_text = splitter.finalize()
@@ -3529,9 +3543,9 @@ class DualThinkingSplitterTests(TestCase):
     def test_raw_reasoning_after_marker_stays_quiet_until_done(self):
         splitter = _DualThinkingSplitter()
 
-        splitter.feed('<<<CHARACTER_OS>>>心声')
+        splitter.feed('<character_os>心声')
         # RAW 标记后的内容按双段协议静默缓存（原始推理只在 done 提供）。
-        self.assertEqual(splitter.feed('<<<RAW_REASONING>>>硬核推理'), [])
+        self.assertEqual(splitter.feed('<raw_reasoning>硬核推理'), [])
         self.assertTrue(splitter.saw_marker)
         os_text, raw_text = splitter.finalize()
         self.assertEqual(os_text, '心声')
@@ -3542,12 +3556,12 @@ class DualThinkingSplitterTests(TestCase):
         第二轮的角色心声不得混入原始推理（v0.1.6 用户实测）。"""
         splitter = _DualThinkingSplitter()
 
-        splitter.feed('<<<CHARACTER_OS>>>第一轮心声')
-        splitter.feed('<<<RAW_REASONING>>>第一轮硬核')
+        splitter.feed('<character_os>第一轮心声')
+        splitter.feed('<raw_reasoning>第一轮硬核')
         # 第二轮再次回到心声协议：旧实现在这里会把"第二轮心声"错误归入 raw。
-        self.assertEqual(splitter.feed('<<<CHARACTER_OS>>>第二轮心声'),
+        self.assertEqual(splitter.feed('<character_os>第二轮心声'),
                          [{'type': 'thinking', 'content': '第二轮心声'}])
-        splitter.feed('<<<RAW_REASONING>>>第二轮硬核')
+        splitter.feed('<raw_reasoning>第二轮硬核')
 
         os_text, raw_text = splitter.finalize()
         self.assertEqual(os_text, '第一轮心声第二轮心声')
@@ -3558,22 +3572,22 @@ class DualThinkingSplitterTests(TestCase):
         splitter = _DualThinkingSplitter()
 
         splitter.feed('前奏文字')
-        splitter.feed('<<<RAW_REASONING>>>真正的原始推理')
+        splitter.feed('<raw_reasoning>真正的原始推理')
 
         os_text, raw_text = splitter.finalize()
         self.assertEqual(raw_text, '真正的原始推理')
 
     def test_extract_real_reply_text_strips_protocol_pollution(self):
-        """deepseek-v4-flash 实测会把双段协议与 <think> 标签写进正文：清洗后
+        """deepseek-v4-flash 实测会把双段协议与  thinking 标签写进正文：清洗后
         只剩真正的回复（v0.1.6）。"""
         from chat.tasks import _extract_real_reply_text
 
         polluted = (
-            '<<<CHARACTER_OS>>>\n\n'
+            '<character_os>\n\n'
             '哇，是老师了！这是角色心声段落……\n\n'
-            '<<<RAW_REASONING>>>\n\n'
+            '<raw_reasoning>\n\n'
             '用户用简单的中文打招呼……直接以活泼的语气回应即可。\n'
-            '<think>真正的回答来了！</think>'
+            '<thinking>真正的回答来了！</thinking>'
         )
         self.assertEqual(_extract_real_reply_text(polluted), '真正的回答来了！')
 
@@ -3581,6 +3595,76 @@ class DualThinkingSplitterTests(TestCase):
         from chat.tasks import _extract_real_reply_text
 
         normal = '你好呀，老师！今天也要元气满满唷～'
+        self.assertEqual(_extract_real_reply_text(normal), normal)
+
+    def test_extract_real_reply_text_strips_thinking_variant_closing_tag(self):
+        """网关把 <thinking>…</thinking> 拆流时，正文可能只剩孤立的 </thinking>
+        开头（v0.1.7 用户实测：回复气泡以 </thinking> 开头）。"""
+        from chat.tasks import _extract_real_reply_text
+
+        polluted = (
+            '</thinking>听到了听到了！\n\n'
+            '雪风大人就在这里なのだ！\n\n'
+            '指挥官这么晚还在晃悠，是不是有什么难题需要解决哒？'
+        )
+        self.assertEqual(
+            _extract_real_reply_text(polluted),
+            '听到了听到了！\n\n雪风大人就在这里なのだ！\n\n指挥官这么晚还在晃悠，是不是有什么难题需要解决哒？',
+        )
+
+    def test_extract_real_reply_text_unwraps_thinking_variant_block(self):
+        """<thinking>…</thinking> 整块出现时剥壳保留内部文字（与 <think> 一致）。"""
+        from chat.tasks import _extract_real_reply_text
+
+        self.assertEqual(
+            _extract_real_reply_text('<thinking>真正的回答来了！</thinking>'),
+            '真正的回答来了！',
+        )
+        # RAW 标记 + <thinking> 双重污染：先切 RAW，再剥壳。
+        self.assertEqual(
+            _extract_real_reply_text(
+                '<raw_reasoning>\n\n规划一下语气。\n<thinking>元气满满地回答。</thinking>'
+            ),
+            '元气满满地回答。',
+        )
+
+    def test_extract_real_reply_text_strips_split_tag_pair(self):
+        """开头  thinking 已被网关移入 reasoning 流、正文只残留  闭合
+        标签的情况。"""
+        from chat.tasks import _extract_real_reply_text
+
+        polluted = '（接上）</thinking>然后正儿八经地说结论。</thinking>'
+        self.assertEqual(
+            _extract_real_reply_text(polluted),
+            '（接上）然后正儿八经地说结论。',
+        )
+
+    def test_extract_real_reply_text_trims_plan_prefix_with_style_check(self):
+        """deepseek-v4-flash 新形态：正文以「分析用户→任务→风格检查」计划段
+        开头再给正式回复（v0.1.7 用户实测），清洗后只剩角色说的话。"""
+        from chat.tasks import _extract_real_reply_text
+
+        polluted = (
+            '用户以中文向角色问好。\n\n'
+            '用户本地时间是凌晨1:34，所以虽是"晚上好"实际已过午夜。\n\n'
+            '任务：以雪风人设回应，中文语序，陈述句句尾用「なのだ」，疑问/反问/感叹句用「哒？」\n\n'
+            '或「呐~」。\n\n'
+            '内容可带傲娇式关心（提醒指挥官别熬夜），无需检索记忆文件，这是简单寒暄轮。\n\n'
+            '检查台词风格参考：自夸、口癖、对指挥官的关心藏在逞强之下。\n\n'
+            '保持回复简洁自然。\n\n'
+            '指挥官晚上好なのだ！\n\n'
+            '哼哼，这么晚还不休息，该不会是在等伟大的雪风大人吧哒？'
+        )
+        self.assertEqual(
+            _extract_real_reply_text(polluted),
+            '指挥官晚上好なのだ！\n\n哼哼，这么晚还不休息，该不会是在等伟大的雪风大人吧哒？',
+        )
+
+    def test_extract_real_reply_text_keeps_reply_starting_with_persona(self):
+        """正常回复以口癖+自称开头时不得被计划前缀清洗误切。"""
+        from chat.tasks import _extract_real_reply_text
+
+        normal = '指挥官！雪风大人当然好なのだ！运气超好、状态绝佳～'
         self.assertEqual(_extract_real_reply_text(normal), normal)
 
     def test_extract_real_reply_text_trims_self_instruction_prefix(self):

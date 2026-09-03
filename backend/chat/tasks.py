@@ -2101,18 +2101,19 @@ def _build_stream_memory_prefetch(character, chat_session, generate_greeting=Fal
 
 
 def _dual_thinking_protocol_text():
-    """每一轮思考（含工具轮）都要同时给出角色心声与原始推理两段的提示文本。
+    """回复纯净度约束的提示文本（v0.1.7 起心声改为结尾单独生成）。
 
-    放在系统提示词最末尾：后续段落（尤其是英文的 MEMORY TOOLING / 工具清单）
-    会主导工具轮的推理风格，只有放在最后才能让"每轮两段"的约束不被盖住。
+    双段协议（模型在推理流里同时输出心声+推理）已废弃：模型经常不按协议
+    输出，把计划/心声写进正文导致回复被污染。现在只约束一点——正文只能是
+    角色说出口的话；系统思考（reasoning 流）与角色心声（结尾补生成）都在
+    正文之外，前端另行展示。deepseek-v4-flash 实测会把"分析用户输入→规划
+    回复→风格检查"整段写进正文，所以用反面示例明确禁止。
     """
     return "\n".join([
-        "EVERY reasoning step must be laid out as exactly two consecutive blocks - including each round that ends with tool calls, and the final round that produces the reply.",
-        f"Block 1 header (an exact line): {DUAL_THINKING_CHAR_OS_MARKER}",
-        "Block 1 - the character's inner voice, in Chinese: a short continuous first-person monologue (mood, read of the user's intent, confirmation of facts). Natural flowing narration only; never numbered steps or bullet lists.",
-        f"Block 2 header (an exact line): {DUAL_THINKING_RAW_MARKER}",
-        "Block 2 - objective model-native reasoning: decompose the task, verify recalled facts against retrieval results, plan which files to inspect, and sanity-check constraints. Analytical and precise; lists and numbers are allowed here.",
-        "Repeat this two-block structure in every reasoning step of the turn, not only before the final reply. Never mention the protocol or the tags to the user.",
+        "Your reply must be ONLY the character's spoken words - the exact lines the character says out loud.",
+        "Never include analysis of the user's message, planning text, self-instructions, style checks, protocol blocks, tags, or thinking in the reply.",
+        "If you start the reply with anything like \"用户以中文向角色问好。…任务：…检查台词风格参考：…保持回复简洁自然。\", the user will see that garbage - it is forbidden.",
+        "Write the reply exactly as if the character is speaking, from the first line.",
     ])
 
 
@@ -2152,14 +2153,14 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
             ]),
         )
         _append_section(sections, "MEMORY FILESYSTEM", build_memory_explorer_manifest(character))
-        _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
+        _append_section(sections, "REPLY PURITY", _dual_thinking_protocol_text())
         return "\n\n".join(sections)
 
     compact_memory_mode = bool((retrieved_memory or '').strip())
     if compact_memory_mode:
         _append_section(sections, "WORKING STATE", _format_working_state(chat_session))
         _append_section(sections, "RETRIEVED MEMORY", retrieved_memory)
-        _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
+        _append_section(sections, "REPLY PURITY", _dual_thinking_protocol_text())
         return "\n\n".join(sections)
 
     uploaded_sections = "\n\n".join(
@@ -2173,7 +2174,7 @@ def _build_system_prompt(character, chat_session, use_memory_tools=False, retrie
     )
     _append_section(sections, "USER UPLOADS", uploaded_sections)
     _append_section(sections, "WORKING STATE", _format_working_state(chat_session))
-    _append_section(sections, "DUAL THINKING PROTOCOL", _dual_thinking_protocol_text())
+    _append_section(sections, "REPLY PURITY", _dual_thinking_protocol_text())
 
     return "\n\n".join(sections)
 
@@ -3077,9 +3078,14 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
         }
 
 
-DUAL_THINKING_CHAR_OS_MARKER = '<<<CHARACTER_OS>>>'
-DUAL_THINKING_RAW_MARKER = '<<<RAW_REASONING>>>'
-_DUAL_THINKING_MARKERS = (DUAL_THINKING_CHAR_OS_MARKER, DUAL_THINKING_RAW_MARKER)
+DUAL_THINKING_CHAR_OS_MARKER = '<character_os>'
+DUAL_THINKING_CHAR_OS_CLOSE = '</character_os>'
+DUAL_THINKING_RAW_MARKER = '<raw_reasoning>'
+DUAL_THINKING_RAW_CLOSE = '</raw_reasoning>'
+_DUAL_THINKING_MARKERS = (
+    DUAL_THINKING_CHAR_OS_MARKER, DUAL_THINKING_CHAR_OS_CLOSE,
+    DUAL_THINKING_RAW_MARKER, DUAL_THINKING_RAW_CLOSE,
+)
 _NO_ROUND_SENTINEL = object()
 
 
@@ -3232,6 +3238,20 @@ def _strip_thinking_tags(text: str) -> str:
     return '\n'.join(cleaned).strip()
 
 
+# 模型/网关常见的推理标签：<think>、</think>、<thinking>、</thinking>。
+_REASONING_TAG_RE = re.compile(r'</?(?:character_os|raw_reasoning|think(?:ing)?)>')
+
+
+def _strip_reasoning_tags(text: str) -> str:
+    """剥掉正文/推理流里残留的推理标签（open/close 四种变体）。
+
+    变体无嵌套语义：无论 ``<think>`` 还是 ``<thinking>``，标签本身一律删除，
+    标签内的文字保留（与旧 `<think>` 解包行为一致——真正的回复被包在标签
+    里时只剥壳不丢内容）。跨 chunk 到达被拆开的标签由调用方在拼接后兜底。
+    """
+    return _REASONING_TAG_RE.sub('', text or '')
+
+
 def _extract_real_reply_text(text: str) -> str:
     """从被协议污染的正文中提取真正的回复文本（v0.1.6）。
 
@@ -3241,10 +3261,11 @@ def _extract_real_reply_text(text: str) -> str:
         <<<CHARACTER_OS>>>\n\n<角色心声>\n\n<<<RAW_REASONING>>>\n\n<原始推理>\n
         <think>真正的回复……</think>……
 
-    处理顺序：RAW 标记之前的一切（角色心声段落）丢弃；``<think>`` 之前
-    的原始推理段落丢弃；去掉 ``</think>`` 闭合标签；再剔除残余的孤立标记行，
-    最后裁掉"自我指令"前缀段（模型在正文末尾先写一句"回答时用XX口吻……"
-    再给正式回复）。无任何协议痕迹时原样返回（不可误伤正常回复）。
+    处理顺序：RAW 标记之前的一切（角色心声段落）丢弃；``<think>``/``<thinking>``
+    之前的原始推理段落丢弃；剥掉四种推理标签（``<think>``/``</think>``/
+    ``<thinking>``/``</thinking>``）；再剔除残余的孤立标记行，最后裁掉"自我指令"
+    前缀段（模型在正文末尾先写一句"回答时用XX口吻……"再给正式回复）。
+    无任何协议痕迹时原样返回（不可误伤正常回复）。
     """
     cleaned = (text or '').strip()
     if not cleaned:
@@ -3253,12 +3274,20 @@ def _extract_real_reply_text(text: str) -> str:
     raw_marker_index = cleaned.find(DUAL_THINKING_RAW_MARKER)
     if raw_marker_index != -1:
         cleaned = cleaned[raw_marker_index + len(DUAL_THINKING_RAW_MARKER):]
-    think_start = cleaned.find('<think>')
+    # 只切第一个开标签：``<thinking>`` 与 ``<think>`` 都有效（``<thinking>``
+    # 不是 ``<think>`` 的子串，两种都得搜）。切点之前的一切都是被污染的
+    # 推理/计划段；开标签之后的文字才是回复候选。
+    think_start = -1
+    for tag in ('<thinking>', '<think>'):
+        index = cleaned.find(tag)
+        if index != -1 and (think_start == -1 or index < think_start):
+            think_start = index
     if think_start != -1:
-        cleaned = cleaned[think_start + len('<think>'):]
-    cleaned = cleaned.replace('</think>', '')
+        cleaned = cleaned[think_start:]
+    cleaned = _strip_reasoning_tags(cleaned)
     cleaned = _strip_thinking_tags(cleaned)
     cleaned = _trim_self_instruction_prefix(cleaned)
+    cleaned = _trim_plan_prefix(cleaned)
 
     # 若剥离后只剩协议碎片（无实质回复），保留最终补救结果而不是空串。
     return cleaned.strip()
@@ -3290,6 +3319,89 @@ def _trim_self_instruction_prefix(text: str) -> str:
         return body
     trimmed = ''.join(sentences[cut_at + 1:]).strip()
     return trimmed or body
+
+
+def _trim_plan_prefix(text: str) -> str:
+    """裁掉正文开头的"计划/自我指令"段（v0.1.7 用户实测新形态）。
+
+    deepseek-v4-flash 会把整段计划写进正文再给回复，且措辞不固定：
+    "用户以中文向角色问好。…任务：以雪风人设回应…检查台词风格参考：
+    …保持回复简洁自然。"——这些句子不满足 _trim_self_instruction_prefix
+    的"同一句同时含 回答×口吻"条件，漏网。
+
+    识别策略：按句号/叹号/问号切分句子，找到正文中第一个像"角色对用户
+    说话"的句子（含角色口癖 なのだ/哒/呐 + 自称/称呼），且该句之前有
+    足够多的计划特征，则把计划段裁掉。按句子而非按行切分，避免模型
+    把计划段落与回复第一句写在同一行时误裁。
+    """
+    body = (text or '').strip()
+    if not body:
+        return body
+    sentences = re.split(r'(?<=[。！？])', body)
+    for index, sent in enumerate(sentences):
+        stripped = sent.strip()
+        if not stripped:
+            continue
+        # 角色口癖 + 角色自称/对指挥官的称呼 → 像是正式回复的第一句
+        has_tsundere = any(marker in stripped for marker in ('なのだ', '哒', '呐'))
+        has_persona = any(marker in stripped for marker in ('雪风大人', '本大人', '指挥官'))
+        if not (has_tsundere and has_persona):
+            continue
+        prefix = ''.join(sentences[:index]).strip()
+        if not prefix or len(prefix) < 10:
+            continue
+        # 计划段特征：分析用户输入、任务描述、风格检查、格式说明等
+        plan_markers = (
+            '用户以', '用户用', '用户问', '用户本地', '任务：',
+            '内容可带', '检查台词', '保持回复', '无需检索',
+            '按照角色', '需要回应', '准备用', '作为开场',
+        )
+        if any(marker in prefix for marker in plan_markers):
+            return ''.join(sentences[index:]).strip()
+    return body
+
+
+def _trim_plan_prefix(text: str) -> str:
+    """裁掉正文开头模型写的"分析/计划/自我指令"段。
+
+    deepseek-v4-flash 间歇性在正文开头先写一段对用户输入的分析与回复规划
+    （形如「用户以中文向角色问好。…任务：以雪风人设回应…检查台词风格
+    参考：…保持回复简洁自然。」），然后才是真正的角色回复。这段计划文本
+    没有固定形式，但第一句正式回复通常包含角色口癖与直接称呼。
+
+    策略：找到第一个看起来是「角色直接对用户说话」的句子（含口癖+自称/
+    以上）、并确认它之前的内容有规划特征，则裁掉之前的计划段。
+    """
+    body = (text or '').strip()
+    if not body or len(body) > 800:
+        return body
+    lines = body.split('\n')
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # 角色回复的特征：口癖+角色对指挥官的直接称呼（排除引号内引用的
+        # 口癖，如「なのだ」「哒？」——那通常是计划段的格式说明）。
+        quote_os = '「なのだ」' in stripped or '「哒' in stripped or '「呐' in stripped
+        has_speech = (
+            not quote_os
+            and ('なのだ' in stripped or '哒' in stripped or '呐' in stripped)
+            and ('指挥官' in stripped or '雪风大人' in stripped or '本大人' in stripped)
+        )
+        if not has_speech:
+            continue
+        prefix = '\n'.join(lines[:i]).strip()
+        if not prefix or len(prefix) < 10:
+            continue
+        # 确认前缀包含规划特征句（分析用户、任务指示、格式说明等）
+        plan_keywords = (
+            '用户以', '用户用', '用户本地', '任务：',
+            '内容可带', '检查台词', '保持回复', '无需检索',
+            '按照角色', '需要回应', '准备用', '作为开场',
+        )
+        if any(kw in prefix for kw in plan_keywords):
+            return '\n'.join(lines[i:]).strip()
+    return body
 
 
 def _parse_json_string_array(text: str):
@@ -3464,6 +3576,46 @@ def _finish_draft_after_failure(draft, character, collected_chunks, thinking_spl
     )
 
 
+def _build_character_os_prompt(character, raw_reasoning):
+    """结尾补心声的提示词：把系统思考（原始推理）改写成角色第一人称心声。
+
+    模型只输出纯心声文本，不打任何标签（v0.1.7 修正：标签只在后端内部
+    使用，不要求模型输出——避免标签跨 chunk 残留）。输入侧的系统思考也
+    直接给原文，无需 XML 包裹（单块内容，无歧义）。
+    """
+    if not raw_reasoning or not raw_reasoning.strip():
+        return ''
+    persona = (character.name or '').strip()
+    personality = ((character.personality or character.description or '').strip())[:120]
+    intro = (
+        f"角色：{persona}（{personality}）"
+        if personality and persona
+        else f"角色：{persona or 'the character'}"
+    )
+    return (
+        intro
+        + "\n\n这是角色本轮对话的系统思考（原始推理）：\n\n"
+        + (raw_reasoning or '')[:2000]
+        + "\n\n请根据系统思考生成角色第一人称的中文内心独白（角色心声），"
+        + "3~5 句，自然口语化；不要分点，不要出现“工具/检索/文件路径”等执行术语，"
+        + "只表达角色当时的心境与打算。直接输出心声内容本身，不要任何标签或说明。"
+    )
+
+
+def _generate_character_os(character, raw_reasoning, runtime_config):
+    """结尾补心声（v0.1.7 主流程）：主回复流完后，把系统思考喂给模型再生成
+    一遍角色心声，流式 yield 增量文本。失败由调用方兜底（心声留空，前端只
+    显示系统思考）。
+    """
+    prompt = _build_character_os_prompt(character, raw_reasoning)
+    if not prompt:
+        return
+    messages = [{'role': 'user', 'content': prompt}]
+    for event in _iter_text_chunks(runtime_config, messages, tools=None):
+        if event.get('type') == 'delta':
+            yield event.get('content', '')
+
+
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     collected_tool_calls = []
     # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
@@ -3509,23 +3661,13 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         )
 
     # 时间线聚合状态：思考增量按轮归并成一条"思考 · 第 N 轮"步骤。
+    # （v0.1.7 起：主生成推理流仅实时透传，不再落成 thinking step，
+    #  collected_steps 只保留工具调用与结尾补心声。）
     current_round_key = _NO_ROUND_SENTINEL
-    round_splitter = _DualThinkingSplitter()
 
-    def _flush_round_steps():
-        nonlocal current_round_key, round_splitter
-        if current_round_key is _NO_ROUND_SENTINEL:
-            return
-        round_os, round_raw = round_splitter.finalize()
-        if round_os or round_raw:
-            collected_steps.append({
-                'kind': 'thinking',
-                'text': round_os or round_raw,
-                **({'raw_text': round_raw} if round_os and round_raw else {}),
-            })
-            _persist_progress()
+    def _flush_round():
+        nonlocal current_round_key
         current_round_key = _NO_ROUND_SENTINEL
-        round_splitter = _DualThinkingSplitter()
 
     try:
         for event in _iter_text_chunks(
@@ -3543,6 +3685,8 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
                 content = event.get('content') or ''
                 if not content:
                     continue
+                # 正文清洗集中在收尾 _extract_real_reply_text（开标签要留着当
+                # 切点），流中增量原样透传，仅保证最终落库文本干净。
                 collected_chunks.append(content)
                 _persist_progress()
                 yield {'type': 'delta', 'content': content}
@@ -3551,27 +3695,23 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
                 content = event.get('content') or ''
                 if not content:
                     continue
-                # 时间线步骤按"轮"聚合：思考增量可能被拆成多个小 chunk（工具循环
-                # 已流式化），round 键相同则共享一个轮次拆分器，轮切换/工具到达时
-                # 才结算成"思考 · 第 N 轮"一条步骤。
                 round_key = event.get('round')
                 if round_key != current_round_key:
-                    _flush_round_steps()
+                    _flush_round()
                     current_round_key = round_key
-                # 全流拆分器负责实时心声透传 + 汇总 raw_reasoning（跨轮拼接）。
+                # 全流拆分器负责实时透传系统思考 + 汇总 raw_reasoning。
                 for thinking_event in thinking_splitter.feed(content):
-                    streamed_thinking_parts.append(thinking_event.get('content') or '')
+                    text = _strip_reasoning_tags(thinking_event.get('content') or '')
+                    if not text:
+                        continue
+                    streamed_thinking_parts.append(text)
                     _persist_progress()
                     # 携带轮次标记：前端流式时间线按"思考 · 第 N 轮"逐步构建，
                     # 而不是等到 done 才出现完整步骤列表（v0.1.6 用户实测）。
-                    yield {**thinking_event, **({'round': round_key} if round_key is not None else {})}
-                # 轮次拆分器为本轮时间线行累积（结算在轮切换/工具到达/流结束时）。
-                for _ in round_splitter.feed(content):
-                    pass  # 本轮事件已由全流拆分器处理，这里只取结算结果。
+                    yield {**thinking_event, 'content': text, **({'round': round_key} if round_key is not None else {})}
                 continue
             if event_type == 'tool':
-                # 先结算上一轮思考步骤，保证时间线"思考→工具→思考→工具…"顺序。
-                _flush_round_steps()
+                _flush_round()
                 tool_name = event.get('tool') or ''
                 tool_arguments = event.get('arguments') or {}
                 collected_tool_calls.append({'tool': tool_name, 'arguments': tool_arguments})
@@ -3580,7 +3720,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
                 yield {'type': 'tool', 'tool': tool_name, 'arguments': tool_arguments}
                 continue
 
-        _flush_round_steps()
+        _flush_round()
 
         ai_response_text = ''.join(collected_chunks).strip()
         latency_ms = int((time.perf_counter() - started_at) * 1000)
@@ -3588,24 +3728,45 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
         if not ai_response_text:
             raise ValueError('The model returned an empty response')
 
-        # 协议污染剥离（v0.1.6）：模型偶尔把 <<<CHARACTER_OS>>>/<<<RAW_REASONING>>>
-        # 段落与 <think> 标签直接写进正文，先提取真实回复再做情感解析（只朗读
+# 协议污染剥离（v0.1.6）：模型偶尔把 <<<CHARACTER_OS>>>/<<<RAW_REASONING>>>
+        # 段落与  thinking 标签直接写进正文，先提取真实回复再做情感解析（只朗读
         # 真正的回复；兜底其它 provider 的同类行为）。
         clean_text = _extract_real_reply_text(ai_response_text)
+
         emotion_names = _character_emotion_names(character)
         clean_text, tts_segments = _parse_emotion_segments(clean_text, emotion_names)
 
-        character_os, raw_reasoning = thinking_splitter.finalize()
-        if not thinking_splitter.saw_marker:
-            # 模型未按双段协议输出（如 deepseek-v4-flash 的思维链天然是中文角色口吻）：
-            # 恢复旧行为——整段思考作为"思考过程"展示，不出现双视图切换器。
-            character_os = thinking_splitter.total_text.strip()
-            raw_reasoning = ''
+        # 系统思考 = 主生成推理流全文（模型原生 reasoning，无协议标记）。
+        raw_reasoning = _strip_reasoning_tags(thinking_splitter.total_text.strip())
 
-        # 每轮双段兜底：提示词协议只在部分轮让模型配合；主回复已流完，
-        # 用一次轻量调用给每轮补写角色心声（原始推理保留该轮原文）。
-        if any(step.get('kind') == 'thinking' for step in collected_steps):
-            _refine_steps_with_character_osis(character, collected_steps, runtime_config)
+        # 结尾补心声（v0.1.7）：主回复已流完，把系统思考喂给模型再生成一遍
+        # 角色心声（character_os），流式透传 thinking 事件供前端实时展示；
+        # 生成失败时留空，前端退化为只显示系统思考。
+        character_os = ''
+        if raw_reasoning:
+            character_os_parts = []
+            try:
+                for chunk in _generate_character_os(character, raw_reasoning, runtime_config):
+                    chunk = _strip_reasoning_tags(chunk)
+                    if not chunk.strip():
+                        continue
+                    character_os_parts.append(chunk)
+                    yield {'type': 'thinking', 'content': chunk, 'round': 'os'}
+            except Exception as exc:
+                logger.warning("Character OS generation failed: %s", exc)
+            character_os = ''.join(character_os_parts).strip()
+            # 双重保险：拼接后整体再剥一次（跨 chunk 标签边界、单 chunk 漏网
+            # 等情况兜底）。
+            character_os = _strip_reasoning_tags(character_os)
+            if character_os:
+                # 心声作为终轮思考步骤：text=角色心声，raw_text=系统思考全文，
+                # 前端该行显示【角色心声 | 原始推理】双视图切换器。
+                collected_steps.append({
+                    'kind': 'thinking',
+                    'text': character_os,
+                    'raw_text': raw_reasoning,
+                })
+                _persist_progress()
 
         ai_message = _finalize_ai_response(
             chat_session=chat_session,
