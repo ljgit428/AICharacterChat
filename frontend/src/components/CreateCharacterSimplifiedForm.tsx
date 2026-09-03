@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, gql } from '@apollo/client';
-import { FILES_UPLOAD_API_URL } from '@/constants';
+import { FILES_UPLOAD_API_URL, MEDIA_BASE_URL } from '@/constants';
 import { apiService } from '@/utils/api';
 import { TtsVoiceModel } from '@/types';
 import { useI18n } from '@/i18n/provider';
@@ -1281,7 +1281,25 @@ export default function CreateCharacterSimplifiedForm({
       URL.revokeObjectURL(avatarCropSrc);
       setAvatarCropSrc(null);
     }
-    await processFileUpload(croppedFile, 'avatar');
+
+    // 头像与资料文件不同：走 /upload/（avatars 桶、立即返回持久 url），
+    // 而不是 /files/upload/（staging 端点，响应不含 url 字段）。
+    setUploadingTarget('avatar');
+    try {
+      const response = await apiService.uploadImage(croppedFile);
+      if (response.error || !response.data?.uri) {
+        throw new Error(response.error || copy.characterForm.uploadFailedAlert);
+      }
+      const avatarUrl = response.data.uri.startsWith('http')
+        ? response.data.uri
+        : `${MEDIA_BASE_URL}${response.data.uri}`;
+      setForm((prev) => ({ ...prev, avatarUrl }));
+    } catch (error) {
+      console.error(error);
+      alert(copy.characterForm.uploadFailedAlert);
+    } finally {
+      setUploadingTarget(null);
+    }
   };
 
   const handleAvatarCropCancel = () => {
