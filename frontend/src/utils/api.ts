@@ -1065,14 +1065,18 @@ class ApiService {
     return { data: undefined };
   }
 
-  async transcribeAudio(audio: Blob, language?: string): Promise<ApiResponse<AsrTranscription>> {
+  async transcribeAudio(
+    audio: Blob,
+    options?: { language?: string; signal?: AbortSignal },
+  ): Promise<ApiResponse<AsrTranscription>> {
+    const { language, signal } = options || {};
     const formData = new FormData();
     const extension = audio.type.includes('ogg') ? 'ogg' : audio.type.includes('wav') ? 'wav' : 'webm';
-    formData.append('audio', new File([audio], `speech.${extension}`, { type: audio.type || 'audio/webm' }));
+    formData.append('audio', new File([audio], `speech.${extension}`, { type: audio.type || 'audio/wav' }));
     if (language) {
       formData.append('language', language);
     }
-    return this.request('/chat/asr', { method: 'POST', body: formData });
+    return this.request('/chat/asr', { method: 'POST', body: formData, signal });
   }
 
   async getAsrReadiness(): Promise<ApiResponse<AsrReadiness>> {

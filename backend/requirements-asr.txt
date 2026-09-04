@@ -1,3 +1,11 @@
 # Optional local speech stack for the realtime chat mode (CPU only).
 # Install with: pip install -r backend/requirements-asr.txt
-faster-whisper>=1.0,<2
+#
+# Default provider is sherpa-onnx + SenseVoiceSmall int8 (Owl Meeting 的模型 1
+# 同款引擎：非自回归、纯 CPU 约 200-500ms/句、原生简体+标点)。模型文件需另
+# 行下载（不进 pip）：
+#   python backend/scripts/download_asr_models.py
+#
+# 回滚旧引擎：ASR_PROVIDER=faster_whisper（需 pip install faster-whisper）。
+sherpa-onnx>=1.10,<2
+numpy>=1.24,<3

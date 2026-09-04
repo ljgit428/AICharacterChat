@@ -1127,9 +1127,11 @@ class ChatViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         mime_type = (upload.content_type or '').split(';')[0].strip().lower()
-        if mime_type not in chat_asr.SUPPORTED_AUDIO_MIME_TYPES:
+        supported = chat_asr.supported_mime_types()
+        if mime_type not in supported:
+            expected = '/'.join(sorted(part.split('/')[-1] for part in supported))
             return Response(
-                {'error': f'unsupported audio type "{mime_type or "unknown"}"; expected webm/ogg/wav'},
+                {'error': f'unsupported audio type "{mime_type or "unknown"}"; expected {expected}'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not chat_asr.asr_available():

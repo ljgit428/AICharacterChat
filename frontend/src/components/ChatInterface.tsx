@@ -7,6 +7,7 @@ import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat,
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import CameraPanel from '@/components/CameraPanel';
 import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
+import MicLevelMeter from '@/components/MicLevelMeter';
 import { useVoiceInput } from '@/hooks/useVoiceInput';
 import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
@@ -157,6 +158,10 @@ export default function ChatInterface({
   const [realtimeNotice, setRealtimeNotice] = useState<string | null>(null);
   const [asrReady, setAsrReady] = useState<{ available: boolean; hint: string } | null>(null);
   const [lastTurnLatency, setLastTurnLatency] = useState<{ firstMs: number | null; totalMs: number } | null>(null);
+  // 灰色预测字开关（Owl 低延迟模式机制）：localStorage 持久化，默认开。
+  const [sttPreviewOn, setSttPreviewOn] = useState(
+    () => typeof window !== 'undefined' && window.localStorage.getItem('prismate.sttPreview') !== '0',
+  );
   // 主模型快速切换：记录本会话内最近一次切换（PUT /model-roles 已同步服务端），
   // 未切换时回退到角色分配 / 默认配置。
   const [textModelOverrideId, setTextModelOverrideId] = useState<string | null>(null);
@@ -187,8 +192,12 @@ export default function ChatInterface({
 
   // 实时模式：转写文本直接走发送 ref（loading 中会自动排队，见 handleSendMessage），
   // 屏幕共享或摄像头开着且距上帧 ≥5s 时随本轮附带一帧（屏幕优先），让角色"看到"用户。
+  // 灰色预测字经 voiceInput.interimText 提升到本组件 state（字幕条 + PiP 窗消费）。
+  const [interimText, setInterimText] = useState('');
   const voiceInput = useVoiceInput({
     paused: isLoading,
+    preview: sttPreviewOn,
+    onInterim: setInterimText,
     onTranscribed: (text) => {
       if (!text.trim()) return;
       const attachments: PendingAttachment[] = [];
@@ -1069,9 +1078,9 @@ export default function ChatInterface({
     const entry = subtitlePipRef.current;
     if (!entry) return;
     entry.root.render(
-      <SubtitleContent pip userText={subtitleUserText} assistantText={subtitleAssistantText} />,
+      <SubtitleContent pip interimText={interimText} userText={subtitleUserText} assistantText={subtitleAssistantText} />,
     );
-  }, [subtitleAssistantText, subtitleUserText]);
+  }, [interimText, subtitleAssistantText, subtitleUserText]);
 
   const handleTextModelChange = async (modelId: string) => {
     const response = await apiService.updateModelRoles({ text: modelId });
@@ -1214,7 +1223,14 @@ export default function ChatInterface({
             }`}
           >
             {(voiceInput.status === 'listening' || voiceInput.status === 'speech' || voiceInput.status === 'transcribing') && (
-              <span className="h-2 w-2 rounded-full bg-rose-500 motion-safe:animate-pulse" />
+              <>
+                <span className="h-2 w-2 rounded-full bg-rose-500 motion-safe:animate-pulse" />
+                <MicLevelMeter
+                  subscribe={voiceInput.subscribeLevel}
+                  barClassName="bg-rose-200"
+                  activeBarClassName="bg-rose-500"
+                />
+              </>
             )}
             <Mic size={16} />
             <span className="hidden sm:inline">{realtimeStatusLabel()}</span>
@@ -1290,10 +1306,25 @@ export default function ChatInterface({
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (
           <SubtitleBar
+            interimText={interimText}
             userText={subtitleUserText}
             assistantText={subtitleAssistantText}
             popLabel={copy.realtime.subtitlePopOut}
             closeLabel={copy.realtime.subtitleClose}
+            previewEnabled={sttPreviewOn}
+            previewToggleOnLabel={copy.realtime.previewToggleOn}
+            previewToggleOffLabel={copy.realtime.previewToggleOff}
+            previewTitleOn={copy.realtime.previewTitleOn}
+            previewTitleOff={copy.realtime.previewTitleOff}
+            onTogglePreview={() => {
+              setSttPreviewOn((prev) => {
+                const next = !prev;
+                if (typeof window !== 'undefined') {
+                  window.localStorage.setItem('prismate.sttPreview', next ? '1' : '0');
+                }
+                return next;
+              });
+            }}
             onPopOut={() => void openSubtitlePip()}
             onClose={() => setSubtitlesVisible(false)}
           />
