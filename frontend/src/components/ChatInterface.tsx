@@ -15,7 +15,7 @@ import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { buildSpeechSegments, SpeechSegment } from '@/utils/replySegments';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
-import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
+import { FolderTree, Brain, Globe, Menu, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import { useI18n } from '@/i18n/provider';
 
@@ -30,6 +30,8 @@ interface ChatInterfaceProps {
   onBack?: () => void;
   onSessionUpdate?: () => void;
   onSoulRefreshKeyChange?: (value: string) => void;
+  /** 话题模式：聚焦活动会话时 shell 顶栏隐藏，侧边栏开关并入本 header。 */
+  onToggleSidebar?: () => void;
 }
 
 interface PendingAttachment {
@@ -119,6 +121,7 @@ export default function ChatInterface({
   sessionOrigin,
   onSessionUpdate,
   onSoulRefreshKeyChange,
+  onToggleSidebar,
 }: ChatInterfaceProps) {
   const { messages: copy } = useI18n();
   const failedToLoadCharacterMessage = copy.chat.failedToLoadCharacter;
@@ -1137,6 +1140,16 @@ export default function ChatInterface({
     <div className="flex h-full flex-col bg-[linear-gradient(180deg,#f8fbff_0%,#eef4f8_52%,#f4efe8_100%)]">
       <header className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200/70 bg-white/75 px-4 py-3 backdrop-blur-xl md:px-6">
         <div className="flex min-w-0 items-center gap-3">
+          {onToggleSidebar && (
+            <button
+              type="button"
+              onClick={onToggleSidebar}
+              className="rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900"
+              aria-label="Toggle sidebar"
+            >
+              <Menu size={20} />
+            </button>
+          )}
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-[1rem] bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 shadow-sm ring-1 ring-white/70">
             {character?.avatarUrl ? (
               /* eslint-disable-next-line @next/next/no-img-element */
