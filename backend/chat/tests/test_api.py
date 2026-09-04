@@ -55,6 +55,7 @@ from chat.tasks import (
     _generate_anthropic_response,
     _generate_openai_compatible_response,
     _get_or_upload_generativeai_file,
+    _get_tools,
     _prepare_generation,
     build_research_context,
     stream_ai_response,
@@ -3374,14 +3375,12 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
     @patch('chat.tasks._get_runtime_model_config')
     @patch('chat.tasks._iter_text_chunks')
     @patch('chat.tasks.build_research_context')
-    @patch('chat.tasks._build_search_query')
-    @patch('chat.tasks._get_user_profile')
     @patch('chat.tasks._collect_memory_actions', return_value=[])
-    def test_stream_ai_response_emits_web_search_tool_event(
-        self, mock_memory_actions, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
+    def test_stream_ai_response_does_not_force_web_search_in_tool_mode(
+        self, mock_memory_actions, mock_research, mock_chunks, mock_config, mock_build
     ):
-        mock_profile.return_value = self._profile(default_enable_web_search=True)
-        mock_query.return_value = 'best ramen in tokyo'
+        """v0.1.6: 工具模式 provider 不再强制预取搜索——web_search 由模型在
+        ReAct 循环内自主触发（build_research_context 不应被调用）。"""
         mock_research.return_value = {
             'query': 'best ramen in tokyo',
             'items': [{'title': 'x', 'url': 'https://x', 'snippet': 'y'}],
@@ -3399,11 +3398,65 @@ class StreamingToolAndThinkingEventTests(ModelConfigTestMixin, TestCase):
 
         events = list(stream_ai_response(self.session, self.character))
 
+        # 没有强制 web_search 工具行；回合开始不执行预取搜索。
+        self.assertEqual(events[0]['type'], 'delta')
+        tool_events = [e for e in events if e.get('type') == 'tool']
+        self.assertNotIn('web_search', [e.get('tool') for e in tool_events])
+        mock_research.assert_not_called()
+        done_event = next(event for event in events if event['type'] == 'done')
+        self.assertEqual(done_event['tool_calls'], [])
+
+    @patch('chat.tasks._build_provider_messages')
+    @patch('chat.tasks._get_runtime_model_config')
+    @patch('chat.tasks._iter_text_chunks')
+    @patch('chat.tasks.build_research_context')
+    @patch('chat.tasks._build_search_query')
+    @patch('chat.tasks._get_user_profile')
+    @patch('chat.tasks._collect_memory_actions', return_value=[])
+    def test_stream_ai_response_keeps_prefetch_search_for_non_tool_mode(
+        self, mock_memory_actions, mock_profile, mock_query, mock_research, mock_chunks, mock_config, mock_build
+    ):
+        """v0.1.6: 非工具模式 provider（gemini）保留回合开始预取搜索作为回退。"""
+        mock_profile.return_value = self._profile(default_enable_web_search=True)
+        mock_query.return_value = 'best ramen in tokyo'
+        mock_research.return_value = {
+            'query': 'best ramen in tokyo',
+            'items': [{'title': 'x', 'url': 'https://x', 'snippet': 'y'}],
+            'provider': 'tavily',
+            'error': '',
+        }
+        mock_chunks.return_value = iter([{'type': 'delta', 'content': 'Try Ichiran.'}])
+        mock_config.return_value = {
+            'provider': 'gemini',
+            'model_name': 'm',
+            'api_key': 'k',
+            'base_url': '',
+        }
+        mock_build.return_value = (mock_config.return_value, [], [])
+
+        events = list(stream_ai_response(self.session, self.character))
+
         self.assertEqual(events[0]['type'], 'tool')
         self.assertEqual(events[0]['tool'], 'web_search')
         self.assertEqual(events[0]['arguments']['query'], 'best ramen in tokyo')
         done_event = next(event for event in events if event['type'] == 'done')
         self.assertEqual(done_event['tool_calls'][0]['tool'], 'web_search')
+
+    def test_get_tools_includes_web_search_when_enabled_and_tool_mode(self):
+        """v0.1.6: web_search 作为模型自主工具进入 ReAct 工具集——开关开启且
+        工具模式时提供；开关关闭或不支持工具模式的 provider 不提供（后者保留
+        预取回退）。"""
+        config = {'provider': 'openai_compatible', 'model_name': 'm', 'api_key': 'k', 'base_url': ''}
+        with patch('chat.tasks._web_search_enabled', return_value=True):
+            names = [t['function']['name'] for t in _get_tools(self.session, config)]
+        self.assertIn('web_search', names)
+        with patch('chat.tasks._web_search_enabled', return_value=False):
+            names = [t['function']['name'] for t in _get_tools(self.session, config)]
+        self.assertNotIn('web_search', names)
+        gemini_config = {'provider': 'gemini', 'model_name': 'm', 'api_key': 'k', 'base_url': ''}
+        with patch('chat.tasks._web_search_enabled', return_value=True):
+            names = [t['function']['name'] for t in _get_tools(self.session, gemini_config)]
+        self.assertNotIn('web_search', names)
 
     @patch('chat.tasks._execute_local_memory_tool', return_value={'entries': []})
     @patch('chat.tasks.requests.post')

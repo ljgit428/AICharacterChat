@@ -303,6 +303,35 @@ def _build_memory_tool_specs():
     ]
 
 
+def _build_web_search_tool_spec():
+    """Live web search as an AI-decided tool (v0.1.6).
+
+    搜索由模型在 ReAct 循环内自行决定是否触发、搜什么；执行结果作为 tool
+    结果回填，继续生成。取代"回合开始无条件预取 + 强制工具行"。
+    """
+    return {
+        'type': 'function',
+        'function': {
+            'name': 'web_search',
+            'description': (
+                'Search the live web for up-to-date factual information (news, weather, '
+                'current events, anything not covered by the character memory). Use it when '
+                'the conversation needs facts you do not reliably know.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': 'string',
+                        'description': 'Concise, specific search query derived from what the user asked about.',
+                    },
+                },
+                'required': ['query'],
+            },
+        },
+    }
+
+
 def _extract_text_from_content(content):
     if isinstance(content, str):
         return content.strip()
@@ -967,11 +996,22 @@ def _request_openai_compatible_completion(
     return response.json()
 
 
-def _execute_local_memory_tool(filesystem, tool_name, raw_arguments):
+def _execute_local_memory_tool(filesystem, tool_name, raw_arguments, chat_session=None):
     try:
         arguments = json.loads(raw_arguments or '{}')
     except json.JSONDecodeError:
         arguments = {}
+
+    if tool_name == 'web_search':
+        # v0.1.6: AI 自主触发的实时搜索。结果（query/items/error 结构）作为
+        # tool 结果回填给模型；调用方另行 yield 'research' 事件供 done 的
+        # research_payload 使用。
+        query = (arguments.get('query') or '').strip()
+        if not query:
+            return {'status': 'error', 'error': 'Web search requires a non-empty query'}
+        if chat_session is None:
+            return {'status': 'error', 'error': 'Web search unavailable in this context'}
+        return search_web(query, chat_session=chat_session)
 
     if tool_name == 'list_memory_files':
         return filesystem.list_memory_files(
@@ -991,7 +1031,7 @@ def _execute_local_memory_tool(filesystem, tool_name, raw_arguments):
     }
 
 
-def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, timeout=None):
+def _generate_openai_compatible_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, timeout=None, chat_session=None):
     """Run the OpenAI-compatible tool loop as a generator.
 
     Yields event dicts as they happen so streaming callers can surface tool
@@ -1089,7 +1129,12 @@ def _generate_openai_compatible_response(model_name, api_key, messages, base_url
                 filesystem,
                 tool_name=tool_name,
                 raw_arguments=raw_arguments,
+                chat_session=chat_session,
             )
+            if tool_name == 'web_search':
+                # v0.1.6: AI 自主搜索的结果同时以 research 事件上抛，随 done
+                # 的 research_payload 落库（前端研究面板 + 记忆提取上下文）。
+                yield {'type': 'research', 'payload': tool_result}
             history.append({
                 'role': 'tool',
                 'tool_call_id': tool_call.get('id', ''),
@@ -1440,7 +1485,7 @@ def _request_anthropic_completion(*, model_name, api_key, messages, base_url, to
     return response.json()
 
 
-def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, event_sink=None):
+def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=None, filesystem=None, event_sink=None, chat_session=None):
     """Run the Anthropic tool loop and return the final text.
 
     When ``event_sink`` (a list) is provided, tool calls and the final round's
@@ -1501,7 +1546,11 @@ def _generate_anthropic_response(model_name, api_key, messages, base_url, tools=
                 filesystem,
                 tool_name=tool_name,
                 raw_arguments=json.dumps(tool_arguments, ensure_ascii=False),
+                chat_session=chat_session,
             )
+            if tool_name == 'web_search' and event_sink is not None:
+                # v0.1.6: AI 自主搜索的结果以 research 事件上抛（与 openai 路径对称）。
+                event_sink.append({'type': 'research', 'payload': tool_result})
             tool_result_blocks.append({
                 'type': 'tool_result',
                 'tool_use_id': block.get('id', ''),
@@ -1588,7 +1637,7 @@ def _stream_gemini_response(model_name, api_key, prompt_or_messages, tools=None)
             yield {'type': 'delta', 'content': text}
 
 
-def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem=None):
+def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem=None, chat_session=None):
     """Yield stream events as dicts: ``{'type': 'delta', 'content': ...}``,
     ``{'type': 'thinking', 'content': ...}`` or
     ``{'type': 'tool', 'tool': ..., 'arguments': ...}``.
@@ -1617,6 +1666,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
                 base_url=runtime_config.get('base_url', ''),
                 tools=tools,
                 filesystem=filesystem,
+                chat_session=chat_session,
             ):
                 if event.get('type') == 'final_text':
                     final_parts.append(event.get('content') or '')
@@ -1645,6 +1695,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
                 tools=tools,
                 filesystem=filesystem,
                 event_sink=event_sink,
+                chat_session=chat_session,
             )
             yield from event_sink
             yield from _iter_buffered_chunks(buffered_text)
@@ -1660,7 +1711,7 @@ def _iter_text_chunks(runtime_config, prompt_or_messages, tools=None, filesystem
     raise ValueError(f"Unsupported model provider: {provider}")
 
 
-def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None, timeout=None):
+def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=None, timeout=None, chat_session=None):
     provider = runtime_config['provider']
     model_name = runtime_config['model_name']
     api_key = runtime_config['api_key']
@@ -1686,6 +1737,7 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=No
             tools=tools,
             filesystem=filesystem,
             timeout=timeout,
+            chat_session=chat_session,
         ):
             if event.get('type') == 'final_text':
                 final_parts.append(event.get('content') or '')
@@ -1701,6 +1753,7 @@ def _generate_text(runtime_config, prompt_or_messages, tools=None, filesystem=No
             base_url=runtime_config.get('base_url', ''),
             tools=tools,
             filesystem=filesystem,
+            chat_session=chat_session,
         )
 
     raise ValueError(f"Unsupported model provider: {provider}")
@@ -2261,10 +2314,14 @@ def _format_research_context(research_context):
 
 
 def _get_tools(chat_session, runtime_config, allow_memory_tools=True):
+    tools = []
     if allow_memory_tools and _supports_memory_tool_mode(runtime_config):
-        return _build_memory_tool_specs()
-
-    return []
+        tools.extend(_build_memory_tool_specs())
+    # v0.1.6: web_search 是模型自主工具，与记忆工具并列进入 ReAct 循环，
+    # 由模型在任意一轮思考中自行决定是否触发。
+    if _supports_memory_tool_mode(runtime_config) and _web_search_enabled(chat_session):
+        tools.append(_build_web_search_tool_spec())
+    return tools
 
 
 def _analyze_latest_user_media(visible_history, role_configs, text_config):
@@ -2727,7 +2784,11 @@ def _dispatch_session_title_update(chat_session, history_text, runtime_config):
     """Enqueue the title LLM call so it never blocks the streamed reply.
 
     Falls back to an inline call when no broker is reachable (dev without
-    Redis keeps working, just synchronously)."""
+    Redis keeps working, just synchronously).
+
+    v0.1.6: 流式路径在 ``done`` 之后才调用（见 ``_post_reply_dispatches``），
+    eager 内联执行也不再阻塞轮次结束。
+    """
     config_payload = {
         'provider': runtime_config.get('provider'),
         'model_name': runtime_config.get('model_name'),
@@ -2772,6 +2833,7 @@ def _finalize_ai_response(
     tool_calls=None,
     token_usage=None,
     reply_draft=None,
+    dispatch_post_work=True,
 ):
     # Event-sourced history: the assistant reply is appended as an
     # ``assistant/message`` event; the Message row is its write-through
@@ -2806,6 +2868,29 @@ def _finalize_ai_response(
         update_fields.append('last_response_latency_ms')
     chat_session.save(update_fields=update_fields)
 
+    # 收尾派发（标题/记忆/压缩）。v0.1.6：流式路径在 done 之后以
+    # blocking=False 调用，轮次结束不再被它们拖住；非流式路径保持内联。
+    if dispatch_post_work:
+        _post_reply_dispatches(
+            chat_session,
+            ai_message,
+            character,
+            runtime_config,
+            user_message=user_message,
+        )
+
+    return ai_message
+
+
+def _post_reply_dispatches(chat_session, ai_message, character, runtime_config, user_message=None):
+    """回复落库后的收尾派发：标题更新 / 长期记忆同步 / 历史压缩。
+
+    v0.1.6 从 ``_finalize_ai_response`` 抽出。流式路径在 ``done`` 事件**之后**
+    调用——轮次结束不再被这些 LLM 调用拖住；非流式 ``send_message`` 路径保持
+    ``_finalize_ai_response`` 内调用原语义（e2e 测试依赖"响应返回时记忆已
+    同步"）。刻意不用后台线程：daemon 线程持有 Django 连接会让测试库销毁偶发
+    失败；eager 内联执行发生在 done 之后，对用户侧轮次已结束。
+    """
     if user_message is not None and not chat_session.is_title_manual:
         # Name the topic exactly once: while the title is still the default,
         # generated from the full conversation opening (greeting + first user
@@ -2823,16 +2908,19 @@ def _finalize_ai_response(
     _dispatch_memory_sync(chat_session, ai_message, character)
     _maybe_dispatch_compaction(chat_session, runtime_config)
 
-    return ai_message
-
 
 def _dispatch_memory_sync(chat_session, ai_message, character):
-    """Enqueue the per-turn long-term-memory write (memory v2 §3.1).
+    """Per-turn long-term-memory write (memory v2 §3.1).
 
     Fire-and-forget: the AI reply is returned regardless of broker health.
     When the broker rejects the enqueue and ``MEMORY_SYNC_INLINE_FALLBACK``
     is enabled (dev default), the task body runs in-process so a missing
     Celery worker never silently drops memory writes.
+
+    v0.1.6: 流式路径在 ``done`` 事件**之后**才调用本函数（见
+    ``_post_reply_dispatches``），因此即使 eager 模式内联执行也不再阻塞轮次
+    结束。刻意不用后台线程：daemon 线程持有 Django 连接会让测试库销毁
+    （``Destroying test database``）偶发失败。
     """
     try:
         sync_long_term_memory.delay(
@@ -2874,7 +2962,11 @@ def _maybe_dispatch_compaction(chat_session, runtime_config):
     crosses the routed model's pressure threshold. Fire-and-forget, like
     memory sync. ``active_history_tokens`` excludes events already shadowed
     by a compaction, so a session right after compaction does not re-dispatch
-    until the retained history grows past the threshold again."""
+    until the retained history grows past the threshold again.
+
+    v0.1.6: 流式路径在 ``done`` 之后才调用（见 ``_post_reply_dispatches``），
+    eager 内联执行也不再阻塞轮次结束。
+    """
     cfg = _compaction_settings()
     if not cfg['enabled']:
         return
@@ -3039,7 +3131,11 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
             chat_session = character.chat_sessions.get(id=chat_session_id)
         if chat_session is None:
             raise ValueError('Chat session not found for response generation')
-        research_context = build_research_context(chat_session, user_message=user_message)
+        # v0.1.6: 与流式路径一致——工具模式 provider 由模型自主决定搜索，
+        # 仅不支持工具模式的 provider 保留回合开始预取。
+        research_context = {'query': '', 'items': [], 'provider': '', 'error': ''}
+        if not _supports_memory_tool_mode(_get_runtime_model_config(chat_session)):
+            research_context = build_research_context(chat_session, user_message=user_message)
         runtime_config, formatted_history, tools = _prepare_generation(
             chat_session=chat_session,
             character=character,
@@ -3053,6 +3149,7 @@ def generate_ai_response(message_id, character_id, generate_greeting=False, chat
             formatted_history,
             tools=tools,
             filesystem=CharacterMemoryFilesystem(character),
+            chat_session=chat_session,
         )
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         ai_message = _finalize_ai_response(
@@ -3618,13 +3715,18 @@ def _generate_character_os(character, raw_reasoning, runtime_config):
 
 def stream_ai_response(chat_session, character, user_message=None, generate_greeting=False):
     collected_tool_calls = []
-    # 先执行检索，再决定是否展示工具行：key 缺失/失效时搜索会失败，
-    # 此时不再假装"搜索了…"(2026-08-24 GUI 实测发现误导性假动作)。
-    research_context = build_research_context(chat_session, user_message=user_message)
-    if research_context.get('query') and not research_context.get('error'):
-        search_arguments = {'query': research_context['query']}
-        collected_tool_calls.append({'tool': 'web_search', 'arguments': search_arguments})
-        yield {'type': 'tool', 'tool': 'web_search', 'arguments': search_arguments}
+    # v0.1.6: 搜索改为模型自主工具——工具模式 provider（openai/anthropic）
+    # 在 ReAct 循环内由模型自行决定是否搜索（web_search 工具 + 结果回填）。
+    # 只有不支持工具模式的 provider（gemini）保留回合开始预取作为回退；
+    # 预取结果仅注入提示词，不再伪造"搜索了…"工具行（2026-08-24 GUI 实测
+    # 发现误导性假动作）。
+    research_context = {'query': '', 'items': [], 'provider': '', 'error': ''}
+    if not _supports_memory_tool_mode(_get_runtime_model_config(chat_session)):
+        research_context = build_research_context(chat_session, user_message=user_message)
+        if research_context.get('query') and not research_context.get('error'):
+            search_arguments = {'query': research_context['query']}
+            collected_tool_calls.append({'tool': 'web_search', 'arguments': search_arguments})
+            yield {'type': 'tool', 'tool': 'web_search', 'arguments': search_arguments}
 
 
     # Shared generation configuration: memory strategy (tools vs prefetch),
@@ -3675,11 +3777,19 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
             formatted_history,
             tools=tools,
             filesystem=CharacterMemoryFilesystem(character),
+            chat_session=chat_session,
         ):
             event_type = event.get('type')
             if event_type == 'usage':
                 # Internal bookkeeping event; folded into the done payload below.
                 collected_usage = _merge_token_usage(collected_usage, event.get('usage'))
+                continue
+            if event_type == 'research':
+                # v0.1.6: AI 自主触发的搜索结果（web_search 工具执行产物），
+                # 收进 research_context，随 done 的 research_payload 落库。
+                payload = event.get('payload') or {}
+                if payload.get('items') or payload.get('error'):
+                    research_context = payload
                 continue
             if event_type == 'delta':
                 content = event.get('content') or ''
@@ -3782,6 +3892,7 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
             tool_calls=collected_tool_calls,
             token_usage=collected_usage,
             reply_draft=draft,
+            dispatch_post_work=False,
         )
         finalized = True
 
@@ -3801,6 +3912,20 @@ def stream_ai_response(chat_session, character, user_message=None, generate_gree
             'tool_calls': ai_message.tool_calls,
             'token_usage': ai_message.token_usage,
         }
+
+        # v0.1.6：收尾派发（标题/记忆/压缩）移到 done 之后——轮次在"回复 +
+        # 心声"完成时立即结束。eager 模式下这里内联执行，但前端收到 done 已
+        # 结束轮次、不再读流；有真 worker 时 .delay() 异步。此处出错只记日志。
+        try:
+            _post_reply_dispatches(
+                chat_session,
+                ai_message,
+                character,
+                runtime_config,
+                user_message=user_message,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('Post-reply dispatch failed after done: %s', exc)
     except Exception:
         # 生成失败：保留已生成部分为 interrupted（或撤销空草稿），
         # 视图层随后发 error 事件给前端。注意 GeneratorExit（消费端断开）

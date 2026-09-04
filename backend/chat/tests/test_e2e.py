@@ -351,6 +351,50 @@ class StreamingE2ETests(ModelConfigMixin, TestCase):
         self.assertEqual(len(derived), 2)
         self.assertEqual(derived[1].content, '你好世界！')
 
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+    def test_stream_done_arrives_before_post_reply_dispatches(self):
+        """v0.1.6: done 事件在收尾派发（记忆/标题/压缩）之前到达——轮次结束
+        不再被收尾 LLM 调用拖住；派发以 blocking=False 调用（eager 模式内部
+        改投 daemon 线程，请求线程立即释放）。"""
+        fake_chunks = [
+            {'type': 'delta', 'content': '你好'},
+            {'type': 'delta', 'content': '世界！'},
+        ]
+        order = []
+
+        def _fake_dispatches(*args, **kwargs):
+            order.append('dispatch')
+
+        with (
+            patch('chat.tasks._iter_text_chunks', return_value=iter(fake_chunks)),
+            # The eager post-reply work still runs after done; keep the
+            # non-streaming completion mocked so the turn stays deterministic.
+            patch(
+                'chat.tasks._request_openai_compatible_completion',
+                return_value={'choices': [{'message': {'role': 'assistant', 'content': 'noop', 'tool_calls': []}}]},
+            ),
+            patch('chat.tasks._post_reply_dispatches', side_effect=_fake_dispatches) as mock_dispatches,
+        ):
+            response = self.client.post(
+                '/api/chat/stream_message/',
+                data=json.dumps({
+                    'character_id': self.character.id,
+                    'message': '测试 done 时序',
+                }),
+                content_type='application/json',
+            )
+            lines = [
+                json.loads(line)
+                for line in _consume_streaming(response).decode('utf-8').splitlines()
+                if line.strip()
+            ]
+
+        event_types = [line['type'] for line in lines]
+        self.assertEqual(event_types, ['session', 'delta', 'delta', 'done'])
+        # 收尾派发在 done 被消费之后才执行（生成器在 done 之后恢复运行）。
+        self.assertEqual(order, ['dispatch'])
+        mock_dispatches.assert_called_once()
+
     def test_stream_message_persists_partial_reply_after_page_closes(self):
         """增量落库 e2e：消费端中途断开（模拟关页）后，已生成的工具调用与
         部分正文已经写库，草稿保持 streaming——重开页面能看到已生成内容。"""
