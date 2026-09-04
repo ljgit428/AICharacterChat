@@ -3,7 +3,7 @@ interface ApiResponse<T> {
   error?: string;
 }
 
-import { Character, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
+import { Character, CharacterCardImportResult, ChatSession, KnowledgeAsset, MemoryEntry, MemoryExplorerEntry, MemoryExplorerFile, MemoryNarrative, MemorySnapshot, Message, MessageAttachment, ResearchPayload, TokenUsage, ToolCallInfo, UserProfile } from '@/types';
 import { ModelConfig, ModelProvider, ModelRoleAssignments, ModelRoleKey, TtsAudioOutput, TtsEngine, TtsEngineTestResult, TtsServiceSettings, TtsVoiceModel, UploadConvertRequest, WebSearchConfig, WebSearchProvider, WebSearchTestResult } from '@/types';
 import { API_BASE_URL, MEDIA_BASE_URL } from '@/constants';
 import { DEFAULT_LOCALE, normalizeLocale } from '@/i18n/messages';
@@ -1270,21 +1270,22 @@ class ApiService {
   }
 
   async login(username: string, password: string): Promise<ApiResponse<{ token: string; user_id: number; username: string }>> {
-    return this.request('/auth/login', {
+    // 尾斜杠是硬约束：POST + APPEND_SLASH 无法重定向（Django 500）。
+    return this.request('/auth/login/', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
   }
 
   async register(username: string, password: string, email?: string): Promise<ApiResponse<{ token: string; user_id: number; username: string }>> {
-    return this.request('/auth/register', {
+    return this.request('/auth/register/', {
       method: 'POST',
       body: JSON.stringify({ username, password, email }),
     });
   }
 
   async logout(): Promise<ApiResponse<{ message: string }>> {
-    return this.request('/auth/logout', {
+    return this.request('/auth/logout/', {
       method: 'POST',
     });
   }
@@ -1315,6 +1316,39 @@ class ApiService {
       return { data: { uri: data.url || data.uri, name: file.name } };
     } catch (error) {
       console.error('API image upload failed:', error);
+      return { error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  }
+
+  /** 解析上传的角色卡（PNG/JSON），返回字段预览（不创建角色）。 */
+  async importCharacterCard(file: File): Promise<ApiResponse<CharacterCardImportResult>> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return this.request<CharacterCardImportResult>('/characters/import/', {
+      method: 'POST',
+      body: formData,
+    });
+  }
+
+  /** 导出角色为 v3 角色卡（PNG 卡面带头像 / 纯 JSON），返回文件 Blob。 */
+  async exportCharacterCard(id: string, format: 'png' | 'json' = 'png'): Promise<ApiResponse<Blob>> {
+    try {
+      const token = getAuthToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Token ${token}`;
+      }
+      const response = await fetch(buildApiUrl(`/characters/${id}/export/?format=${format}`), {
+        method: 'GET',
+        headers,
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+      }
+      return { data: await response.blob() };
+    } catch (error) {
+      console.error('API character card export failed:', error);
       return { error: error instanceof Error ? error.message : 'Unknown error' };
     }
   }
