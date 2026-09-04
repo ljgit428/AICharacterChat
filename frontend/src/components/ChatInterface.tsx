@@ -669,10 +669,29 @@ export default function ChatInterface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSessionId, dispatch, failedToLoadHistoryMessage]);
 
-  const syncSessionState = async (sessionId: string) => {
-    const response = await apiService.getChatSession(sessionId);
-    if (response.data) {
+  const syncSessionState = async (sessionId: string, options?: { pollUntilTitled?: boolean }) => {
+    const pollUntilTitled = options?.pollUntilTitled ?? false;
+    let originalTitle: string | null = null;
+    const deadline = Date.now() + 20000;
+
+    // v0.1.6: 标题由后端在 done 事件之后异步生成（收尾派发）。若这里轮询，
+    // 则等自动标题落地后再刷新，避免界面一直停留在 "Chat with …" 旧值。
+    for (;;) {
+      const response = await apiService.getChatSession(sessionId);
+      if (!response.data) {
+        return;
+      }
+      const title = response.data.title || '';
+      if (originalTitle === null) {
+        originalTitle = title;
+      }
       dispatch(setChatSession(response.data as ChatSession));
+      // 标题已从默认值变为自动生成的标题（或本就不需要生成：greeting 轮/
+      // 手动标题下第一次循环即退出，零额外等待）。
+      if (!pollUntilTitled || title !== originalTitle || Date.now() > deadline) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   };
 
@@ -972,7 +991,7 @@ export default function ChatInterface({
 
       if (response.data?.chat_session_id) {
         setChatSessionId(response.data.chat_session_id);
-        await syncSessionState(response.data.chat_session_id);
+        await syncSessionState(response.data.chat_session_id, { pollUntilTitled: true });
 
         if (onSessionUpdate) {
           onSessionUpdate();
