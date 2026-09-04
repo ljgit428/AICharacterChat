@@ -169,6 +169,7 @@ class SenseVoiceProvider:
         self._model_dir = model_dir
         self._num_threads = num_threads
         self._recognizer = None
+        self._warmed = False
         self._load_lock = threading.Lock()
 
     @property
@@ -199,6 +200,9 @@ class SenseVoiceProvider:
 
     def warm_up(self):
         load_ms = self._ensure_model()
+        if self._warmed:
+            return load_ms
+        self._warmed = True
         # 空 stream 跑一次完整前向，摊掉首句的 ONNX 内存池分配。
         import numpy as np
 

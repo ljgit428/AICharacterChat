@@ -195,7 +195,11 @@ export function useVoiceInput({
   }, [emitInterim]);
 
   const submitSegment = useCallback(async (frames: Int16Array[], spokenMs: number, seq: number) => {
-    if (frames.length === 0 || spokenMs < MIN_SPEECH_MS) return;
+    if (frames.length === 0 || spokenMs < MIN_SPEECH_MS) {
+      // 无效段（咳嗽/碰撞等瞬态）：回聆听态，不进入 transcribing。
+      setStatusSafe("listening");
+      return;
+    }
     inflightRef.current = true;
     setStatusSafe("transcribing");
     try {
@@ -225,6 +229,8 @@ export function useVoiceInput({
   /** 灰色预测字：拿最近 PREVIEW_CONTEXT_MS 音频发一次识别。 */
   const maybePreview = useCallback(async (seq: number) => {
     if (!previewRef.current) return;
+    // 上一次预览还在途：跳过本次刷新（推理慢时自然降频，省 CPU）。
+    if (previewAbortRef.current) return;
     const now = performance.now();
     if (now - lastPreviewAtRef.current < REFRESH_INTERVAL_MS) return;
     lastPreviewAtRef.current = now;
@@ -239,7 +245,6 @@ export function useVoiceInput({
       previewFrames.unshift(frames[i]);
       if (bytes >= maxBytes) break;
     }
-    previewAbortRef.current?.abort();
     const controller = new AbortController();
     previewAbortRef.current = controller;
     try {
@@ -249,6 +254,10 @@ export function useVoiceInput({
       if (text) emitInterim(text);
     } catch {
       // 预览失败静默：下一次刷新会重试，最终转写兜底。
+    } finally {
+      if (previewAbortRef.current === controller) {
+        previewAbortRef.current = null;
+      }
     }
   }, [emitInterim]);
 
