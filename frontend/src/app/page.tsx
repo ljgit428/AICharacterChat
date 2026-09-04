@@ -502,15 +502,20 @@ function AIStudioLayoutContent() {
                 <Menu size={20} />
               </button>
               <div>
-                <div className="text-sm font-medium text-slate-700">
-                {currentView === 'home' && messages.shell.home}
-                {currentView === 'playground' && messages.shell.playgroundChat}
-                {currentView === 'create' && messages.shell.buildCreateNew}
-                {currentView === 'history_all' && messages.shell.historyAll}
-                </div>
-                <div className="text-xs text-slate-400">
-                  {selectedCharacterId ? messages.shell.focusedOnOneActiveCharacterSession : messages.shell.browseCharactersSessionsAndSettings}
-                </div>
+                {/* 聚焦活动角色会话时与 /chat 聊天模式一致：隐藏面包屑与描述行 */}
+                {(currentView !== 'playground' || !selectedCharacterId) && (
+                  <>
+                    <div className="text-sm font-medium text-slate-700">
+                    {currentView === 'home' && messages.shell.home}
+                    {currentView === 'playground' && messages.shell.playgroundChat}
+                    {currentView === 'create' && messages.shell.buildCreateNew}
+                    {currentView === 'history_all' && messages.shell.historyAll}
+                    </div>
+                    <div className="text-xs text-slate-400">
+                      {selectedCharacterId ? messages.shell.focusedOnOneActiveCharacterSession : messages.shell.browseCharactersSessionsAndSettings}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2">
