@@ -221,9 +221,15 @@ DEV_AUTO_LOGIN_EMAIL = env('DEV_AUTO_LOGIN_EMAIL', default='demo@example.com')
 # Realtime voice input (ASR). The package dependency is optional and lives in
 # backend/requirements-asr.txt; with it missing the endpoints degrade to a
 # readable readiness hint instead of erroring.
-ASR_PROVIDER = env('ASR_PROVIDER', default='faster_whisper')
-# base 是延迟实测后的默认档（短句中位 ~1.4s，见 docs/latency-v0.1.3.md）；
-# small 质量更好但约 3 倍延迟，追求识别质量时手动切换。
+# 默认 sense_voice：sherpa-onnx + SenseVoiceSmall int8（Owl Meeting 模型 1 同款，
+# 非自回归、纯 CPU 低延迟、原生简体+标点；模型需运行
+# backend/scripts/download_asr_models.py 下载）。
+# 回滚旧引擎：ASR_PROVIDER=faster_whisper（ASR_MODEL/DEVICE/COMPUTE_TYPE 仍生效）。
+ASR_PROVIDER = env('ASR_PROVIDER', default='sense_voice')
+ASR_NUM_THREADS = env.int('ASR_NUM_THREADS', default=2)
+SENSE_VOICE_DIR = BASE_DIR / 'ml_models' / 'asr' / 'sense-voice'
+# faster_whisper 档位（回滚用）：base 是延迟实测后的默认档（短句中位 ~1.4s，
+# 见 docs/benchmarks/latency-v0.1.3.md）。
 ASR_MODEL = env('ASR_MODEL', default='base')
 ASR_DEVICE = env('ASR_DEVICE', default='cpu')
 ASR_COMPUTE_TYPE = env('ASR_COMPUTE_TYPE', default='int8')

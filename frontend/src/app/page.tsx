@@ -495,38 +495,40 @@ function AIStudioLayoutContent() {
               </button>
             </div>
           )}
-          <header className="flex h-16 flex-shrink-0 items-center justify-between border-b border-white/70 bg-white/65 px-5 backdrop-blur-xl">
-            <div className="flex items-center gap-3">
-              <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900">
-                <span className="sr-only">Toggle sidebar</span>
-                <Menu size={20} />
-              </button>
-              <div>
-                <div className="text-sm font-medium text-slate-700">
-                {currentView === 'home' && messages.shell.home}
-                {currentView === 'playground' && messages.shell.playgroundChat}
-                {currentView === 'create' && messages.shell.buildCreateNew}
-                {currentView === 'history_all' && messages.shell.historyAll}
-                </div>
-                <div className="text-xs text-slate-400">
-                  {selectedCharacterId ? messages.shell.focusedOnOneActiveCharacterSession : messages.shell.browseCharactersSessionsAndSettings}
+          {/* 活动角色会话时 shell 顶栏与聊天 header 合并为一行：本 header
+              隐藏，侧边栏开关由 ChatInterface 的 header 接管（与 /chat 一致）。 */}
+          {(currentView !== 'playground' || !selectedCharacterId) && (
+            <header className="flex h-16 flex-shrink-0 items-center justify-between border-b border-white/70 bg-white/65 px-5 backdrop-blur-xl">
+              <div className="flex items-center gap-3">
+                <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900">
+                  <span className="sr-only">Toggle sidebar</span>
+                  <Menu size={20} />
+                </button>
+                <div className="flex items-baseline gap-2 text-sm font-medium text-slate-700">
+                  {currentView === 'home' && messages.shell.home}
+                  {currentView === 'playground' && messages.shell.playgroundChat}
+                  {currentView === 'create' && messages.shell.buildCreateNew}
+                  {currentView === 'history_all' && messages.shell.historyAll}
+                  {currentView === 'playground' && (
+                    <span className="text-xs font-normal text-slate-400">{messages.shell.browseCharactersSessionsAndSettings}</span>
+                  )}
                 </div>
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {authTokenPresent && (
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  className="hidden rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900 lg:flex"
-                  title={messages.auth.logout}
-                >
-                  <LogOut size={18} />
-                </button>
-              )}
-              <div className="rounded-full bg-white/80 px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">{APP_VERSION}</div>
-            </div>
-          </header>
+              <div className="flex items-center gap-2">
+                {authTokenPresent && (
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="hidden rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900 lg:flex"
+                    title={messages.auth.logout}
+                  >
+                    <LogOut size={18} />
+                  </button>
+                )}
+                <div className="rounded-full bg-white/80 px-3 py-1.5 text-xs text-slate-500 ring-1 ring-slate-200">{APP_VERSION}</div>
+              </div>
+            </header>
+          )}
           <div className="flex-1 overflow-hidden relative">
             {renderContent(currentView)}
           </div>
@@ -730,6 +732,7 @@ function AIStudioLayoutContent() {
               onBack={handleBackToGallery}
               onSessionUpdate={fetchChatSessions}
               onSoulRefreshKeyChange={setSoulRefreshKey}
+              onToggleSidebar={() => setIsSidebarOpen(true)}
             />
           </div>
         ) : (

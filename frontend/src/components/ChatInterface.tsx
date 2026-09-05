@@ -7,6 +7,7 @@ import { setCharacter, addMessage, setMessages, setLoading, setError, clearChat,
 import ImmersiveChatWindow from '@/components/ImmersiveChatWindow';
 import CameraPanel from '@/components/CameraPanel';
 import SubtitleBar, { SubtitleContent } from '@/components/SubtitleOverlay';
+import MicLevelMeter from '@/components/MicLevelMeter';
 import { useVoiceInput } from '@/hooks/useVoiceInput';
 import ResearchPanel from '@/components/ResearchPanel';
 import SoulPanel from '@/components/SoulPanel';
@@ -14,7 +15,7 @@ import MemoryPanel from '@/components/MemoryPanel';
 import { apiService, normalizeTokenUsage, SendMessageRequest, StreamMessageEvent } from '@/utils/api';
 import { buildSpeechSegments, SpeechSegment } from '@/utils/replySegments';
 import { AttachmentKind, getAttachmentAvailability } from '@/utils/modelCapabilities';
-import { FolderTree, Brain, Globe, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
+import { FolderTree, Brain, Globe, Menu, Mic, Monitor, Pencil, Video, Volume2 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import { useI18n } from '@/i18n/provider';
 
@@ -29,6 +30,8 @@ interface ChatInterfaceProps {
   onBack?: () => void;
   onSessionUpdate?: () => void;
   onSoulRefreshKeyChange?: (value: string) => void;
+  /** 话题模式：聚焦活动会话时 shell 顶栏隐藏，侧边栏开关并入本 header。 */
+  onToggleSidebar?: () => void;
 }
 
 interface PendingAttachment {
@@ -118,6 +121,7 @@ export default function ChatInterface({
   sessionOrigin,
   onSessionUpdate,
   onSoulRefreshKeyChange,
+  onToggleSidebar,
 }: ChatInterfaceProps) {
   const { messages: copy } = useI18n();
   const failedToLoadCharacterMessage = copy.chat.failedToLoadCharacter;
@@ -157,6 +161,10 @@ export default function ChatInterface({
   const [realtimeNotice, setRealtimeNotice] = useState<string | null>(null);
   const [asrReady, setAsrReady] = useState<{ available: boolean; hint: string } | null>(null);
   const [lastTurnLatency, setLastTurnLatency] = useState<{ firstMs: number | null; totalMs: number } | null>(null);
+  // 灰色预测字开关（Owl 低延迟模式机制）：localStorage 持久化，默认开。
+  const [sttPreviewOn, setSttPreviewOn] = useState(
+    () => typeof window !== 'undefined' && window.localStorage.getItem('prismate.sttPreview') !== '0',
+  );
   // 主模型快速切换：记录本会话内最近一次切换（PUT /model-roles 已同步服务端），
   // 未切换时回退到角色分配 / 默认配置。
   const [textModelOverrideId, setTextModelOverrideId] = useState<string | null>(null);
@@ -187,8 +195,12 @@ export default function ChatInterface({
 
   // 实时模式：转写文本直接走发送 ref（loading 中会自动排队，见 handleSendMessage），
   // 屏幕共享或摄像头开着且距上帧 ≥5s 时随本轮附带一帧（屏幕优先），让角色"看到"用户。
+  // 灰色预测字经 voiceInput.interimText 提升到本组件 state（字幕条 + PiP 窗消费）。
+  const [interimText, setInterimText] = useState('');
   const voiceInput = useVoiceInput({
     paused: isLoading,
+    preview: sttPreviewOn,
+    onInterim: setInterimText,
     onTranscribed: (text) => {
       if (!text.trim()) return;
       const attachments: PendingAttachment[] = [];
@@ -660,10 +672,29 @@ export default function ChatInterface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSessionId, dispatch, failedToLoadHistoryMessage]);
 
-  const syncSessionState = async (sessionId: string) => {
-    const response = await apiService.getChatSession(sessionId);
-    if (response.data) {
+  const syncSessionState = async (sessionId: string, options?: { pollUntilTitled?: boolean }) => {
+    const pollUntilTitled = options?.pollUntilTitled ?? false;
+    let originalTitle: string | null = null;
+    const deadline = Date.now() + 20000;
+
+    // v0.1.6: 标题由后端在 done 事件之后异步生成（收尾派发）。若这里轮询，
+    // 则等自动标题落地后再刷新，避免界面一直停留在 "Chat with …" 旧值。
+    for (;;) {
+      const response = await apiService.getChatSession(sessionId);
+      if (!response.data) {
+        return;
+      }
+      const title = response.data.title || '';
+      if (originalTitle === null) {
+        originalTitle = title;
+      }
       dispatch(setChatSession(response.data as ChatSession));
+      // 标题已从默认值变为自动生成的标题（或本就不需要生成：greeting 轮/
+      // 手动标题下第一次循环即退出，零额外等待）。
+      if (!pollUntilTitled || title !== originalTitle || Date.now() > deadline) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   };
 
@@ -963,7 +994,7 @@ export default function ChatInterface({
 
       if (response.data?.chat_session_id) {
         setChatSessionId(response.data.chat_session_id);
-        await syncSessionState(response.data.chat_session_id);
+        await syncSessionState(response.data.chat_session_id, { pollUntilTitled: true });
 
         if (onSessionUpdate) {
           onSessionUpdate();
@@ -1069,9 +1100,9 @@ export default function ChatInterface({
     const entry = subtitlePipRef.current;
     if (!entry) return;
     entry.root.render(
-      <SubtitleContent pip userText={subtitleUserText} assistantText={subtitleAssistantText} />,
+      <SubtitleContent pip interimText={interimText} userText={subtitleUserText} assistantText={subtitleAssistantText} />,
     );
-  }, [subtitleAssistantText, subtitleUserText]);
+  }, [interimText, subtitleAssistantText, subtitleUserText]);
 
   const handleTextModelChange = async (modelId: string) => {
     const response = await apiService.updateModelRoles({ text: modelId });
@@ -1109,6 +1140,16 @@ export default function ChatInterface({
     <div className="flex h-full flex-col bg-[linear-gradient(180deg,#f8fbff_0%,#eef4f8_52%,#f4efe8_100%)]">
       <header className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200/70 bg-white/75 px-4 py-3 backdrop-blur-xl md:px-6">
         <div className="flex min-w-0 items-center gap-3">
+          {onToggleSidebar && (
+            <button
+              type="button"
+              onClick={onToggleSidebar}
+              className="rounded-xl p-2 text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-900"
+              aria-label="Toggle sidebar"
+            >
+              <Menu size={20} />
+            </button>
+          )}
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-[1rem] bg-gradient-to-br from-sky-100 via-cyan-50 to-amber-50 shadow-sm ring-1 ring-white/70">
             {character?.avatarUrl ? (
               /* eslint-disable-next-line @next/next/no-img-element */
@@ -1214,7 +1255,14 @@ export default function ChatInterface({
             }`}
           >
             {(voiceInput.status === 'listening' || voiceInput.status === 'speech' || voiceInput.status === 'transcribing') && (
-              <span className="h-2 w-2 rounded-full bg-rose-500 motion-safe:animate-pulse" />
+              <>
+                <span className="h-2 w-2 rounded-full bg-rose-500 motion-safe:animate-pulse" />
+                <MicLevelMeter
+                  subscribe={voiceInput.subscribeLevel}
+                  barClassName="bg-rose-200"
+                  activeBarClassName="bg-rose-500"
+                />
+              </>
             )}
             <Mic size={16} />
             <span className="hidden sm:inline">{realtimeStatusLabel()}</span>
@@ -1290,10 +1338,25 @@ export default function ChatInterface({
 
         {realtimeOn && subtitlesVisible && !subtitlePipActive && (
           <SubtitleBar
+            interimText={interimText}
             userText={subtitleUserText}
             assistantText={subtitleAssistantText}
             popLabel={copy.realtime.subtitlePopOut}
             closeLabel={copy.realtime.subtitleClose}
+            previewEnabled={sttPreviewOn}
+            previewToggleOnLabel={copy.realtime.previewToggleOn}
+            previewToggleOffLabel={copy.realtime.previewToggleOff}
+            previewTitleOn={copy.realtime.previewTitleOn}
+            previewTitleOff={copy.realtime.previewTitleOff}
+            onTogglePreview={() => {
+              setSttPreviewOn((prev) => {
+                const next = !prev;
+                if (typeof window !== 'undefined') {
+                  window.localStorage.setItem('prismate.sttPreview', next ? '1' : '0');
+                }
+                return next;
+              });
+            }}
             onPopOut={() => void openSubtitlePip()}
             onClose={() => setSubtitlesVisible(false)}
           />

@@ -1,16 +1,37 @@
 """实时模式端点测试：ASR 转写、就绪提示、TTS 合成与角色级语音配置。
 
-全部走 mock provider——真实 faster-whisper / Genie-TTS 不进测试路径；
-延迟字段的形状在这里锁定，供前端角标与 docs/latency 记录消费。
+全部走 mock provider——真实 sherpa-onnx/faster-whisper / Genie-TTS 不进测试
+路径；延迟字段的形状在这里锁定，供前端角标与 docs/latency 记录消费。
 """
 
+import tempfile
+import wave
+from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 
+from chat import asr as chat_asr
 from chat.models import Character
+
+
+def _pcm_wav_bytes(duration_s=0.1, rate=16000, amplitude=12000):
+    """生成 16-bit mono PCM WAV，作为 sense_voice provider 的合法输入。"""
+    frame_count = int(duration_s * rate)
+    payload = (b''.join(
+        int(amplitude * ((index % 100) / 50 - 1)).to_bytes(2, 'little', signed=True)
+        for index in range(frame_count)
+    ))
+    buffer = BytesIO()
+    with wave.open(buffer, 'wb') as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(rate)
+        writer.writeframes(payload)
+    return buffer.getvalue()
 
 
 class AsrEndpointTests(TestCase):
@@ -19,7 +40,9 @@ class AsrEndpointTests(TestCase):
         self.client.force_login(self.user)
         self.url = '/api/chat/asr/'
 
-    def _post_audio(self, content=b'fake-bytes', name='clip.webm', mime='audio/webm'):
+    def _post_audio(self, content=None, name='clip.wav', mime='audio/wav'):
+        if content is None:
+            content = _pcm_wav_bytes()
         return self.client.post(self.url, {'audio': SimpleUploadedFile(name, content, content_type=mime)})
 
     def test_requires_authentication(self):
@@ -37,6 +60,11 @@ class AsrEndpointTests(TestCase):
         response = self._post_audio(mime='audio/flac', name='clip.flac')
         self.assertEqual(response.status_code, 400)
         self.assertIn('unsupported audio type', response.json()['error'])
+
+    def test_webm_rejected_for_sense_voice_provider(self):
+        # sense_voice 只收 WAV；webm 容器是 faster_whisper 回滚档的输入。
+        response = self._post_audio(content=b'fake-bytes', name='clip.webm', mime='audio/webm')
+        self.assertEqual(response.status_code, 400)
 
     def test_oversized_audio_returns_400(self):
         with patch('chat.asr.MAX_ASR_AUDIO_BYTES', 8):
@@ -75,8 +103,77 @@ class AsrEndpointTests(TestCase):
         with patch('chat.asr.asr_available', return_value=True), \
                 patch('chat.asr.transcribe_bytes', return_value=fake) as mock_transcribe:
             self.client.post(self.url, {'audio': SimpleUploadedFile(
-                'clip.wav', b'x', content_type='audio/wav'), 'language': 'en'})
+                'clip.wav', _pcm_wav_bytes(), content_type='audio/wav'), 'language': 'en'})
         self.assertEqual(mock_transcribe.call_args.kwargs['language'], 'en')
+
+
+class AsrProviderTests(TestCase):
+    """provider 层单测：WAV 解析、readiness hint、provider 感知 MIME。"""
+
+    def test_load_wav_pcm16k_mono_passthrough(self):
+        import numpy as np
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as handle:
+            handle.write(_pcm_wav_bytes(rate=16000))
+            path = handle.name
+        try:
+            samples = chat_asr._load_wav_pcm16k_mono(path)
+            self.assertEqual(samples.dtype, np.float32)
+            self.assertTrue(len(samples) > 0)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_load_wav_resamples_to_16k(self):
+        import numpy as np
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as handle:
+            handle.write(_pcm_wav_bytes(rate=44100))
+            path = handle.name
+        try:
+            samples = chat_asr._load_wav_pcm16k_mono(path)
+            # 0.1s @44.1k → 0.1s @16k ≈1600 采样（允许插值误差）。
+            self.assertAlmostEqual(len(samples), 1600, delta=8)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_load_wav_rejects_non_pcm(self):
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as handle:
+            handle.write(b'RIFFnot-a-wav')
+            path = handle.name
+        try:
+            with self.assertRaises(Exception):
+                chat_asr._load_wav_pcm16k_mono(path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_supported_mime_types_follows_provider(self):
+        with override_settings(ASR_PROVIDER='sense_voice'):
+            self.assertEqual(chat_asr.supported_mime_types(), {'audio/wav', 'audio/x-wav'})
+        with override_settings(ASR_PROVIDER='faster_whisper'):
+            self.assertIn('audio/webm', chat_asr.supported_mime_types())
+
+    def test_readiness_hints_model_download_when_files_missing(self):
+        with override_settings(ASR_PROVIDER='sense_voice'), \
+                patch('chat.asr._is_package_installed', return_value=True), \
+                patch('chat.asr._sense_voice_files_present', return_value=False):
+            body = chat_asr.readiness()
+        self.assertFalse(body['available'])
+        self.assertIn('download_asr_models', body['hint'])
+
+    def test_readiness_hints_pip_when_package_missing(self):
+        with override_settings(ASR_PROVIDER='sense_voice'), \
+                patch('chat.asr._is_package_installed', return_value=False):
+            body = chat_asr.readiness()
+        self.assertFalse(body['available'])
+        self.assertIn('requirements-asr', body['hint'])
+
+    def test_sense_voice_language_normalization(self):
+        provider = chat_asr.SenseVoiceProvider(model_dir='unused', num_threads=1)
+        self.assertEqual(provider._SUPPORTED, {'zh', 'en', 'ja', 'ko', 'yue', 'auto'})
 
 
 class AsrReadinessTests(TestCase):
